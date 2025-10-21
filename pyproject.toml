@@ -19,7 +19,7 @@ dependencies = [
     # Our packages
     "words-segmentation", # For pre-tokenization into words
     "utf8-tokenizer", # For tokenization of bytes
-    "pixel-renderer", # For text rendering into images
+    "pixel-renderer[pangocairo]", # For text rendering into images
 ]
 
 [project.optional-dependencies]

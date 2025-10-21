@@ -11,20 +11,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
 SHELL ["bash", "-lc"]
 
 # System deps (git for installs; build-essential for compiling kernels; tidy apt cache)
+# Rendering system deps (pango, cairo...)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git build-essential pkg-config && \
+    apt-get install -y --no-install-recommends git build-essential pkg-config \
+      libgirepository-1.0-1 libcairo2 gir1.2-pango-1.0 libcairo2-dev libgirepository1.0-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Install python version
 RUN conda install -y python=3.12 && conda clean -afy
 
-# Install rendering dependencies
-RUN conda install -y pycairo pygobject manimpango -c conda-forge && conda clean -afy
-
 # Install package dependencies
 RUN mkdir -p /app/welt/vision && \
-    touch /app/README.md && \
-    mkdir -p /app/font_configurator
+    touch /app/README.md
 WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 RUN pip install ".[train]"

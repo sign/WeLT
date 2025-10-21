@@ -1,7 +1,7 @@
 # Model Setup
 image_encoder_model_name_or_path: WinKawaks/vit-tiny-patch16-224
 bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
-latent_transformer_model_name_or_path: sbintuitions/tiny-lm
+latent_transformer_model_name_or_path: EleutherAI/pythia-31m
 bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
 
 # Dataset setup

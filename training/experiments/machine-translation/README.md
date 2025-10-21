@@ -19,7 +19,7 @@ python run_clm.py \
 
 Compared to our model setup:
 ```shell
-python train.py \
+python -m training.train \
     --image_encoder_model_name_or_path WinKawaks/vit-tiny-patch16-224 \
     --bytes_encoder_model_name_or_path prajjwal1/bert-tiny \
     --latent_transformer_model_name_or_path EleutherAI/pythia-70m \

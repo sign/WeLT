@@ -31,7 +31,6 @@ Install dependencies:
 ```shell
 conda create -n welt python=3.12 -y
 conda activate welt
-conda install -c conda-forge pycairo pygobject manimpango -y
 pip install ".[dev]"
 ```
 
@@ -91,6 +90,11 @@ On the bytes decoder level, we support all classical decoding algorithms support
 
 See [open issues](https://github.com/search?q=repo%3Asign%2FWeLT+%22%2Fissues%2F%22&type=code) 
 and [TODOs](https://github.com/search?q=repo%3Asign%2FWeLT%20TODO&type=code) in the codebase.
+
+During the creation of this repository, we created several others to support it:
+- [`sign/words-segmentation`](https://github.com/sign/words-segmentation) as a universal word level pretokenizer.
+- [`sign/utf8-tokenizer`](https://github.com/sign/utf8-tokenizer) as a robust byte-level tokenizer.
+- [`sign/pixel-renderer`](https://github.com/sign/pixel-renderer) as a reproducible text-to-image renderer.
 
 > [!WARNING]
 > Training runs are experimental until core issues are resolved.

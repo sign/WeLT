@@ -16,26 +16,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup Miniconda
-        uses: conda-incubator/setup-miniconda@v3
-        with:
-          auto-activate-base: true
-          python-version: "3.12"
-          channels: conda-forge,defaults
-          channel-priority: true
-
-      - name: Install Conda Dependencies
-        shell: bash -l {0}
+      - name: Install rendering system dependencies
         run: |
-          conda install python=3.12 -y
-          conda install -c conda-forge pycairo pygobject manimpango -y
+          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list{,.d/*.list,.d/*.sources} 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y libgirepository-1.0-1 libcairo2 gir1.2-pango-1.0 pkg-config libcairo2-dev libgirepository1.0-dev
 
-      - name: Install Package
-        shell: bash -l {0}
-        run: pip install ".[dev]"
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6.5.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          activate-environment: true
 
-      - name: Test Code
-        shell: bash -l {0}
+      - name: Install dependencies
+        run: uv pip install ".[dev]"
+
+      - name: Test code
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: pytest -n auto --dist loadscope
+        run: uv run pytest -n auto --dist loadscope
+
