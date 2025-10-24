@@ -2,8 +2,8 @@
 import torch
 from cachetools import LRUCache
 from datasets import Dataset
-from pixel_renderer import render_text
-from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
+from pixel_renderer import PixelRendererProcessor
+from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin, AutoProcessor, AutoImageProcessor
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
 
@@ -18,20 +18,28 @@ from welt.noop import NoopImageProcessor
 class TextImageProcessor(ProcessorMixin):
     name = "text-image-processor"
 
-    attributes = ["pretokenizer", "tokenizer", "image_processor"]
+    attributes = [
+        "pretokenizer",
+        "tokenizer",
+        "renderer",
+        "image_processor"
+    ]
     pretokenizer_class = "AutoTokenizer"
     tokenizer_class = "AutoTokenizer"
+    renderer_class = "PixelRendererProcessor"
     image_processor_class = "AutoImageProcessor"
 
     def __init__(self,
                  pretokenizer: PreTrainedTokenizer,
                  tokenizer: UTF8Tokenizer,
+                 renderer: PixelRendererProcessor,
                  image_processor: ImageProcessingMixin,
                  max_seq_length: int = 128,
                  max_word_length: int = 32,
                  cache_size: int = 10000):
         super().__init__(pretokenizer=pretokenizer,
                          tokenizer=tokenizer,
+                         renderer=renderer,
                          image_processor=image_processor)
 
         assert tokenizer.bos_token_id is not None, "Tokenizer must have a BOS token"
@@ -39,7 +47,9 @@ class TextImageProcessor(ProcessorMixin):
 
         self.pretokenizer = pretokenizer
         self.tokenizer = tokenizer
+        self.renderer = renderer
         self.image_processor = image_processor
+
         self.max_word_length = max_word_length
         self.max_seq_length = max_seq_length
         self.cache_size = cache_size
@@ -52,7 +62,7 @@ class TextImageProcessor(ProcessorMixin):
 
         images = [self.images_cache.get(text, None) for text in texts]
         missing_texts = [(i, texts[i]) for i, v in enumerate(images) if v is None]
-        renders = (render_text(text) for _, text in missing_texts)
+        renders = (self.renderer.render_text(text) for _, text in missing_texts)
         processed = (self.image_processor(image, do_center_crop=False, do_resize=False, return_tensors="pt")
                      for image in renders)
         processed = (p.pixel_values[0] for p in processed)
@@ -183,3 +193,4 @@ class TextImageProcessor(ProcessorMixin):
             new_batch[key] = [d[key] for d in dicts]
 
         return new_batch
+
