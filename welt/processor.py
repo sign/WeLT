@@ -3,7 +3,7 @@ import torch
 from cachetools import LRUCache
 from datasets import Dataset
 from pixel_renderer import PixelRendererProcessor
-from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin, AutoProcessor, AutoImageProcessor
+from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
 
