@@ -305,7 +305,7 @@ def test_processor_save_and_load_works(processor):
             assert getattr(new_processor, attr).__class__.__name__ == getattr(processor, attr).__class__.__name__
 
 
-def test_processor_save_and_load_works_without_image_processor():
+def test_processor_save_and_load_works_without_image_processor(renderer):
     processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(),
         tokenizer=UTF8Tokenizer(),
