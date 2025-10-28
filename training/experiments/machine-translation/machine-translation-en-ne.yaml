@@ -1,0 +1,51 @@
+# Model Setup
+image_encoder_model_name_or_path: WinKawaks/vit-tiny-patch16-224
+bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
+latent_transformer_model_name_or_path: sbintuitions/tiny-lm
+bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
+
+# Dataset setup
+dataset_name: Helsinki-NLP/opus-100
+dataset_config_name: en-ne
+dataset_text_template: "<en>\x0E{translation[en]}\x0F<ne> {translation[ne]}"
+max_sequence_length: 128
+max_word_length: 16
+
+max_train_samples: 100_000
+max_eval_samples: 64
+
+# Data Loader
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 4
+dataloader_pin_memory: true
+dataloader_persistent_workers: true
+
+# Training setup
+remove_unused_columns: false # Necessary
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+auto_find_batch_size: true
+output_dir: ./output/machine-translation-en-ne
+overwrite_output_dir: true
+do_train: true
+max_steps: 1000
+learning_rate: 3.0e-4
+optim: adamw_torch_fused
+
+# Evaluation
+do_eval: true
+eval_on_start: true
+eval_strategy: steps
+eval_steps: 100
+metric_for_best_model: accuracy
+
+# Logging
+logging_steps: 10
+logging_strategy: steps
+include_tokens_per_second: true
+include_num_input_tokens_seen: true
+# report_to: wandb
+
+# Dtype
+bf16: true
+dtype: bfloat16
