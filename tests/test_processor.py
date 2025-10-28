@@ -26,15 +26,6 @@ expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask", "
 expected_keys = expected_tensor_keys
 
 
-def test_processor_save_and_load_works(processor):
-    with tempfile.TemporaryDirectory() as temp_dir:
-        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
-        new_processor = TextImageProcessor.from_pretrained(temp_dir)
-
-        assert new_processor.tokenizer is not None
-        assert new_processor.image_processor is not None
-
-
 def test_processor_multiprocessing_pickle(processor):
     # Processor should be pickleable for multiprocessing
     pickle.dumps(processor)
@@ -162,6 +153,7 @@ def test_get_words_and_labels_packed_vs_unpacked(processor):
 
     assert labels_packed == ['hello world test', 'world test', 'test', '']
     assert labels_unpacked == ['hello ', 'world ', 'test', '']
+
 
 def test_render_images_shape(processor):
     texts = ["short", "a bit longer text"]
@@ -293,6 +285,16 @@ def test_processor_works_on_packed_sequence(processor):
         assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
 
 
+def test_processor_save_and_load_works(processor):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
+        new_processor = TextImageProcessor.from_pretrained(temp_dir)
+
+        for attr in processor.attributes:
+            assert getattr(new_processor, attr) is not None
+            assert getattr(new_processor, attr).__class__.__name__ == getattr(processor, attr).__class__.__name__
+
+
 def test_processor_save_and_load_works_without_image_processor():
     processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(),
@@ -302,8 +304,6 @@ def test_processor_save_and_load_works_without_image_processor():
     with tempfile.TemporaryDirectory() as temp_dir:
         processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
         new_processor = TextImageProcessor.from_pretrained(temp_dir)
-        print(new_processor.image_processor)
-        print(new_processor.image_processor.to_dict())
         assert isinstance(new_processor.image_processor, NoopImageProcessor)
 
 
