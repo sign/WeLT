@@ -296,21 +296,16 @@ def test_processor_works_on_packed_sequence(processor):
 
 
 def test_processor_save_and_load_works(processor):
-    with tempfile.TemporaryDirectory(delete=False) as temp_dir:
-        print("temp_dir", temp_dir)
+    with tempfile.TemporaryDirectory() as temp_dir:
         processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
         new_processor = TextImageProcessor.from_pretrained(temp_dir)
 
-        assert new_processor.pretokenizer is not None
-        assert new_processor.tokenizer.__class__.__name__ == "WordsSegmentationTokenizer"
-
-        assert new_processor.renderer is not None
-        # TODO assert class names https://github.com/huggingface/transformers/issues/41816
-        assert new_processor.tokenizer is not None
-        assert new_processor.image_processor is not None
+        for attr in processor.attributes:
+            assert getattr(new_processor, attr) is not None
+            assert getattr(new_processor, attr).__class__.__name__ == getattr(processor, attr).__class__.__name__
 
 
-def test_processor_save_and_load_works_without_image_processor(renderer):
+def test_processor_save_and_load_works_without_image_processor():
     processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(),
         tokenizer=UTF8Tokenizer(),
