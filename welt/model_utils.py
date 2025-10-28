@@ -2,6 +2,9 @@ import importlib.util
 from functools import partial
 
 import torch
+from font_download import FontConfig
+from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
+from pixel_renderer import PixelRendererProcessor
 from transformers import (
     AutoConfig,
     AutoImageProcessor,
@@ -142,9 +145,13 @@ def setup_model(
         print("Using pretokenizer: WordsSegmentationTokenizer")
         pretokenizer = WordsSegmentationTokenizer(max_bytes=max_bytes)
 
+    font_config = FontConfig(sources=FONTS_NOTO_SANS)
+    renderer = PixelRendererProcessor(font=font_config)
+
     processor = TextImageProcessor(
         pretokenizer=pretokenizer,
         tokenizer=tokenizer,
+        renderer=renderer,
         image_processor=image_processor,
         max_seq_length=max_seq_length,
         max_word_length=max_word_length,

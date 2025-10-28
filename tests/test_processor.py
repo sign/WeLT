@@ -4,6 +4,9 @@ import tempfile
 import pytest
 import torch
 from datasets import Dataset
+from font_download import FontConfig
+from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
+from pixel_renderer import PixelRendererProcessor
 from trl.data_utils import pack_dataset
 from utf8_tokenizer.control import ControlTokens
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
@@ -20,19 +23,16 @@ def processor():
     return processor
 
 
+@pytest.fixture(scope="module")
+def renderer():
+    font_config = FontConfig(sources=FONTS_NOTO_SANS)
+    return PixelRendererProcessor(font=font_config)
+
+
 expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask", "position_ids",
                         "labels_input", "labels_attention_mask", "labels_output",
                         "input_images", "input_images_dimensions"]
 expected_keys = expected_tensor_keys
-
-
-def test_processor_save_and_load_works(processor):
-    with tempfile.TemporaryDirectory() as temp_dir:
-        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
-        new_processor = TextImageProcessor.from_pretrained(temp_dir)
-
-        assert new_processor.tokenizer is not None
-        assert new_processor.image_processor is not None
 
 
 def test_processor_multiprocessing_pickle(processor):
@@ -163,12 +163,13 @@ def test_get_words_and_labels_packed_vs_unpacked(processor):
     assert labels_packed == ['hello world test', 'world test', 'test', '']
     assert labels_unpacked == ['hello ', 'world ', 'test', '']
 
+
 def test_render_images_shape(processor):
     texts = ["short", "a bit longer text"]
     renders, dimensions = processor.render_texts(texts)
 
-    assert renders.shape == (2, 3, 16, 160)
-    assert torch.equal(dimensions, torch.tensor([[16, 64], [16, 160]]))
+    assert renders.shape == (2, 3, 16, 112)
+    assert torch.equal(dimensions, torch.tensor([[16, 48], [16, 112]]))
 
 
 def test_pretokenize_splits_control_tokens(processor):
@@ -192,13 +193,14 @@ def test_pretokenize_multiple_whitespace(processor):
     assert words == [ControlTokens.StartOfText, "def ", "foo():\n", " " * 8, 'return ', '"bar" ']
 
 
-def test_get_words_and_labels_packed_vs_unpacked_respect_max_word_length(processor):
+def test_get_words_and_labels_packed_vs_unpacked_respect_max_word_length(processor, renderer):
     text = "this is a long-test"
     words = processor.pretokenize(text)
 
     new_processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(),
         tokenizer=processor.tokenizer,
+        renderer=renderer,
         image_processor=processor.image_processor,
         max_word_length=3
     )
@@ -293,17 +295,27 @@ def test_processor_works_on_packed_sequence(processor):
         assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
 
 
-def test_processor_save_and_load_works_without_image_processor():
-    processor = TextImageProcessor(
-        pretokenizer=WordsSegmentationTokenizer(),
-        tokenizer=UTF8Tokenizer(),
-        image_processor=NoopImageProcessor())
-
+def test_processor_save_and_load_works(processor):
     with tempfile.TemporaryDirectory() as temp_dir:
         processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
         new_processor = TextImageProcessor.from_pretrained(temp_dir)
-        print(new_processor.image_processor)
-        print(new_processor.image_processor.to_dict())
+
+        for attr in processor.attributes:
+            assert getattr(new_processor, attr) is not None
+            assert getattr(new_processor, attr).__class__.__name__ == getattr(processor, attr).__class__.__name__
+
+
+def test_processor_save_and_load_works_without_image_processor(renderer):
+    processor = TextImageProcessor(
+        pretokenizer=WordsSegmentationTokenizer(),
+        tokenizer=UTF8Tokenizer(),
+        renderer=renderer,
+        image_processor=NoopImageProcessor())
+
+    with tempfile.TemporaryDirectory(delete=False) as temp_dir:
+        print(temp_dir)
+        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
+        new_processor = TextImageProcessor.from_pretrained(temp_dir)
         assert isinstance(new_processor.image_processor, NoopImageProcessor)
 
 
