@@ -177,7 +177,7 @@ def patch_vit_zero_pad_mask(model: ViTModel, pad_value: float = 0.0, tol: float 
     # ---- encoder wrapper: attach compact pair mask to every attention module for this call ----
     orig_enc_forward = model.encoder.forward
 
-    def enc_forward_with_pairmask(self, hidden_states, head_mask=None, *args, **kwargs):
+    def enc_forward_with_pairmask(self, hidden_states, *args, **kwargs):
         # Use compact (B,1,L,L) mask stored by model.forward
         pair_mask = getattr(model, "_pre_softmax_pair_mask", None)
 
@@ -187,7 +187,7 @@ def patch_vit_zero_pad_mask(model: ViTModel, pad_value: float = 0.0, tol: float 
                 attn._pre_softmax_pair_mask = pair_mask  # type: ignore[attr-defined]
 
         try:
-            return orig_enc_forward(hidden_states, head_mask=head_mask, *args, **kwargs)
+            return orig_enc_forward(hidden_states, *args, **kwargs)
         finally:
             if pair_mask is not None:
                 for lyr in self.layer:

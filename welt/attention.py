@@ -34,7 +34,7 @@ def get_shift_blocks(words: list[str]):
                     "Skipping self-attention block.",
                     stacklevel=2)
             else:
-                yield (shift_out_idx, i)
+                yield shift_out_idx, i
                 shift_out_idx = None
 
     if shift_out_idx is not None:
@@ -47,7 +47,7 @@ def get_shift_blocks(words: list[str]):
 def add_self_attention_blocks(mask: torch.Tensor, words: list[str]) -> None:
     # Attention blocks (PrefixLM / MAS) are surrounded by <ShiftOut> and <ShiftIn> tokens (`\xOE` ... `\x0F`).
     for start, end in get_shift_blocks(words):
-        mask[0, start:start + end, start:start + end] = 1
+        mask[0, start:end + 1, start:end + 1] = 1
 
 
 def get_attention_mask_for_packed_sequence(seq_lengths: list[int], words: list[str] = None) -> torch.Tensor:

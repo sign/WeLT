@@ -129,7 +129,7 @@ def test_add_self_attention_blocks_single_token_block():
     add_self_attention_blocks(mask, words)
 
     expected = torch.zeros((1, 3, 3), dtype=torch.bool)
-    expected[0, 0:1, 0:1] = True
+    expected[0, 0:2, 0:2] = True
 
     assert torch.equal(mask, expected)
 
