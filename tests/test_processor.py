@@ -321,30 +321,24 @@ def test_processor_save_and_load_works_without_image_processor(renderer):
 
 def test_labels_masked_in_shift_blocks_packed(processor):
     """Test that labels are empty for tokens inside shift blocks (except ShiftIn itself)."""
-    words = [
-        ControlTokens.StartOfText,
-        "<en>", ControlTokens.ShiftOut, "hello", ControlTokens.ShiftIn,
-        "<he>", "שלום"
-    ]
+    # Use f-string template and let processor segment into words
+    text = f"<en>{ControlTokens.ShiftOut}hello{ControlTokens.ShiftIn}<he> שלום"
+    words = processor.pretokenize(text)
 
-    labels = processor.get_sequence_labels(words, pack=True)
+    labels = processor.get_sequence_labels(words, pack=False)
 
-    # Expected behavior:
-    # - BOS token: should predict the rest
-    # - "<en>": should predict the rest
-    # - ShiftOut: inside block, no label
-    # - "hello": inside block, no label
-    # - ShiftIn: should predict next word (exits the block)
-    # - "<he>": should predict the rest
-    # - "שלום": second-to-last, gets rstripped to empty
+    # Expected: BOS, "<en>", SO, "hello", SI, "<he> ", "שלום "
+    # Labels should be empty for tokens inside shift blocks (SO and "hello")
+    # ShiftIn keeps its label to predict next word
 
-    assert labels[0]  # BOS should have label
-    assert labels[1]  # "<en>" should have label
-    assert labels[2] == ""  # ShiftOut should have empty label (inside block)
-    assert labels[3] == ""  # "hello" should have empty label (inside block)
-    assert labels[4]  # ShiftIn should have label (to predict next word)
-    assert labels[5]  # "<he>" should have label
-    assert labels[6] == ""  # "שלום" is second-to-last, rstripped to empty
+    # Check exact label content
+    assert labels[0] == "<en>"  # BOS -> "<en>"
+    assert labels[1] == ControlTokens.ShiftOut  # "<en>" -> SO
+    assert labels[2] == ""  # SO -> "hello" (inside block, masked)
+    assert labels[3] == ""  # "hello" -> SI (inside block, masked)
+    assert labels[4] == "<he> "  # SI -> "<he> " (exits block, has label)
+    assert labels[5] == "שלום"  # "<he> " -> "שלום " (rstripped)
+    assert labels[6] == ""  # Last token always empty
 
 
 def test_labels_masked_in_shift_blocks_unpacked(processor):
