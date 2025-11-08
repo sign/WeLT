@@ -101,6 +101,21 @@ class TextImageProcessor(ProcessorMixin):
                            desc="Pretokenizing texts into 'words'")
 
     def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None, pack=True) -> list[str]:
+        """
+        Generate labels for word-level sequences.
+        
+        Tokens inside shift blocks (between ShiftOut and ShiftIn control tokens) are masked
+        with empty labels to prevent training on "known" tokens that are already visible via
+        self-attention. The ShiftIn token itself keeps its label to predict the next word.
+        
+        Args:
+            words: List of word strings to generate labels for
+            seq_lengths: Optional list of sequence lengths for packed sequences
+            pack: If True, use packed mode (longer context labels), else unpacked (next word only)
+            
+        Returns:
+            List of label strings corresponding to each word
+        """
         if seq_lengths is None:
             seq_lengths = [len(words)]
 
