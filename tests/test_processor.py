@@ -336,7 +336,7 @@ def test_labels_masked_in_shift_blocks_packed(processor):
     # - "hello": inside block, no label
     # - ShiftIn: should predict next word (exits the block)
     # - "<he>": should predict the rest
-    # - "שלום": should predict the rest
+    # - "שלום": second-to-last, gets rstripped to empty
     # - " ": last token, empty label
     
     assert labels[0]  # BOS should have label
@@ -345,7 +345,7 @@ def test_labels_masked_in_shift_blocks_packed(processor):
     assert labels[3] == ""  # "hello" should have empty label (inside block)
     assert labels[4]  # ShiftIn should have label (to predict next word)
     assert labels[5]  # "<he>" should have label
-    assert labels[6]  # "שלום" should have label
+    assert labels[6] == ""  # "שלום" is second-to-last, rstripped to empty
     assert labels[7] == ""  # Last token always has empty label
 
 
@@ -364,12 +364,12 @@ def test_labels_masked_in_shift_blocks_unpacked(processor):
     # - Inside shift blocks, labels should be empty except for ShiftIn
     
     assert labels[0]  # BOS -> "<en>"
-    assert labels[1]  # "<en>" -> ShiftOut (this is tricky, ShiftOut is next)
+    assert labels[1]  # "<en>" -> ShiftOut
     assert labels[2] == ""  # ShiftOut -> "hello" (inside block, no label)
     assert labels[3] == ""  # "hello" -> ShiftIn (inside block, no label)
     assert labels[4]  # ShiftIn -> "<he>" (exits block, should have label)
     assert labels[5]  # "<he>" -> "שלום"
-    assert labels[6]  # "שלום" -> " "
+    assert labels[6] == ""  # "שלום" -> " " (second-to-last, rstripped)
     assert labels[7] == ""  # Last token always has empty label
 
 
@@ -394,7 +394,7 @@ def test_multiple_shift_blocks(processor):
     assert labels[4]  # "middle" (normal token)
     assert labels[5] == ""  # ShiftOut (second block)
     assert labels[6] == ""  # "second" (inside block)
-    assert labels[7]  # ShiftIn (exits second block)
+    assert labels[7] == ""  # ShiftIn (second-to-last, rstripped)
     assert labels[8] == ""  # Last token
 
 
