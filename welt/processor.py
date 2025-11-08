@@ -143,9 +143,8 @@ class TextImageProcessor(ProcessorMixin):
                 # Next word as label, last word has no label
                 raw_labels = words[offset + 1:offset + length] + [""]
                 # Truncate labels to max_word_length (characters, not bytes)
-                segment_labels = [label[:self.max_word_length] for label in raw_labels]
+                labels += [label[:self.max_word_length] for label in raw_labels]
 
-                labels += segment_labels
                 # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
                 labels[-2] = labels[-2].rstrip()  # Remove last trailing space to avoid generating it
 
