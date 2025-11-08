@@ -239,5 +239,20 @@ def test_model_from_pretrained_works_without_image_encoder():
             f"Number of parameters mismatch: {original_num_parameters:,} vs {loaded_num_parameters:,}"
 
 
+def test_model_from_pretrained_works_without_bytes_encoder():
+    """Test that the model can be saved and loaded without bytes encoder."""
+    model, processor, collator = setup_model(bytes_encoder_name=None)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        original_num_parameters = num_model_params(model)
+        model.save_pretrained(save_directory=temp_dir, push_to_hub=False)
+
+        new_model = WordLatentTransformer.from_pretrained(temp_dir)
+        loaded_num_parameters = num_model_params(new_model)
+
+        assert original_num_parameters == loaded_num_parameters, \
+            f"Number of parameters mismatch: {original_num_parameters:,} vs {loaded_num_parameters:,}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
