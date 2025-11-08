@@ -324,21 +324,20 @@ def test_labels_masked_in_shift_blocks_packed(processor):
     words = [
         ControlTokens.StartOfText,
         "<en>", ControlTokens.ShiftOut, "hello", ControlTokens.ShiftIn,
-        "<he>", "שלום", " "
+        "<he>", "שלום"
     ]
-    
+
     labels = processor.get_sequence_labels(words, pack=True)
-    
+
     # Expected behavior:
     # - BOS token: should predict the rest
-    # - "<en>": should predict the rest  
+    # - "<en>": should predict the rest
     # - ShiftOut: inside block, no label
     # - "hello": inside block, no label
     # - ShiftIn: should predict next word (exits the block)
     # - "<he>": should predict the rest
     # - "שלום": second-to-last, gets rstripped to empty
-    # - " ": last token, empty label
-    
+
     assert labels[0]  # BOS should have label
     assert labels[1]  # "<en>" should have label
     assert labels[2] == ""  # ShiftOut should have empty label (inside block)
@@ -346,7 +345,6 @@ def test_labels_masked_in_shift_blocks_packed(processor):
     assert labels[4]  # ShiftIn should have label (to predict next word)
     assert labels[5]  # "<he>" should have label
     assert labels[6] == ""  # "שלום" is second-to-last, rstripped to empty
-    assert labels[7] == ""  # Last token always has empty label
 
 
 def test_labels_masked_in_shift_blocks_unpacked(processor):
@@ -354,48 +352,50 @@ def test_labels_masked_in_shift_blocks_unpacked(processor):
     words = [
         ControlTokens.StartOfText,
         "<en>", ControlTokens.ShiftOut, "hello", ControlTokens.ShiftIn,
-        "<he>", "שלום", " "
+        "<he>", "שלום"
     ]
-    
+
     labels = processor.get_sequence_labels(words, pack=False)
-    
+
     # Expected behavior (unpacked mode):
     # - Each token predicts the next token
     # - Inside shift blocks, labels should be empty except for ShiftIn
-    
+
     assert labels[0]  # BOS -> "<en>"
     assert labels[1]  # "<en>" -> ShiftOut
     assert labels[2] == ""  # ShiftOut -> "hello" (inside block, no label)
     assert labels[3] == ""  # "hello" -> ShiftIn (inside block, no label)
     assert labels[4]  # ShiftIn -> "<he>" (exits block, should have label)
     assert labels[5]  # "<he>" -> "שלום"
-    assert labels[6] == ""  # "שלום" -> " " (second-to-last, rstripped)
-    assert labels[7] == ""  # Last token always has empty label
+    assert labels[6] == ""  # "שלום" -> (second-to-last, rstripped)
 
 
 def test_multiple_shift_blocks(processor):
     """Test handling of multiple shift blocks in a sequence."""
     words = [
         ControlTokens.StartOfText,
-        ControlTokens.ShiftOut, "first", ControlTokens.ShiftIn,
-        "middle",
-        ControlTokens.ShiftOut, "second", ControlTokens.ShiftIn,
-        " "
+        ControlTokens.ShiftOut, "first", "block", ControlTokens.ShiftIn,
+        "middle", "token",
+        ControlTokens.ShiftOut, "second", "block", ControlTokens.ShiftIn,
+        "end"
     ]
-    
+
     labels = processor.get_sequence_labels(words, pack=True)
-    
+
     # ShiftOut and content inside blocks should have empty labels
     # ShiftIn tokens should have labels (to predict next word)
     assert labels[0]  # BOS
     assert labels[1] == ""  # ShiftOut (first block)
     assert labels[2] == ""  # "first" (inside block)
-    assert labels[3]  # ShiftIn (exits first block)
-    assert labels[4]  # "middle" (normal token)
-    assert labels[5] == ""  # ShiftOut (second block)
-    assert labels[6] == ""  # "second" (inside block)
-    assert labels[7] == ""  # ShiftIn (second-to-last, rstripped)
-    assert labels[8] == ""  # Last token
+    assert labels[3] == ""  # "block" (inside block)
+    assert labels[4]  # ShiftIn (exits first block)
+    assert labels[5]  # "middle" (normal token)
+    assert labels[6]  # "token" (normal token)
+    assert labels[7] == ""  # ShiftOut (second block)
+    assert labels[8] == ""  # "second" (inside block)
+    assert labels[9] == ""  # "block" (inside block)
+    assert labels[10]  # ShiftIn (exits second block)
+    assert labels[11] == ""  # "end" (second-to-last, rstripped)
 
 
 if __name__ == "__main__":

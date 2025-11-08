@@ -7,11 +7,10 @@ from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMix
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
 
-from utf8_tokenizer.control import ControlTokens
-
 from welt.attention import (
     get_attention_mask_for_packed_sequence,
     get_position_ids_for_packed_sequence,
+    get_shift_blocks,
 )
 from welt.collator import collate_fn, stack_pad_tensors
 from welt.noop import NoopImageProcessor
@@ -103,16 +102,16 @@ class TextImageProcessor(ProcessorMixin):
     def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None, pack=True) -> list[str]:
         """
         Generate labels for word-level sequences.
-        
+
         Tokens inside shift blocks (between ShiftOut and ShiftIn control tokens) are masked
         with empty labels to prevent training on "known" tokens that are already visible via
         self-attention. The ShiftIn token itself keeps its label to predict the next word.
-        
+
         Args:
             words: List of word strings to generate labels for
             seq_lengths: Optional list of sequence lengths for packed sequences
             pack: If True, use packed mode (longer context labels), else unpacked (next word only)
-            
+
         Returns:
             List of label strings corresponding to each word
         """
@@ -129,63 +128,33 @@ class TextImageProcessor(ProcessorMixin):
                 segment_words = words[offset:offset + length]
                 text = "".join(segment_words)
                 label_idx = 0
-                
-                # Track if we're inside a shift block
-                in_shift_block = False
-                
-                for i, word in enumerate(segment_words):
+
+                for word in segment_words:
                     label_idx += len(word)
-                    
-                    # Check for shift tokens
-                    if word == ControlTokens.ShiftOut:
-                        in_shift_block = True
-                    
+
                     # For efficiency, we don't just use the next word as label, but a longer token string
                     # max_word_length characters, not bytes, will be trimmed by the tokenizer later
                     label = text[label_idx:label_idx + self.max_word_length]
                     # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
                     label = label.rstrip()  # Remove trailing spaces to avoid generating them
-                    
-                    # If we're in a shift block (known tokens), don't generate labels for them
-                    # except for the ShiftIn token itself which should predict the next word
-                    if in_shift_block and word != ControlTokens.ShiftIn:
-                        label = ""
-                    
+
                     labels.append(label)
-                    
-                    # Check if we're exiting the shift block
-                    if word == ControlTokens.ShiftIn:
-                        in_shift_block = False
             else:
                 # Next word as label, last word has no label
                 raw_labels = words[offset + 1:offset + length] + [""]
                 # Truncate labels to max_word_length (characters, not bytes)
                 segment_labels = [label[:self.max_word_length] for label in raw_labels]
-                
-                # Track if we're inside a shift block
-                in_shift_block = False
-                
-                for i, word in enumerate(words[offset:offset + length]):
-                    # Check for shift tokens
-                    if word == ControlTokens.ShiftOut:
-                        in_shift_block = True
-                    
-                    # If we're in a shift block (known tokens), don't generate labels for them
-                    # except for the ShiftIn token itself which should predict the next word
-                    if in_shift_block and word != ControlTokens.ShiftIn:
-                        segment_labels[i] = ""
-                    
-                    # Check if we're exiting the shift block
-                    if word == ControlTokens.ShiftIn:
-                        in_shift_block = False
-                
-                # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
-                if length >= 2 and segment_labels[-2]:  # Only rstrip if label is not empty
-                    segment_labels[-2] = segment_labels[-2].rstrip()  # Remove last trailing space to avoid generating it
-                
+
                 labels += segment_labels
+                # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
+                labels[-2] = labels[-2].rstrip()  # Remove last trailing space to avoid generating it
 
             offset += length
+
+        # Mask labels inside shift blocks (except for ShiftIn token)
+        for start, end in get_shift_blocks(words):
+            for i in range(start, end):  # Excludes end (ShiftIn token)
+                labels[i] = ""
 
         return labels
 
