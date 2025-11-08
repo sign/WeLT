@@ -313,7 +313,6 @@ class WordLatentTransformer(PreTrainedModel):
 
         current_pack_embeds = []
         current_pack_masks = []
-        current_pack_indices = []
         current_length = 0
 
         for i in range(N):
