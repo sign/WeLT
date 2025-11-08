@@ -37,8 +37,8 @@ pip install ".[dev]"
 Or using docker:
 
 ```shell
-docker build -t welt .
-docker run -it --rm \
+docker build --platform="linux/amd64" -t welt .
+docker run  --platform="linux/amd64" -it --rm \
   -v "$(pwd)/welt:/app/welt" \
   -v "$(pwd)/training:/app/training" \
   welt /bin/bash
