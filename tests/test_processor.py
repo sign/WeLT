@@ -319,5 +319,78 @@ def test_processor_save_and_load_works_without_image_processor(renderer):
         assert isinstance(new_processor.image_processor, NoopImageProcessor)
 
 
+def test_labels_masked_in_shift_blocks_packed(processor):
+    """Test that labels are empty for tokens inside shift blocks (except ShiftIn itself)."""
+    # Use f-string template and let processor segment into words
+    text = f"<en>{ControlTokens.ShiftOut}hello{ControlTokens.ShiftIn}<he> שלום"
+    words = processor.pretokenize(text)
+
+    labels = processor.get_sequence_labels(words, pack=False)
+
+    # Expected: BOS, "<en>", SO, "hello", SI, "<he> ", "שלום "
+    # Labels should be empty for tokens inside shift blocks (SO and "hello")
+    # ShiftIn keeps its label to predict next word
+
+    # Check exact label content
+    assert labels[0] == "<en>"  # BOS -> "<en>"
+    assert labels[1] == ControlTokens.ShiftOut  # "<en>" -> SO
+    assert labels[2] == ""  # SO -> "hello" (inside block, masked)
+    assert labels[3] == ""  # "hello" -> SI (inside block, masked)
+    assert labels[4] == "<he> "  # SI -> "<he> " (exits block, has label)
+    assert labels[5] == "שלום"  # "<he> " -> "שלום " (rstripped)
+    assert labels[6] == ""  # Last token always empty
+
+
+def test_labels_masked_in_shift_blocks_unpacked(processor):
+    """Test that labels are empty for tokens inside shift blocks in unpacked mode."""
+    words = [
+        ControlTokens.StartOfText,
+        "<en>", ControlTokens.ShiftOut, "hello", ControlTokens.ShiftIn,
+        "<he>", "שלום"
+    ]
+
+    labels = processor.get_sequence_labels(words, pack=False)
+
+    # Expected behavior (unpacked mode):
+    # - Each token predicts the next token
+    # - Inside shift blocks, labels should be empty except for ShiftIn
+
+    assert labels[0]  # BOS -> "<en>"
+    assert labels[1]  # "<en>" -> ShiftOut
+    assert labels[2] == ""  # ShiftOut -> "hello" (inside block, no label)
+    assert labels[3] == ""  # "hello" -> ShiftIn (inside block, no label)
+    assert labels[4]  # ShiftIn -> "<he>" (exits block, should have label)
+    assert labels[5]  # "<he>" -> "שלום"
+    assert labels[6] == ""  # "שלום" -> (second-to-last, rstripped)
+
+
+def test_multiple_shift_blocks(processor):
+    """Test handling of multiple shift blocks in a sequence."""
+    words = [
+        ControlTokens.StartOfText,
+        ControlTokens.ShiftOut, "first", "block", ControlTokens.ShiftIn,
+        "middle", "token",
+        ControlTokens.ShiftOut, "second", "block", ControlTokens.ShiftIn,
+        "end"
+    ]
+
+    labels = processor.get_sequence_labels(words, pack=True)
+
+    # ShiftOut and content inside blocks should have empty labels
+    # ShiftIn tokens should have labels (to predict next word)
+    assert labels[0]  # BOS
+    assert labels[1] == ""  # ShiftOut (first block)
+    assert labels[2] == ""  # "first" (inside block)
+    assert labels[3] == ""  # "block" (inside block)
+    assert labels[4]  # ShiftIn (exits first block)
+    assert labels[5]  # "middle" (normal token)
+    assert labels[6]  # "token" (normal token)
+    assert labels[7] == ""  # ShiftOut (second block)
+    assert labels[8] == ""  # "second" (inside block)
+    assert labels[9] == ""  # "block" (inside block)
+    assert labels[10]  # ShiftIn (exits second block)
+    assert labels[11] == ""  # "end" (second-to-last, rstripped)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

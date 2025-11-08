@@ -4,9 +4,21 @@ import torch
 from utf8_tokenizer.control import ControlTokens
 
 
-def add_self_attention_blocks(mask: torch.Tensor, words: list[str]) -> None:
-    # Attention blocks (PrefixLM / MAS) are surrounded by <ShiftOut> and <ShiftIn> tokens (`\xOE` ... `\x0F`).
+def get_shift_blocks(words: list[str]):
+    """
+    Find shift blocks in a sequence of words.
+
+    Yields tuples (start, end) where start is the index of ShiftOut
+    and end is the index of ShiftIn (inclusive). Handles warnings for invalid blocks.
+
+    Args:
+        words: List of word strings
+
+    Yields:
+        Tuples of (start_idx, end_idx) for each valid shift block
+    """
     shift_out_idx = None
+
     for i, word in enumerate(words):
         if word == ControlTokens.ShiftOut:
             if shift_out_idx is not None:
@@ -22,7 +34,7 @@ def add_self_attention_blocks(mask: torch.Tensor, words: list[str]) -> None:
                     "Skipping self-attention block.",
                     stacklevel=2)
             else:
-                mask[0, shift_out_idx:shift_out_idx + i, shift_out_idx:shift_out_idx + i] = 1
+                yield (shift_out_idx, i)
                 shift_out_idx = None
 
     if shift_out_idx is not None:
@@ -30,6 +42,12 @@ def add_self_attention_blocks(mask: torch.Tensor, words: list[str]) -> None:
             "Unclosed Shift Out (SO) block detected at end of sequence. "
             "Missing corresponding Shift In (SI).",
             stacklevel=2)
+
+
+def add_self_attention_blocks(mask: torch.Tensor, words: list[str]) -> None:
+    # Attention blocks (PrefixLM / MAS) are surrounded by <ShiftOut> and <ShiftIn> tokens (`\xOE` ... `\x0F`).
+    for start, end in get_shift_blocks(words):
+        mask[0, start:start + end, start:start + end] = 1
 
 
 def get_attention_mask_for_packed_sequence(seq_lengths: list[int], words: list[str] = None) -> torch.Tensor:
