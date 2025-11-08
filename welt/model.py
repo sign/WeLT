@@ -318,6 +318,10 @@ class WordLatentTransformer(PreTrainedModel):
 
         for i in range(N):
             seq_len = total_lengths[i].item()
+            
+            # Skip empty sequences (though this should not happen in practice)
+            if seq_len <= 0:
+                continue
 
             # If adding this sequence would exceed max_packed_length, start a new pack
             if current_length > 0 and current_length + seq_len > max_packed_length:
@@ -331,8 +335,13 @@ class WordLatentTransformer(PreTrainedModel):
             # Add sequence to current pack
             # Get latent vector and target embeddings for this sequence
             latent_vec = latent_vectors_flat[i].unsqueeze(0)  # (1, hidden_dim)
-            seq_target_embeds = target_embeds[i, :seq_lengths[i]]  # (seq_len, embed_dim)
-            seq_combined = torch.cat([latent_vec, seq_target_embeds], dim=0)  # (1 + seq_len, embed_dim)
+            
+            # Only add target embeddings if sequence has actual tokens
+            if seq_lengths[i] > 0:
+                seq_target_embeds = target_embeds[i, :seq_lengths[i]]  # (seq_len, embed_dim)
+                seq_combined = torch.cat([latent_vec, seq_target_embeds], dim=0)  # (1 + seq_len, embed_dim)
+            else:
+                seq_combined = latent_vec  # Just the latent vector if no tokens
 
             # Create mask
             seq_mask = torch.ones(seq_len, device=device)
