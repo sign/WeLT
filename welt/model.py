@@ -78,7 +78,7 @@ class WordLatentTransformer(PreTrainedModel):
             "At least one encoder must be provided"
 
         if not is_bytes_encoder or not is_image_encoder:
-            warnings.warn("Image encoder and bytes encoder are not provided, setting modality_dropout to 0.0",
+            warnings.warn("Either image encoder or bytes encoder is not provided, setting modality_dropout to 0.0",
                           stacklevel=2)
             config.modality_dropout = 0.0
 
@@ -148,7 +148,7 @@ class WordLatentTransformer(PreTrainedModel):
         if self.image_encoder is None or self._should_drop_modality():
             # If image encoder is None, return zeros
             B, L, *_, = input_images.shape  # noqa: N806
-            dtype = getattr(self.image_encoder, "dtype", self.latent_transformer.dtype)
+            dtype = self.latent_transformer.dtype if self.image_encoder is None else self.image_encoder.dtype
             return torch.zeros((B, L, self.image_encoder_dim), device=device, dtype=dtype)
 
         return encode_images(self.image_encoder,
@@ -167,7 +167,7 @@ class WordLatentTransformer(PreTrainedModel):
 
         # If bytes encoder is None, return zeros
         if self.bytes_encoder is None or self._should_drop_modality():
-            dtype = getattr(self.bytes_encoder, "dtype", self.latent_transformer.dtype)
+            dtype = self.latent_transformer.dtype if self.bytes_encoder is None else self.bytes_encoder.dtype
             return torch.zeros(B, L, self.bytes_encoder_dim, device=input_ids.device, dtype=dtype)
 
         # Flatten batch and length dimensions
