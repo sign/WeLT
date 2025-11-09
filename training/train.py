@@ -426,7 +426,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
 
     # Initialize our Trainer
     compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(training_args,
-                                                                                processor,
+                                                                                processor.tokenizer.pad_token_id,
                                                                                 cache_dir)
 
     trainer = Trainer(
