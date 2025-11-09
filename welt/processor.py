@@ -205,10 +205,19 @@ class TextImageProcessor(ProcessorMixin):
         if "text" in batch and "words" not in batch:
             words = [self.pretokenize(t) for t in batch["text"]]
             # Create a similar batch object to a packed dataset
-            batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
 
-        dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
-                 for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)]
+            if "label" in batch:
+                batch = {"words": words, "seq_lengths": [[len(w)] for w in words], "label": batch["label"]}
+            else:
+                batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
+
+        if "label" in batch:
+            dicts = [ {**self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed), "label": label}
+                for words, seq_lengths, label in zip(batch["words"], batch["seq_lengths"], batch["label"], strict=False)]
+
+        else:
+            dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
+                    for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)]
 
         if collated:
             return collate_fn(dicts)
