@@ -1,110 +1,41 @@
-# Heavily adapted from
-# https://github.com/huggingface/transformers/edit/main/examples/pytorch/language-modeling/run_clm.py
+
+import json
 import logging
-import math
 import os
 import sys
+from pathlib import Path
 
-import datasets
 import evaluate
 import torch
-import transformers
-from datasets import IterableDataset, IterableDatasetDict, load_dataset
-from safetensors.torch import load_model
-from transformers import (
-    HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    is_torch_xla_available,
-    set_seed,
-)
-from transformers.trainer_utils import get_last_checkpoint
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import GenerationConfig, HfArgumentParser
 from transformers.utils import send_example_telemetry
-from trl import pack_dataset
 
 from training.args_data import DataTrainingArguments
 from training.args_eval import EvaluationArguments
 from training.args_model import ModelArguments
-from training.freeze_callback import FreezeWarmupCallback
-from welt.model_utils import setup_model
+from training.train import init_datasets, init_model, limit_dataset_size
 
 logger = logging.getLogger(__name__)
 
 
-def enable_optimizations():
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(False)
-    # Enable TF32 on A100 even with bf16 (helps GEMMs when anything falls back to fp32):
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
-    # For debugging purposes only:
-    # torch.autograd.set_detect_anomaly(True)
-
-    # TODO --use_cuda_graphs true ?
-
-    # TODO pin_memory_device="cuda" (PyTorch ≥2.3)
-
-    # TODO
-    #     torch_compile=True,
-    #     torch_compile_backend="inductor",
-    #     torch_compile_mode="default",
-
-    # TODO use accelerate launch
 
 
-def split_streaming_dataset(
-        full_streaming_dataset,
-        validation_percentage: int = 5,
-) -> IterableDatasetDict:
-    """
-    Splits a streaming dataset into
-    training and validation IterableDatasets, and supports methods like .map(), .filter(),
-    .take() and properties like .features on the resulting streams.
 
-    Args:
-        full_streaming_dataset (Dataset): The name of the dataset to load (e.g., "HuggingFaceFW/fineweb").
-        validation_percentage (int): The proportion of the dataset to be used for validation split.
-
-    Returns:
-        IterableDatasetDict: An IterableDatasetDict containing
-            two IterableDataset objects: (train_stream, validation_stream).
-    """
-    if not (0 < validation_percentage < 100):
-        raise ValueError(  # noqa: TRY003
-            f"validation_percentage must be between 0 and 100 (exclusive). Passed: {validation_percentage}"
-        )
-
-    def split_generator(is_train: bool):
-        for i, example in enumerate(full_streaming_dataset):
-            if is_train:
-                if i % 100 > validation_percentage:
-                    yield example
-            else:
-                if i % 100 < validation_percentage:
-                    yield example
-
-    features = full_streaming_dataset.features
-    train_stream = IterableDataset.from_generator(split_generator, gen_kwargs={"is_train": True}, features=features)
-    validation_stream = IterableDataset.from_generator(
-        split_generator, gen_kwargs={"is_train": False}, features=features
+def init_logging(eval_args: EvaluationArguments):
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+        level=logging.INFO,
     )
-
-    return IterableDatasetDict({"train": train_stream, "validation": validation_stream})
-
-
-def parse_args_into_dataclasses(args: list[str] | None | str = None, include_eval_args: bool = False):
-
-    parsable_args = [ModelArguments, DataTrainingArguments, TrainingArguments]
-
-    if include_eval_args:
-            parsable_args = [ModelArguments, DataTrainingArguments, EvaluationArguments]
+    logger.info(f"Evaluation arguments: {eval_args}")
 
 
-    parser = HfArgumentParser(parsable_args)
 
+def parse_args_into_dataclasses(args: list[str] | None | str = None):
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, EvaluationArguments))
     # If we pass only one argument to the script and it's the path to a json or yaml file,
     # let's parse it to get our arguments.
     if isinstance(args, str):
@@ -118,484 +49,209 @@ def parse_args_into_dataclasses(args: list[str] | None | str = None, include_eva
         return parser.parse_args_into_dataclasses(args=args)
 
 
-def init_logging(training_args: TrainingArguments):
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-
-    if training_args.should_log:
-        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
-        transformers.utils.logging.set_verbosity_info()
-
-    log_level = training_args.get_process_log_level()
-    logger.setLevel(log_level)
-    datasets.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.enable_default_handler()
-    transformers.utils.logging.enable_explicit_format()
-
-    # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, " +
-        f"device: {training_args.device}, " +
-        f"n_gpu: {training_args.n_gpu}, " +
-        f"distributed training: {training_args.parallel_mode.value == 'distributed'}, " +
-        f"16-bits training: {training_args.fp16}"
-    )
-    logger.info(f"Training/evaluation parameters {training_args}")
 
 
-def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, seed: int):
-    # Set seed before initializing model.
-    set_seed(seed)
-
-    # Initialize the model
-    model, processor, collator = setup_model(
-        image_encoder_name=model_args.image_encoder_model_name_or_path,
-        bytes_encoder_name=model_args.bytes_encoder_model_name_or_path,
-        latent_transformer_name=model_args.latent_transformer_model_name_or_path,
-        bytes_decoder_name=model_args.bytes_decoder_model_name_or_path,
-        trust_remote_code=model_args.trust_remote_code,
-        dtype=model_args.dtype,
-        seed=seed,
-        load_pretrained=model_args.load_pretrained,
-        max_word_length=data_args.max_word_length
-    )
-
-    # Load the model from a local path if provided
-    if model_args.model_name_or_path:
-        load_model(model, model_args.model_name_or_path)
-
-    return model, processor, collator
-
-
-def detect_last_checkpoint(training_args: TrainingArguments):
-    last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(  # noqa: TRY003
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
-
-    return last_checkpoint
-
-
-def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
-                  trust_remote_code: bool,
-                  do_train: bool = True,
-                  cache_dir: str = None):
-    # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
-    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
-    # (the dataset will be downloaded automatically from the datasets Hub).
-    #
-    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
-    # 'text' is found. You can easily tweak this behavior (see below).
-    #
-    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
-    # download the dataset.
-
-    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
-    # https://huggingface.co/docs/datasets/loading_datasets.
-
-    if data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            cache_dir=cache_dir,
-            streaming=data_args.streaming,
-            trust_remote_code=trust_remote_code,
-        )
-        if "validation" not in raw_datasets:
-            if data_args.streaming:
-                dataset_stream = load_dataset(
-                    data_args.dataset_name,
-                    data_args.dataset_config_name,
-                    split="train",
-                    cache_dir=cache_dir,
-                    streaming=data_args.streaming,
-                    trust_remote_code=trust_remote_code,
-                )
-                raw_datasets = split_streaming_dataset(dataset_stream, data_args.validation_split_percentage)
-            else:
-                raw_datasets["validation"] = load_dataset(
-                    data_args.dataset_name,
-                    data_args.dataset_config_name,
-                    split=f"train[:{data_args.validation_split_percentage}%]",
-                    cache_dir=cache_dir,
-                    streaming=data_args.streaming,
-                    trust_remote_code=trust_remote_code,
-                )
-                raw_datasets["train"] = load_dataset(
-                    data_args.dataset_name,
-                    data_args.dataset_config_name,
-                    split=f"train[{data_args.validation_split_percentage}%:]",
-                    cache_dir=cache_dir,
-                    streaming=data_args.streaming,
-                    trust_remote_code=trust_remote_code,
-                )
-    else:
-        data_files = {}
-        dataset_args = {}
-        if data_args.train_file is not None:
-            data_files["train"] = data_args.train_file
-        if data_args.validation_file is not None:
-            data_files["validation"] = data_args.validation_file
-        extension = (
-            data_args.train_file.split(".")[-1]
-            if data_args.train_file is not None
-            else data_args.validation_file.split(".")[-1]
-        )
-        if extension == "txt":
-            extension = "text"
-            dataset_args["keep_linebreaks"] = data_args.keep_linebreaks
-        raw_datasets = load_dataset(
-            extension,
-            data_files=data_files,
-            cache_dir=cache_dir,
-            **dataset_args,
-        )
-        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets:
-            if data_args.streaming:
-                dataset_stream = load_dataset(
-                    extension,
-                    data_files=data_files,
-                    split="train",
-                    cache_dir=cache_dir,
-                    **dataset_args,
-                )
-                raw_datasets = split_streaming_dataset(dataset_stream, data_args.validation_split_percentage)
-            else:
-                raw_datasets["validation"] = load_dataset(
-                    extension,
-                    data_files=data_files,
-                    split=f"train[:{data_args.validation_split_percentage}%]",
-                    cache_dir=cache_dir,
-                    **dataset_args,
-                )
-
-                raw_datasets["train"] = load_dataset(
-                    extension,
-                    data_files=data_files,
-                    split=f"train[{data_args.validation_split_percentage}%:]",
-                    cache_dir=cache_dir,
-                    **dataset_args,
-                )
-
-    if do_train:
-        column_names = list(raw_datasets["train"].features)
-    else:
-        column_names = list(raw_datasets["validation"].features)
-    text_column_name = "text" if "text" in column_names else column_names[0]
-
-    def mapping_function(x):
-        text = data_args.dataset_text_template.format(**x) \
-            if data_args.dataset_text_template else x[text_column_name]
-        return {"text": text}
-
-    map_args = {}
-    if not data_args.streaming:
-        map_args = {
-            "num_proc": data_args.preprocessing_num_workers,
-            "load_from_cache_file": not data_args.overwrite_cache,
+def seperate_task(example, task_word: str):
+    """
+    Splits the input text into "text" and "label" based on the task_word.
+        For example, if task_word is "<count>" and the input text is
+        "<text>hello<count> H1 E1 L2 O1", then the output will be:
+        {
+            "text": "<text>hello<count>",
+            "label": "H1 E1 L2 O1"
         }
+        """
+    sentence = example["text"]
+    index = sentence.find(task_word)
+    if index == -1:
+        return {"text": sentence, "label": ""}
+    cut = index + len(task_word) + 1
+    return {"text": sentence[:cut], "label": sentence[cut:]}
 
-    text_datasets = raw_datasets.map(
-        mapping_function,
-        remove_columns=column_names,
-        desc="Keep only the text column & apply template",
-        **map_args
-    )
+def eval(args: list[str] | None | str = None): # noqa: C901
 
-    # Filter out empty texts
-    text_datasets = text_datasets.filter(
-        lambda x: len(x["text"]) > 0,
-        desc="Filter out empty texts",
-        **map_args
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    return text_datasets
+    cache_dir = None
 
+    # enable_optimizations()
 
-def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool = False):
-    if max_samples is not None:
-        if streaming:
-            dataset = dataset.take(max_samples)
-        elif max_samples < len(dataset):
-            dataset = dataset.select(range(max_samples))
+    model_args, data_args, eval_args = parse_args_into_dataclasses(args)
 
-    return dataset
+    init_logging(eval_args)
 
+    send_example_telemetry("run_clm", model_args, data_args)
 
-def setup_evaluation_functions(eval_args: EvaluationArguments, processor: int, cache_dir=None):
-    pad_token_id = processor.tokenizer.pad_token_id
-
-    # # Include everything for the metrics calculation
-    # training_args.include_for_metrics = ["loss"]
-    # # Tell trainer the correct name of our labels output column
-    # training_args.label_names = ["labels_output"]
-    # # HuggingFace fails to concatenate the batches
-    # training_args.eval_do_concat_batches = False
-
-    # This needs to be passed as a parameter
-    # required_metrics = ["accuracy", "cer"]
-
-    # Convert list of metrics into str -> Obj mapping
-    if isinstance(eval_args.eval_metrics, str):
-        metric_objs = {eval_args.eval_metrics: evaluate.load(eval_args.eval_metrics, cache_dir=cache_dir)}
-    else:
-        metric_objs = {metric: evaluate.load(metric, cache_dir=cache_dir) for metric in eval_args.eval_metrics}
-
-
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)  # torch.Size([16, 61, 13])
-
-    
-    def _flat_ids_after_mask(all_preds, all_labels):
- 
-        flat_preds = []
-        flat_labels = []
-
-        for preds, labels in zip(all_preds, all_labels, strict=False):
-            preds = preds.reshape(-1)
-            labels = labels.reshape(-1)
-
-            # Remove pads
-            mask = labels != pad_token_id
-            preds = preds[mask]
-            labels = labels[mask]
-
-            # Accumulate
-            flat_preds.append(torch.tensor(preds))
-            flat_labels.append(torch.tensor(labels))
-
-        flat_preds = torch.cat(flat_preds)
-        flat_labels = torch.cat(flat_labels)
-
-        return flat_preds, flat_labels
-    
-    def _texts_after_mask(all_preds, all_labels):
-
-        def _decode_texts(preds):
-            texts = []
-            for w in range(preds.shape[1]):
-                out_texts = processor.tokenizer.batch_decode(preds[:,w,:], skip_special_tokens=True)
-                if len(texts) == 0:
-                    texts.extend(out_texts)
-                else:
-                    for i, _ in enumerate(texts):
-                        texts[i] += out_texts[i]
-            return texts
-        
-        pred_texts, label_texts = [], []
-
-        for preds, labels in zip(all_preds, all_labels, strict=False):
-
-            # No need to do this because skip_special_token does so already.
-            # mask = labels != pad_token_id
-            # preds = preds[mask]
-            # labels = labels[mask]
-
-            pred_text = _decode_texts(preds)
-            label_text = _decode_texts(labels)
-
-            pred_texts.extend(pred_text)
-            label_texts.extend(label_text)
-        
-        # print("Preds:", pred_texts[0], "Labels:", label_texts[0], )
-        return pred_texts, label_texts
-
-    def compute_metrics(eval_preds):
-        all_preds = eval_preds.predictions
-        all_labels = eval_preds.label_ids
-
-        results = {}
-
-    
-        needs_id = any(m in metric_objs for m in ("accuracy",))
-        # Decode into text?
-        needs_text = any(m in metric_objs for m in ("cer", "wer", "bleu", "rouge"))
-
-        if needs_id:
-            id_preds, id_labels = _flat_ids_after_mask(all_preds, all_labels)
-
-        if needs_text:
-            text_preds, text_labels = _texts_after_mask(all_preds, all_labels)
-
-        for name, metric in metric_objs.items():
-            if name == "accuracy":
-                out = metric.compute(predictions=id_preds, references=id_labels)
-                results["accuracy"] = float(out["accuracy"])
-            
-            elif name == "cer": # Can add wer, bleu, rouge
-                out = metric.compute(predictions=text_preds, references=text_labels)
-                results["cer"] = out
-
-        return results
-            
-
-    return (
-        compute_metrics if not is_torch_xla_available() else None,
-        preprocess_logits_for_metrics if not is_torch_xla_available() else None
-    )
-
-
-def eval(args: list[str] | None | str = None):  # noqa: C901
-    cache_dir = None  # Use the default cache directory / Environment variable
-
-    enable_optimizations()
-
-    model_args, data_args, eval_args = parse_args_into_dataclasses(args, include_eval_args=True)
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("eval_clm", model_args, data_args)
-
-    # init_logging(eval_args)
-
-    # Detecting last checkpoint.
-    # last_checkpoint = detect_last_checkpoint(training_args)
-
-    # Initialize the model
     model, processor, collator = init_model(model_args, data_args, seed=42)
 
-    if data_args.max_sequence_length is not None:
-        processor.max_seq_length = data_args.max_sequence_length
+    model = model.to(device)
 
-    # Save the processor to the output directory
-    # processor.save_pretrained(save_directory=training_args.output_dir, push_to_hub=False)
 
-    # Load the datasets
     text_datasets = init_datasets(data_args,
                                   cache_dir=cache_dir,
                                   trust_remote_code=model_args.trust_remote_code,
                                   do_train=False)
 
-    train_dataset = None
-    if "train" not in text_datasets:
-        raise ValueError("--do_train requires a train dataset")  # noqa: TRY003
-    train_dataset = limit_dataset_size(text_datasets["train"],
-                                           max_samples=eval_args.max_train_samples_for_eval,
-                                           streaming=data_args.streaming)
+
+    # if "train" not in text_datasets:
+    #     raise ValueError("--do_train requires a train dataset")  # noqa: TRY003
+    # train_dataset = limit_dataset_size(text_datasets["train"],
+    #                                     max_samples=data_args.max_train_samples,
+    #                                     streaming=data_args.streaming)
 
     if "validation" not in text_datasets:
         raise ValueError("--do_eval requires a validation dataset")  # noqa: TRY003
     eval_dataset = limit_dataset_size(text_datasets["validation"],
-                                        max_samples=data_args.max_eval_samples_for_eval,
-                                          streaming=data_args.streaming)
-    
-    if "test" not in text_datasets:
-        raise ValueError("--do_eval requires a validation dataset")  # noqa: TRY003
-    test_dataset = limit_dataset_size(text_datasets["validation"],
-                                        max_samples=data_args.max_test_samples_for_eval,
-                                          streaming=data_args.streaming)
+                                        max_samples=eval_args.max_eval_samples_for_eval,
+                                        streaming=data_args.streaming)
 
-    # Sequence packing
-    # if train_dataset:
-    #     block_size = min(data_args.block_size or math.inf, processor.max_seq_length)
-    #     train_dataset = processor.pretokenize_dataset(train_dataset)
-    #     train_dataset = pack_dataset(train_dataset, seq_length=block_size)
+    if "test" not in text_datasets:
+        raise ValueError("--do_eval requires a test dataset")  # noqa: TRY003
+    test_dataset = limit_dataset_size(text_datasets["test"],
+                                        max_samples=eval_args.max_test_samples_for_eval,
+                                        streaming=data_args.streaming)
+
+
+    # train_dataset = train_dataset.map(lambda x: seperate_task(x, eval_args.task_word))
+    eval_dataset = eval_dataset.map(lambda x: seperate_task(x, eval_args.task_word))
+    test_dataset = test_dataset.map(lambda x: seperate_task(x, eval_args.task_word))
+
+
 
     # Transform the datasets to the format expected by the model
-    if train_dataset:
-        train_dataset = train_dataset.with_transform(processor)
+    # if train_dataset:
+    #     train_dataset = train_dataset.with_transform(processor)
     if eval_dataset:
         eval_dataset = eval_dataset.with_transform(processor)
     if test_dataset:
         test_dataset = test_dataset.with_transform(processor)
 
-    # Initialize our Trainer
-    compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(eval_args,
-                                                                                processor,
-                                                                                cache_dir)
-
-    # trainer = Trainer(
-    #     model=model,
-    #     args=training_args,
-    #     train_dataset=train_dataset,
-    #     eval_dataset=eval_dataset,
-    #     # Data collator will default to DataCollatorWithPadding, so we change it.
-    #     data_collator=collator,
-    #     # Compute metrics
-    #     compute_metrics=compute_metrics,
-    #     preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+    # train_loader = DataLoader(
+    #     train_dataset,
+    #     batch_size=eval_args.batch_size,
+    #     shuffle=False,
+    #     collate_fn=collator
     # )
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=eval_args.batch_size,
+        shuffle=False,
+        collate_fn=collator
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=eval_args.batch_size,
+        shuffle=False,
+        collate_fn=collator
+    )
 
-    # # Freeze the pretrained models for some steps
-    # trainer.add_callback(FreezeWarmupCallback(steps=model_args.warmup_freeze_steps, model=model))
 
-    # # Training
-    # if training_args.do_train:
-    #     checkpoint = None
-    #     if training_args.resume_from_checkpoint is not None:
-    #         checkpoint = training_args.resume_from_checkpoint
-    #     elif last_checkpoint is not None:
-    #         checkpoint = last_checkpoint
-    #     train_result = trainer.train(resume_from_checkpoint=checkpoint)
-    #     trainer.save_model()
+    bytes_generation_config = GenerationConfig(
+        temperature=1.0,
+        top_p=1.0,
+        do_sample=False,
+        num_beams=1,
+        repetition_penalty=1.0,
+    )
 
-    #     metrics = train_result.metrics
 
-    #     max_train_samples = (
-    #         data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
-    #     )
-    #     if data_args.streaming:
-    #         metrics["train_samples"] = max_train_samples
-    #     else:
-    #         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
+    ## PATHS
+    model_dir = Path(model_args.model_name_or_path).parent \
+        if model_args.model_name_or_path.endswith(".safetensors") \
+            else Path(model_args.model_name_or_path)
+    model_dir.mkdir(parents=True, exist_ok=True)
 
-    #     trainer.log_metrics("train", metrics)
-    #     trainer.save_metrics("train", metrics)
-    #     trainer.save_state()
+    # train_pred_file_path = model_dir / "train_predictions.jsonl"
+    eval_pred_file_path = model_dir / "eval_predictions.jsonl"
+    test_pred_file_path = model_dir / "test_predictions.jsonl"
 
-    # # Evaluation
-    # if training_args.do_eval:
-    #     logger.info("*** Evaluate ***")
 
-    #     metrics = trainer.evaluate()
+    ## EVAL SET
+    eval_pred_texts = []
+    eval_actual_texts = []
 
-    #     max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
-    #     if data_args.streaming:
-    #         metrics["eval_samples"] = max_eval_samples
-    #     else:
-    #         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+    model.eval()
+    with torch.inference_mode():
+        for i, batch in enumerate(tqdm(eval_loader, desc="Eval")):
+            pred_text = model.generate(
+                input_ids=batch["input_ids"].to(device),
+                input_attention_mask = batch["input_attention_mask"].to(device),
+                input_images = batch["input_images"].to(device),
+                attention_mask = batch["attention_mask"].to(device),
+                input_images_dimensions = batch["input_images_dimensions"].to(device),
+                processor=processor,
+                bytes_generation_config=bytes_generation_config
+            )
+            eval_pred_texts.extend(pred_text)
+            eval_actual_texts.extend(batch["label"])
 
-    #     try:
-    #         perplexity = math.exp(metrics["eval_loss"])
-    #     except OverflowError:
-    #         perplexity = float("inf")
-    #     metrics["perplexity"] = perplexity
+            if eval_args.log_examples_every and i % eval_args.log_examples_every == 0:
+                logger.info("Label: %s\tPred: %s\n", batch['label'][0], pred_text[0])
 
-    #     trainer.log_metrics("eval", metrics)
-    #     trainer.save_metrics("eval", metrics)
 
-    # kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-generation"}
-    # if data_args.dataset_name is not None:
-    #     kwargs["dataset_tags"] = data_args.dataset_name
-    #     if data_args.dataset_config_name is not None:
-    #         kwargs["dataset_args"] = data_args.dataset_config_name
-    #         kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
-    #     else:
-    #         kwargs["dataset"] = data_args.dataset_name
+    # Write to a file
+    with open(eval_pred_file_path, "w") as f:
+        for ref, hyp in zip(eval_actual_texts, eval_pred_texts, strict=False):
+            f.write(json.dumps({"reference": ref, "prediction": hyp}) + "\n")
+    logger.info(f"Eval predictions written to {eval_pred_file_path}")
 
-    # if training_args.push_to_hub:
-    #     trainer.push_to_hub(**kwargs)
-    # else:
-    #     trainer.create_model_card(**kwargs)
+
+    ## TEST SET
+    test_pred_texts = []
+    test_actual_texts = []
+    with torch.inference_mode():
+        for i, batch in enumerate(tqdm(test_loader, desc="Test")):
+            pred_text = model.generate(
+                input_ids=batch["input_ids"].to(device),
+                input_attention_mask = batch["input_attention_mask"].to(device),
+                input_images = batch["input_images"].to(device),
+                attention_mask = batch["attention_mask"].to(device),
+                input_images_dimensions = batch["input_images_dimensions"].to(device),
+                processor=processor,
+                bytes_generation_config=bytes_generation_config
+                )
+            test_pred_texts.extend(pred_text)
+            test_actual_texts.extend(batch["label"])
+
+            if eval_args.log_examples_every and i % eval_args.log_examples_every == 0:
+                logger.info("Label: %s\tPred: %s\n", batch['label'][0], pred_text[0])
+
+
+    # Write to a file
+    with open(test_pred_file_path, "w") as f:
+        for ref, hyp in zip(test_actual_texts, test_pred_texts, strict=False):
+            f.write(json.dumps({"reference": ref, "prediction": hyp}) + "\n")
+    logger.info(f"Test predictions written to {test_pred_file_path}")
+
+
+    eval_results = {}
+    test_results = {}
+    for metric_name in eval_args.eval_metrics:
+        metric = evaluate.load(metric_name)
+        is_sacrebleu = metric_name.lower() == "sacrebleu"
+
+        eval_result = metric.compute(
+            predictions=eval_pred_texts,
+            references=[[r] for r in eval_actual_texts] if is_sacrebleu else eval_actual_texts
+        )
+        logger.info("Eval %s: %s", metric_name, eval_result)
+        eval_results[metric_name] = eval_result
+
+        test_result = metric.compute(
+            predictions=test_pred_texts,
+            references=[[r] for r in test_actual_texts] if is_sacrebleu else test_actual_texts
+        )
+        logger.info("Test %s: %s", metric_name, test_result)
+        test_results[metric_name] = test_result
+
+    # Save evals
+    with open(model_dir / "eval_results.json", "w") as f:
+        json.dump(eval_results, f, indent=4)
+    logger.info(f"Eval results written to {model_dir / 'eval_results.json'}")
+    with open(model_dir / "test_results.json", "w") as f:
+        json.dump(test_results, f, indent=4)
+    logger.info(f"Test results written to {model_dir / 'test_results.json'}")
+
 
 
 if __name__ == "__main__":
