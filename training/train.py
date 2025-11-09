@@ -328,9 +328,7 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
     return dataset
 
 
-def setup_evaluation_functions(training_args: TrainingArguments, processor: int, cache_dir=None):
-    pad_token_id = processor.tokenizer.pad_token_id
-
+def setup_evaluation_functions(training_args: TrainingArguments, pad_token_id: int, cache_dir=None):
     # Include everything for the metrics calculation
     training_args.include_for_metrics = ["loss"]
     # Tell trainer the correct name of our labels output column
@@ -348,17 +346,6 @@ def setup_evaluation_functions(training_args: TrainingArguments, processor: int,
     metric = evaluate.load("accuracy", cache_dir=cache_dir)
 
     def compute_metrics(eval_preds):
-        def _decode_texts(preds):
-            texts = []
-            for w in range(preds.shape[1]):
-                out_texts = processor.tokenizer.batch_decode(preds[:,w,:], skip_special_tokens=True)
-                if len(texts) == 0:
-                    texts.extend(out_texts)
-                else:
-                    for i, _ in enumerate(texts):
-                        texts[i] += out_texts[i]
-            return texts
-         
         all_preds = eval_preds.predictions
         all_labels = eval_preds.label_ids
 
@@ -381,13 +368,6 @@ def setup_evaluation_functions(training_args: TrainingArguments, processor: int,
         flat_preds = torch.cat(flat_preds)
         flat_labels = torch.cat(flat_labels)
 
-        pred_text = _decode_texts(all_preds[0])
-        label_text = _decode_texts(all_labels[0])
-        print("-"*50)
-        print(f"Label: {label_text}")
-        print(f"Pred: {pred_text}")
-        print("-"*50)
-        del pred_text, label_text
         return metric.compute(predictions=flat_preds, references=flat_labels)
 
     return (
