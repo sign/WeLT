@@ -2,6 +2,7 @@
 import torch
 from cachetools import LRUCache
 from datasets import Dataset
+from pixel_renderer import PixelRendererProcessor
 from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
@@ -9,29 +10,37 @@ from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F40
 from welt.attention import (
     get_attention_mask_for_packed_sequence,
     get_position_ids_for_packed_sequence,
+    get_shift_blocks,
 )
 from welt.collator import collate_fn, stack_pad_tensors
 from welt.noop import NoopImageProcessor
-from welt.renderer import render_text
 
 
 class TextImageProcessor(ProcessorMixin):
     name = "text-image-processor"
 
-    attributes = ["pretokenizer", "tokenizer", "image_processor"]
+    attributes = [
+        "pretokenizer",
+        "tokenizer",
+        "renderer",
+        "image_processor"
+    ]
     pretokenizer_class = "AutoTokenizer"
     tokenizer_class = "AutoTokenizer"
+    renderer_class = "PixelRendererProcessor"
     image_processor_class = "AutoImageProcessor"
 
     def __init__(self,
                  pretokenizer: PreTrainedTokenizer,
                  tokenizer: UTF8Tokenizer,
+                 renderer: PixelRendererProcessor,
                  image_processor: ImageProcessingMixin,
                  max_seq_length: int = 128,
                  max_word_length: int = 32,
                  cache_size: int = 10000):
         super().__init__(pretokenizer=pretokenizer,
                          tokenizer=tokenizer,
+                         renderer=renderer,
                          image_processor=image_processor)
 
         assert tokenizer.bos_token_id is not None, "Tokenizer must have a BOS token"
@@ -39,7 +48,9 @@ class TextImageProcessor(ProcessorMixin):
 
         self.pretokenizer = pretokenizer
         self.tokenizer = tokenizer
+        self.renderer = renderer
         self.image_processor = image_processor
+
         self.max_word_length = max_word_length
         self.max_seq_length = max_seq_length
         self.cache_size = cache_size
@@ -52,7 +63,7 @@ class TextImageProcessor(ProcessorMixin):
 
         images = [self.images_cache.get(text, None) for text in texts]
         missing_texts = [(i, texts[i]) for i, v in enumerate(images) if v is None]
-        renders = (render_text(text) for _, text in missing_texts)
+        renders = (self.renderer.render_text(text) for _, text in missing_texts)
         processed = (self.image_processor(image, do_center_crop=False, do_resize=False, return_tensors="pt")
                      for image in renders)
         processed = (p.pixel_values[0] for p in processed)
@@ -89,6 +100,21 @@ class TextImageProcessor(ProcessorMixin):
                            desc="Pretokenizing texts into 'words'")
 
     def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None, pack=True) -> list[str]:
+        """
+        Generate labels for word-level sequences.
+
+        Tokens inside shift blocks (between ShiftOut and ShiftIn control tokens) are masked
+        with empty labels to prevent training on "known" tokens that are already visible via
+        self-attention. The ShiftIn token itself keeps its label to predict the next word.
+
+        Args:
+            words: List of word strings to generate labels for
+            seq_lengths: Optional list of sequence lengths for packed sequences
+            pack: If True, use packed mode (longer context labels), else unpacked (next word only)
+
+        Returns:
+            List of label strings corresponding to each word
+        """
         if seq_lengths is None:
             seq_lengths = [len(words)]
 
@@ -102,23 +128,32 @@ class TextImageProcessor(ProcessorMixin):
                 segment_words = words[offset:offset + length]
                 text = "".join(segment_words)
                 label_idx = 0
+
                 for word in segment_words:
                     label_idx += len(word)
+
                     # For efficiency, we don't just use the next word as label, but a longer token string
                     # max_word_length characters, not bytes, will be trimmed by the tokenizer later
                     label = text[label_idx:label_idx + self.max_word_length]
                     # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
                     label = label.rstrip()  # Remove trailing spaces to avoid generating them
+
                     labels.append(label)
             else:
                 # Next word as label, last word has no label
                 raw_labels = words[offset + 1:offset + length] + [""]
                 # Truncate labels to max_word_length (characters, not bytes)
                 labels += [label[:self.max_word_length] for label in raw_labels]
+
                 # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
                 labels[-2] = labels[-2].rstrip()  # Remove last trailing space to avoid generating it
 
             offset += length
+
+        # Mask labels inside shift blocks (except for ShiftIn token)
+        for start, end in get_shift_blocks(words):
+            for i in range(start, end):  # Excludes end (ShiftIn token)
+                labels[i] = ""
 
         return labels
 
@@ -183,3 +218,4 @@ class TextImageProcessor(ProcessorMixin):
             new_batch[key] = [d[key] for d in dicts]
 
         return new_batch
+

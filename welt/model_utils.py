@@ -2,9 +2,13 @@ import importlib.util
 from functools import partial
 
 import torch
+from font_download import FontConfig
+from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
+from pixel_renderer import PixelRendererProcessor
 from transformers import (
     AutoConfig,
     AutoImageProcessor,
+    AutoTokenizer,
     PretrainedConfig,
     enable_full_determinism,
     set_seed,
@@ -80,6 +84,7 @@ def setup_model(
         bytes_encoder_name="prajjwal1/bert-tiny",
         latent_transformer_name="EleutherAI/pythia-70m",
         bytes_decoder_name="EleutherAI/pythia-70m",
+        pretokenizer_name: str | None = None,
         trust_remote_code=False,
         modality_dropout=0.15,
         dtype=torch.float32,
@@ -131,11 +136,22 @@ def setup_model(
         max_word_length = getattr(model.bytes_decoder.config, "max_position_embeddings", 128)
 
     max_bytes = max_word_length - 2  # Reserve space for BOS and EOS tokens
-    pretokenizer = WordsSegmentationTokenizer(max_bytes=max_bytes)
+    if pretokenizer_name is not None:
+        print(f"Using pretokenizer: {pretokenizer_name}")
+        pretokenizer = AutoTokenizer.from_pretrained(pretokenizer_name,
+                                                     use_fast=True,
+                                                     trust_remote_code=trust_remote_code)
+    else:
+        print("Using pretokenizer: WordsSegmentationTokenizer")
+        pretokenizer = WordsSegmentationTokenizer(max_bytes=max_bytes)
+
+    font_config = FontConfig(sources=FONTS_NOTO_SANS)
+    renderer = PixelRendererProcessor(font=font_config)
 
     processor = TextImageProcessor(
         pretokenizer=pretokenizer,
         tokenizer=tokenizer,
+        renderer=renderer,
         image_processor=image_processor,
         max_seq_length=max_seq_length,
         max_word_length=max_word_length,

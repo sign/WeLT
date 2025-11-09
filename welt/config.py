@@ -1,6 +1,8 @@
 
 from transformers import CONFIG_MAPPING, AutoConfig, PretrainedConfig
 
+from welt.noop import NoopConfig
+
 
 class WordLatentTransformerConfig(PretrainedConfig):
     model_type = "welt"
@@ -44,4 +46,8 @@ class WordLatentTransformerConfig(PretrainedConfig):
             setattr(self, name, config)
 
         if config is None:
-            setattr(self, name, PretrainedConfig())
+            # For optional encoders, use NoopConfig instead of PretrainedConfig
+            if name in ["image_encoder", "bytes_encoder"]:
+                setattr(self, name, NoopConfig())
+            else:
+                setattr(self, name, PretrainedConfig())

@@ -31,15 +31,17 @@ Install dependencies:
 ```shell
 conda create -n welt python=3.12 -y
 conda activate welt
-conda install -c conda-forge pycairo pygobject manimpango -y
 pip install ".[dev]"
 ```
 
 Or using docker:
 
 ```shell
-docker build -t welt .
-docker run -it --rm welt /bin/bash
+docker build --platform="linux/amd64" -t welt .
+docker run  --platform="linux/amd64" -it --rm \
+  -v "$(pwd)/welt:/app/welt" \
+  -v "$(pwd)/training:/app/training" \
+  welt /bin/bash
 ```
 
 > [!TIP]
@@ -77,12 +79,6 @@ There, you can select the model architectures you want to use for each component
 
 ## Inference
 
-> [!CAUTION]
-> Our text [renderer](./welt/renderer.py) relies on the computer's font rendering capabilities.
-> Rendering on different systems may yield different results (e.g. emoji).
-> We call the community to create a more robust renderer, decoupled from the system's font rendering,
-> for better consistency across platforms and easier reproducibility.
-
 Since we have two decoders, the autoregressive prediction logic is a bit more complex than the usual,
 and supporting decoding algorithms like beam-search is not trivial.
 
@@ -94,6 +90,11 @@ On the bytes decoder level, we support all classical decoding algorithms support
 
 See [open issues](https://github.com/search?q=repo%3Asign%2FWeLT+%22%2Fissues%2F%22&type=code) 
 and [TODOs](https://github.com/search?q=repo%3Asign%2FWeLT%20TODO&type=code) in the codebase.
+
+During the creation of this repository, we created several others to support it:
+- [`sign/words-segmentation`](https://github.com/sign/words-segmentation) as a universal word level pretokenizer.
+- [`sign/utf8-tokenizer`](https://github.com/sign/utf8-tokenizer) as a robust byte-level tokenizer.
+- [`sign/pixel-renderer`](https://github.com/sign/pixel-renderer) as a reproducible text-to-image renderer.
 
 > [!WARNING]
 > Training runs are experimental until core issues are resolved.

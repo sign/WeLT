@@ -19,7 +19,7 @@ python run_clm.py \
 
 Compared to our model setup:
 ```shell
-python train.py \
+python -m training.train \
     --image_encoder_model_name_or_path WinKawaks/vit-tiny-patch16-224 \
     --bytes_encoder_model_name_or_path prajjwal1/bert-tiny \
     --latent_transformer_model_name_or_path EleutherAI/pythia-70m \
@@ -58,4 +58,11 @@ With the following shared arguments:
     --optim adamw_torch_fused \
     --bf16 True \
     --report_to wandb
+```
+
+### Using configs
+
+```bash
+python -m training.train training/experiments/machine-translation/machine-translation-signed-spoken.yaml
+modal run -m training.modal::train --config="training/experiments/machine-translation/machine-translation-signed-spoken.yaml"
 ```

@@ -5,13 +5,11 @@ latent_transformer_model_name_or_path: EleutherAI/pythia-31m
 bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
 
 # Dataset setup
-dataset_name: Helsinki-NLP/opus-100
-dataset_config_name: en-he
-dataset_text_template: "<en>\x0E{translation[en]}\x0F<he> {translation[he]}"
-max_sequence_length: 128
-max_word_length: 16
-
-max_eval_samples: 32
+dataset_name: sign/signbank-plus
+dataset_config_name: cleaned
+dataset_text_template: "<{sign_language}>\x0E{sign_text}\x0F<{spoken_language}> {spoken_text}"
+max_sequence_length: 64
+max_word_length: 128 # SignWriting has lots of bytes per sign
 
 # Data Loader
 dataloader_num_workers: 8
@@ -21,10 +19,10 @@ dataloader_persistent_workers: true
 
 # Training setup
 remove_unused_columns: false # Necessary
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 2
+per_device_train_batch_size: 96
+per_device_eval_batch_size: 96
 auto_find_batch_size: true
-output_dir: ./output/en-he
+output_dir: ./output/signed-to-spoken
 do_train: true
 max_steps: 10000
 learning_rate: 3.0e-4
@@ -40,7 +38,6 @@ metric_for_best_model: accuracy
 # Logging
 logging_steps: 10
 logging_strategy: steps
-include_tokens_per_second: true
 include_num_input_tokens_seen: true
 report_to: wandb
 

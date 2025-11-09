@@ -4,6 +4,9 @@ import tempfile
 import pytest
 import torch
 from datasets import Dataset
+from font_download import FontConfig
+from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
+from pixel_renderer import PixelRendererProcessor
 from trl.data_utils import pack_dataset
 from utf8_tokenizer.control import ControlTokens
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
@@ -20,19 +23,16 @@ def processor():
     return processor
 
 
+@pytest.fixture(scope="module")
+def renderer():
+    font_config = FontConfig(sources=FONTS_NOTO_SANS)
+    return PixelRendererProcessor(font=font_config)
+
+
 expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask", "position_ids",
                         "labels_input", "labels_attention_mask", "labels_output",
                         "input_images", "input_images_dimensions"]
 expected_keys = expected_tensor_keys
-
-
-def test_processor_save_and_load_works(processor):
-    with tempfile.TemporaryDirectory() as temp_dir:
-        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
-        new_processor = TextImageProcessor.from_pretrained(temp_dir)
-
-        assert new_processor.tokenizer is not None
-        assert new_processor.image_processor is not None
 
 
 def test_processor_multiprocessing_pickle(processor):
@@ -163,12 +163,13 @@ def test_get_words_and_labels_packed_vs_unpacked(processor):
     assert labels_packed == ['hello world test', 'world test', 'test', '']
     assert labels_unpacked == ['hello ', 'world ', 'test', '']
 
+
 def test_render_images_shape(processor):
     texts = ["short", "a bit longer text"]
     renders, dimensions = processor.render_texts(texts)
 
-    assert renders.shape == (2, 3, 16, 160)
-    assert torch.equal(dimensions, torch.tensor([[16, 64], [16, 160]]))
+    assert renders.shape == (2, 3, 16, 112)
+    assert torch.equal(dimensions, torch.tensor([[16, 48], [16, 112]]))
 
 
 def test_pretokenize_splits_control_tokens(processor):
@@ -192,13 +193,14 @@ def test_pretokenize_multiple_whitespace(processor):
     assert words == [ControlTokens.StartOfText, "def ", "foo():\n", " " * 8, 'return ', '"bar" ']
 
 
-def test_get_words_and_labels_packed_vs_unpacked_respect_max_word_length(processor):
+def test_get_words_and_labels_packed_vs_unpacked_respect_max_word_length(processor, renderer):
     text = "this is a long-test"
     words = processor.pretokenize(text)
 
     new_processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(),
         tokenizer=processor.tokenizer,
+        renderer=renderer,
         image_processor=processor.image_processor,
         max_word_length=3
     )
@@ -293,18 +295,101 @@ def test_processor_works_on_packed_sequence(processor):
         assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
 
 
-def test_processor_save_and_load_works_without_image_processor():
-    processor = TextImageProcessor(
-        pretokenizer=WordsSegmentationTokenizer(),
-        tokenizer=UTF8Tokenizer(),
-        image_processor=NoopImageProcessor())
-
+def test_processor_save_and_load_works(processor):
     with tempfile.TemporaryDirectory() as temp_dir:
         processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
         new_processor = TextImageProcessor.from_pretrained(temp_dir)
-        print(new_processor.image_processor)
-        print(new_processor.image_processor.to_dict())
+
+        for attr in processor.attributes:
+            assert getattr(new_processor, attr) is not None
+            assert getattr(new_processor, attr).__class__.__name__ == getattr(processor, attr).__class__.__name__
+
+
+def test_processor_save_and_load_works_without_image_processor(renderer):
+    processor = TextImageProcessor(
+        pretokenizer=WordsSegmentationTokenizer(),
+        tokenizer=UTF8Tokenizer(),
+        renderer=renderer,
+        image_processor=NoopImageProcessor())
+
+    with tempfile.TemporaryDirectory(delete=False) as temp_dir:
+        print(temp_dir)
+        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
+        new_processor = TextImageProcessor.from_pretrained(temp_dir)
         assert isinstance(new_processor.image_processor, NoopImageProcessor)
+
+
+def test_labels_masked_in_shift_blocks_packed(processor):
+    """Test that labels are empty for tokens inside shift blocks (except ShiftIn itself)."""
+    # Use f-string template and let processor segment into words
+    text = f"<en>{ControlTokens.ShiftOut}hello{ControlTokens.ShiftIn}<he> שלום"
+    words = processor.pretokenize(text)
+
+    labels = processor.get_sequence_labels(words, pack=False)
+
+    # Expected: BOS, "<en>", SO, "hello", SI, "<he> ", "שלום "
+    # Labels should be empty for tokens inside shift blocks (SO and "hello")
+    # ShiftIn keeps its label to predict next word
+
+    # Check exact label content
+    assert labels[0] == "<en>"  # BOS -> "<en>"
+    assert labels[1] == ControlTokens.ShiftOut  # "<en>" -> SO
+    assert labels[2] == ""  # SO -> "hello" (inside block, masked)
+    assert labels[3] == ""  # "hello" -> SI (inside block, masked)
+    assert labels[4] == "<he> "  # SI -> "<he> " (exits block, has label)
+    assert labels[5] == "שלום"  # "<he> " -> "שלום " (rstripped)
+    assert labels[6] == ""  # Last token always empty
+
+
+def test_labels_masked_in_shift_blocks_unpacked(processor):
+    """Test that labels are empty for tokens inside shift blocks in unpacked mode."""
+    words = [
+        ControlTokens.StartOfText,
+        "<en>", ControlTokens.ShiftOut, "hello", ControlTokens.ShiftIn,
+        "<he>", "שלום"
+    ]
+
+    labels = processor.get_sequence_labels(words, pack=False)
+
+    # Expected behavior (unpacked mode):
+    # - Each token predicts the next token
+    # - Inside shift blocks, labels should be empty except for ShiftIn
+
+    assert labels[0]  # BOS -> "<en>"
+    assert labels[1]  # "<en>" -> ShiftOut
+    assert labels[2] == ""  # ShiftOut -> "hello" (inside block, no label)
+    assert labels[3] == ""  # "hello" -> ShiftIn (inside block, no label)
+    assert labels[4]  # ShiftIn -> "<he>" (exits block, should have label)
+    assert labels[5]  # "<he>" -> "שלום"
+    assert labels[6] == ""  # "שלום" -> (second-to-last, rstripped)
+
+
+def test_multiple_shift_blocks(processor):
+    """Test handling of multiple shift blocks in a sequence."""
+    words = [
+        ControlTokens.StartOfText,
+        ControlTokens.ShiftOut, "first", "block", ControlTokens.ShiftIn,
+        "middle", "token",
+        ControlTokens.ShiftOut, "second", "block", ControlTokens.ShiftIn,
+        "end"
+    ]
+
+    labels = processor.get_sequence_labels(words, pack=True)
+
+    # ShiftOut and content inside blocks should have empty labels
+    # ShiftIn tokens should have labels (to predict next word)
+    assert labels[0]  # BOS
+    assert labels[1] == ""  # ShiftOut (first block)
+    assert labels[2] == ""  # "first" (inside block)
+    assert labels[3] == ""  # "block" (inside block)
+    assert labels[4]  # ShiftIn (exits first block)
+    assert labels[5]  # "middle" (normal token)
+    assert labels[6]  # "token" (normal token)
+    assert labels[7] == ""  # ShiftOut (second block)
+    assert labels[8] == ""  # "second" (inside block)
+    assert labels[9] == ""  # "block" (inside block)
+    assert labels[10]  # ShiftIn (exits second block)
+    assert labels[11] == ""  # "end" (second-to-last, rstripped)
 
 
 if __name__ == "__main__":

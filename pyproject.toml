@@ -14,12 +14,12 @@ dependencies = [
     "datasets",
     "Pillow", # For AutoImageProcessor
     "torchvision", # For use_fast=True
-    "signwriting @ git+https://github.com/sign-language-processing/signwriting", # To render SignWriting images
     "cachetools", # For LRU cache in processor
     "vit-pytorch", # For NaViT model implementation
+    # Our packages
     "words-segmentation", # For pre-tokenization into words
     "utf8-tokenizer", # For tokenization of bytes
-    "lxml", # for XML parsing in fontconfig TODO remove once https://github.com/sign/WeLT/issues/24
+    "pixel-renderer[pangocairo]", # For text rendering into images
 ]
 
 [project.optional-dependencies]
@@ -43,7 +43,6 @@ train = [
 packages = [
     "welt",
     "welt.vision",
-    "font_configurator", # TODO: extract to separate package https://github.com/sign/WeLT/issues/24
 ]
 
 [tool.ruff]
@@ -74,5 +73,4 @@ addopts = "-v"
 testpaths = [
     "welt",
     "tests",
-    "font_configurator",
 ]

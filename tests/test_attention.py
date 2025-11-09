@@ -6,6 +6,7 @@ from welt.attention import (
     add_self_attention_blocks,
     get_attention_mask_for_packed_sequence,
     get_position_ids_for_packed_sequence,
+    get_shift_blocks,
 )
 
 
@@ -128,7 +129,7 @@ def test_add_self_attention_blocks_single_token_block():
     add_self_attention_blocks(mask, words)
 
     expected = torch.zeros((1, 3, 3), dtype=torch.bool)
-    expected[0, 0:1, 0:1] = True
+    expected[0, 0:2, 0:2] = True
 
     assert torch.equal(mask, expected)
 
@@ -172,6 +173,39 @@ def test_get_attention_mask_for_packed_sequence_with_shift_blocks():
     ]])
 
     assert torch.equal(mask, expected)
+
+
+def test_get_shift_blocks_single_block():
+    """Test get_shift_blocks returns correct indexes for a single shift block."""
+    words = ["hello", ControlTokens.ShiftOut, "world", "test", ControlTokens.ShiftIn, "end"]
+    blocks = list(get_shift_blocks(words))
+
+    assert len(blocks) == 1
+    assert blocks[0] == (1, 4)  # ShiftOut at index 1, ShiftIn at index 4
+
+
+def test_get_shift_blocks_multiple_blocks():
+    """Test get_shift_blocks returns correct indexes for multiple shift blocks."""
+    words = [
+        "start",
+        ControlTokens.ShiftOut, "first", ControlTokens.ShiftIn,
+        "middle",
+        ControlTokens.ShiftOut, "second", ControlTokens.ShiftIn,
+        "end"
+    ]
+    blocks = list(get_shift_blocks(words))
+
+    assert len(blocks) == 2
+    assert blocks[0] == (1, 3)  # First block: ShiftOut at 1, ShiftIn at 3
+    assert blocks[1] == (5, 7)  # Second block: ShiftOut at 5, ShiftIn at 7
+
+
+def test_get_shift_blocks_no_blocks():
+    """Test get_shift_blocks returns empty when no shift blocks present."""
+    words = ["hello", "world", "test"]
+    blocks = list(get_shift_blocks(words))
+
+    assert len(blocks) == 0
 
 
 if __name__ == "__main__":

@@ -42,6 +42,10 @@ class ModelArguments:
         "help": "Steps to keep most modules frozen at start."
     })
 
+    pretokenizer_name: str | None = field(default=None, metadata={
+        "help": "Pretokenizer to use, defaults to https://github.com/sign/words-segmentation."
+    })
+
     trust_remote_code: bool = field(
         default=False,
         metadata={

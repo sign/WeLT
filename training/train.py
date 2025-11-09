@@ -19,7 +19,6 @@ from transformers import (
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import send_example_telemetry
 from trl import pack_dataset
 
 from training.args_data import DataTrainingArguments
@@ -152,7 +151,8 @@ def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, see
         dtype=model_args.dtype,
         seed=seed,
         load_pretrained=model_args.load_pretrained,
-        max_word_length=data_args.max_word_length
+        max_word_length=data_args.max_word_length,
+        pretokenizer_name=model_args.pretokenizer_name,
     )
 
     # Load the model from a local path if provided
@@ -164,18 +164,11 @@ def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, see
 
 def detect_last_checkpoint(training_args: TrainingArguments):
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+    if os.path.isdir(training_args.output_dir) and training_args.do_train:
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(  # noqa: TRY003
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+
+        if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+            logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
 
     return last_checkpoint
 
@@ -382,10 +375,6 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     enable_optimizations()
 
     model_args, data_args, training_args = parse_args_into_dataclasses(args)
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_clm", model_args, data_args)
 
     init_logging(training_args)
 

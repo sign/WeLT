@@ -25,7 +25,6 @@ per_device_train_batch_size: 32
 per_device_eval_batch_size: 32
 auto_find_batch_size: true
 output_dir: ./output/string-repetition-tiny
-overwrite_output_dir: true
 do_train: true
 max_steps: 1000
 learning_rate: 3.0e-4
