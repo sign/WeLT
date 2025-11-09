@@ -1,7 +1,5 @@
 from dataclasses import dataclass, field
 
-from transformers.utils.versions import require_version
-
 
 @dataclass
 class EvaluationArguments:
@@ -9,7 +7,15 @@ class EvaluationArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-   
+
+    task_word: str = field(
+        default = None,
+        metadata={
+            "help": (
+                "The task seperator enclosed in <>"
+            )
+        },
+    )
     eval_metrics: list[str] = field(
         default_factory = lambda: ["accuracy"],
         metadata={
@@ -45,9 +51,29 @@ class EvaluationArguments:
             )
         },
     )
-    
+
+    log_examples_every: int | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "If set, logs example predictions every N batches."
+            )
+        },
+    )
+    batch_size: int = field(
+        default=1024,
+        metadata={
+            "help": (
+                "Batch size for evaluation."
+            )
+        },
+    )
+
+
+
 
     def __post_init__(self):
+        EVAL_METRICS = ["accuracy", "cer", "wer", "bleu", "rouge", "sacrebleu"]
         if self.eval_metrics:
             for em in self.eval_metrics:
-                assert em in ["accuracy", "cer", "wer", "bleu", "rouge"], f"{em} should be in ['accuracy', 'cer', 'wer', 'bleu', 'rouge']"
+                assert em in EVAL_METRICS, f"{em} should be in {EVAL_METRICS}"

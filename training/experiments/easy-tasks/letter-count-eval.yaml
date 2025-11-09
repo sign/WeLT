@@ -3,7 +3,7 @@ image_encoder_model_name_or_path: null
 bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
 latent_transformer_model_name_or_path: sbintuitions/tiny-lm
 bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
-model_name_or_path: output/letter-count-small-cer
+model_name_or_path: output/letter-count-small-cer/model.safetensors
 
 # Dataset setup
 dataset_name: magus4450/english-words-small-letter-count
@@ -13,7 +13,7 @@ max_sequence_length: 128
 max_word_length: 32
 
 
-max_eval_samples: 1000
+# max_eval_samples: 1000
 
 # Data Loader
 # dataloader_num_workers: 8
@@ -23,12 +23,13 @@ max_eval_samples: 1000
 
 # Training setup
 # remove_unused_columns: false # Necessary
-# per_device_train_batch_size: 64
-# per_device_eval_batch_size: 32
+# per_device_train_batch_size: 4
+# per_device_eval_batch_size: 4
 # auto_find_batch_size: true
 # output_dir: ./output/letter-count-small-cer-test
-# overwrite_output_dir: true
-# do_train: true
+# overwrite_output_dir: false
+# do_train: false
+# do_eval: true
 # max_steps: 10
 # learning_rate: 3.0e-4
 # optim: adamw_torch_fused
@@ -42,10 +43,13 @@ max_eval_samples: 1000
 
 
 # EvaluationArguments
-max_train_samples_for_eval: 64
-max_eval_samples_for_eval: 64
-max_test_samples_for_eval: 64
-eval_metrics: ["accuracy", "cer"]
+task_word: "<count>"
+batch_size: 256
+max_train_samples_for_eval: 256
+max_eval_samples_for_eval: 256
+max_test_samples_for_eval: 256
+eval_metrics: ["bleu", "cer", "rouge", "sacrebleu"]
+log_examples_every: 1 # Batch
 
 # Logging
 # logging_steps: 10
