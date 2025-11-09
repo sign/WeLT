@@ -12,36 +12,6 @@ dataset_text_template: "<text>\x0E{text}\x0F<count> {count}"
 max_sequence_length: 128
 max_word_length: 32
 
-
-# max_eval_samples: 1000
-
-# Data Loader
-# dataloader_num_workers: 8
-# dataloader_prefetch_factor: 4
-# dataloader_pin_memory: true
-# dataloader_persistent_workers: true
-
-# Training setup
-# remove_unused_columns: false # Necessary
-# per_device_train_batch_size: 4
-# per_device_eval_batch_size: 4
-# auto_find_batch_size: true
-# output_dir: ./output/letter-count-small-cer-test
-# overwrite_output_dir: false
-# do_train: false
-# do_eval: true
-# max_steps: 10
-# learning_rate: 3.0e-4
-# optim: adamw_torch_fused
-
-# Evaluation
-# do_eval: false
-# eval_on_start: true
-# eval_strategy: steps
-# eval_steps: 10
-# metric_for_best_model: accuracy
-
-
 # EvaluationArguments
 task_word: "<count>"
 batch_size: 256
@@ -50,13 +20,6 @@ max_eval_samples_for_eval: 256
 max_test_samples_for_eval: 256
 eval_metrics: ["bleu", "cer", "rouge", "sacrebleu"]
 log_examples_every: 1 # Batch
-
-# Logging
-# logging_steps: 10
-# logging_strategy: steps
-# include_tokens_per_second: true
-# include_num_input_tokens_seen: true
-# report_to: none
 
 # Dtype
 # bf16: true
