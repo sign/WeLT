@@ -37,7 +37,7 @@ def model_from_config(config: PretrainedConfig,
     """Load pretrained model or initialize from config with new weights."""
 
     # Override attn_implementation if not supported
-    if attn_implementation in ["flash_attention_2", "flash_attention_3"]:
+    if attn_implementation.startswith("flash_attention"):
         resolved_class = _get_model_class(config, cls._model_mapping)
 
         if not getattr(resolved_class, "_supports_flash_attn", False):
