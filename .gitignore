@@ -207,7 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 
-
+.DS_Store
 .claude/
 build
 output/

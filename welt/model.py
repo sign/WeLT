@@ -17,6 +17,7 @@ from transformers import (
 from transformers.modeling_outputs import CausalLMOutput
 from transformers.models.auto.auto_factory import _get_model_class
 from utf8_tokenizer.embeddings import patch_embedding_layers
+from utf8_tokenizer.logits_processor import UTF8ValidationLogitsProcessor
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.pretokenizer import WordStoppingCriteria
 
@@ -37,7 +38,7 @@ def model_from_config(config: PretrainedConfig,
     """Load pretrained model or initialize from config with new weights."""
 
     # Override attn_implementation if not supported
-    if attn_implementation.startswith("flash_attention"):
+    if attn_implementation is not None and attn_implementation.startswith("flash_attention"):
         resolved_class = _get_model_class(config, cls._model_mapping)
 
         if not getattr(resolved_class, "_supports_flash_attn", False):
@@ -405,6 +406,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             inputs_embeds=inputs_embeds,
             generation_config=bytes_generation_config,
             tokenizer=tokenizer,
+            logits_processor=[UTF8ValidationLogitsProcessor()],
             stopping_criteria=[WordStoppingCriteria(tokenizer)],
             **bytes_generation_kwargs
         )
