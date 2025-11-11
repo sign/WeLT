@@ -15,14 +15,16 @@ class DataTrainingArguments:
     dataset_config_name: str | None = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
-    dataset_text_template: str | None = field(
+    dataset_text_template: str | list[str] | None = field(
         default=None,
         metadata={
             "help": (
-                "A template to extract the text column from the dataset. "
-                "The string {text} will be replaced by the actual text column name. "
-                "For example, if the text column is named 'sentence', "
-                "the template could be 'translate {sentence} to fr'."
+                "Template to format dataset text using Python format strings with dataset column names. "
+                "Single string: concatenated text for training/eval (e.g., 'Translate: {source} to {target}'). "
+                "List of 2 strings: [prefix, completion] for generation-based evaluation. "
+                "  - During training: prefix + completion are concatenated. "
+                "  - During evaluation/testing: prefix used for generation, completion used as reference. "
+                "Example: ['<{sign_language}> {sign_text} <{spoken_language}> ', '{spoken_text}']"
             )
         },
     )
@@ -94,10 +96,42 @@ class DataTrainingArguments:
     keep_linebreaks: bool = field(
         default=True, metadata={"help": "Whether to keep line breaks when using TXT files or not."}
     )
+    metric_name: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Evaluation metric(s) to compute (via evaluate.load()). "
+                "For multiple metrics, use comma-separated list: 'bleu,chrf,meteor'. "
+                "Used with generation-based evaluation when dataset_text_template is a list."
+            )
+        },
+    )
+    metric_for_best_model: str | None = field(
+        default=None,
+        metadata={
+            "help": "Metric to use for selecting the best model checkpoint. Must be in metric_name if specified."
+        },
+    )
 
     def __post_init__(self):
         if self.streaming:
             require_version("datasets>=2.0.0", "The streaming feature requires `datasets>=2.0.0`")
+
+        # Validate dataset_text_template
+        if self.dataset_text_template is not None:
+            if isinstance(self.dataset_text_template, list):
+                if len(self.dataset_text_template) != 2:
+                    msg = (
+                        f"dataset_text_template must be either a string or a list of size 2. "
+                        f"Got a list of size {len(self.dataset_text_template)}."
+                    )
+                    raise ValueError(msg)  # noqa: TRY003
+            elif not isinstance(self.dataset_text_template, str):
+                msg = (
+                    f"dataset_text_template must be either a string or a list of size 2. "
+                    f"Got {type(self.dataset_text_template).__name__}."
+                )
+                raise ValueError(msg)  # noqa: TRY003
 
         if self.dataset_name is None and self.train_file is None and self.validation_file is None:
             raise ValueError("Need either a dataset name or a training/validation file.")  # noqa: TRY003

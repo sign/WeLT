@@ -6,16 +6,15 @@ import os
 import sys
 
 import datasets
-import evaluate
 import torch
 import transformers
 from datasets import IterableDataset, IterableDatasetDict, load_dataset
 from safetensors.torch import load_model
 from transformers import (
     HfArgumentParser,
+    Seq2SeqTrainingArguments,
     Trainer,
     TrainingArguments,
-    is_torch_xla_available,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
@@ -23,6 +22,7 @@ from trl import pack_dataset
 
 from training.args_data import DataTrainingArguments
 from training.args_model import ModelArguments
+from training.evaluation import evaluate_model, setup_evaluation_functions
 from training.freeze_callback import FreezeWarmupCallback
 from welt.model_utils import setup_model
 
@@ -94,7 +94,7 @@ def split_streaming_dataset(
 
 
 def parse_args_into_dataclasses(args: list[str] | None | str = None):
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
     # If we pass only one argument to the script and it's the path to a json or yaml file,
     # let's parse it to get our arguments.
     if isinstance(args, str):
@@ -171,6 +171,7 @@ def detect_last_checkpoint(training_args: TrainingArguments):
             logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
 
     return last_checkpoint
+
 
 
 def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
@@ -282,33 +283,51 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
         column_names = list(raw_datasets["validation"].features)
     text_column_name = "text" if "text" in column_names else column_names[0]
 
-    def mapping_function(x):
-        text = data_args.dataset_text_template.format(**x) \
-            if data_args.dataset_text_template else x[text_column_name]
-        return {"text": text}
 
-    map_args = {}
-    if not data_args.streaming:
-        map_args = {
-            "num_proc": data_args.preprocessing_num_workers,
-            "load_from_cache_file": not data_args.overwrite_cache,
-        }
+    def process_split(dataset, split_name: str):
+        """Apply mapping and filtering to a dataset split."""
+        template = data_args.dataset_text_template
+        if template is None:
+            def mapping_fn(example):
+                return {"text": example[text_column_name]}
+        else:
+            is_single_text_template = isinstance(template, str)
+            single_text_template = template \
+                if is_single_text_template else "".join(template)
 
-    text_datasets = raw_datasets.map(
-        mapping_function,
-        remove_columns=column_names,
-        desc="Keep only the text column & apply template",
-        **map_args
-    )
+            def mapping_fn(example):
+                if is_single_text_template or split_name == "train":
+                    return {"text": single_text_template.format(**example)}
 
-    # Filter out empty texts
-    text_datasets = text_datasets.filter(
-        lambda x: len(x["text"]) > 0,
-        desc="Filter out empty texts",
-        **map_args
-    )
+                prefix = template[0].format(**example)
+                completion = template[1].format(**example)
+                return {
+                    "text": f"{prefix}{completion}",  # Full text for training loss calculation
+                    "prefix": prefix,  # For generation
+                    "completion": completion,  # Reference for metrics
+                }
 
-    return text_datasets
+        map_args = {}
+        if not data_args.streaming:
+            map_args = {
+                "num_proc": data_args.preprocessing_num_workers,
+                "load_from_cache_file": not data_args.overwrite_cache,
+            }
+
+        dataset = dataset.map(
+            mapping_fn,
+            remove_columns=column_names,
+            desc=f"Formatting {split_name} split",
+            **map_args
+        )
+        dataset = dataset.filter(
+            lambda x: len(x["text"]) > 0,
+            desc=f"Filtering empty examples from {split_name}",
+            **map_args
+        )
+        return dataset
+
+    return {split: process_split(raw_datasets[split], split) for split in raw_datasets}
 
 
 def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool = False):
@@ -319,54 +338,6 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
             dataset = dataset.select(range(max_samples))
 
     return dataset
-
-
-def setup_evaluation_functions(training_args: TrainingArguments, pad_token_id: int, cache_dir=None):
-    # Include everything for the metrics calculation
-    training_args.include_for_metrics = ["loss"]
-    # Tell trainer the correct name of our labels output column
-    training_args.label_names = ["labels_output"]
-    # HuggingFace fails to concatenate the batches
-    training_args.eval_do_concat_batches = False
-
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)  # torch.Size([16, 61, 13])
-
-    metric = evaluate.load("accuracy", cache_dir=cache_dir)
-
-    def compute_metrics(eval_preds):
-        all_preds = eval_preds.predictions
-        all_labels = eval_preds.label_ids
-
-        flat_preds = []
-        flat_labels = []
-
-        for preds, labels in zip(all_preds, all_labels, strict=False):
-            preds = preds.reshape(-1)
-            labels = labels.reshape(-1)
-
-            # Remove pads
-            mask = labels != pad_token_id
-            preds = preds[mask]
-            labels = labels[mask]
-
-            # Accumulate
-            flat_preds.append(torch.tensor(preds))
-            flat_labels.append(torch.tensor(labels))
-
-        flat_preds = torch.cat(flat_preds)
-        flat_labels = torch.cat(flat_labels)
-
-        return metric.compute(predictions=flat_preds, references=flat_labels)
-
-    return (
-        compute_metrics if training_args.do_eval and not is_torch_xla_available() else None,
-        preprocess_logits_for_metrics if training_args.do_eval and not is_torch_xla_available() else None
-    )
 
 
 def train(args: list[str] | None | str = None):  # noqa: C901
@@ -405,12 +376,16 @@ def train(args: list[str] | None | str = None):  # noqa: C901
                                            streaming=data_args.streaming)
 
     eval_dataset = None
+    raw_eval_dataset = None
     if training_args.do_eval:
         if "validation" not in text_datasets:
             raise ValueError("--do_eval requires a validation dataset")  # noqa: TRY003
-        eval_dataset = limit_dataset_size(text_datasets["validation"],
-                                          max_samples=data_args.max_eval_samples,
-                                          streaming=data_args.streaming)
+        raw_eval_dataset = text_datasets["validation"]
+        eval_dataset = limit_dataset_size(
+            raw_eval_dataset,
+            max_samples=data_args.max_eval_samples,
+            streaming=data_args.streaming
+        )
 
     # Sequence packing
     if train_dataset:
@@ -425,9 +400,12 @@ def train(args: list[str] | None | str = None):  # noqa: C901
         eval_dataset = eval_dataset.with_transform(processor)
 
     # Initialize our Trainer
-    compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(training_args,
-                                                                                processor.tokenizer.pad_token_id,
-                                                                                cache_dir)
+    compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(
+        training_args,
+        data_args,
+        processor.tokenizer,
+        cache_dir
+    )
 
     trainer = Trainer(
         model=model,
@@ -470,24 +448,16 @@ def train(args: list[str] | None | str = None):  # noqa: C901
 
     # Evaluation
     if training_args.do_eval:
-        logger.info("*** Evaluate ***")
-
-        metrics = trainer.evaluate()
-
-        max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
-        if data_args.streaming:
-            metrics["eval_samples"] = max_eval_samples
-        else:
-            metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-
-        try:
-            perplexity = math.exp(metrics["eval_loss"])
-        except OverflowError:
-            perplexity = float("inf")
-        metrics["perplexity"] = perplexity
-
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
+        evaluate_model(
+            trainer=trainer,
+            model=model,
+            processor=processor,
+            data_args=data_args,
+            training_args=training_args,
+            eval_dataset=eval_dataset,
+            raw_eval_dataset=raw_eval_dataset,
+            cache_dir=cache_dir,
+        )
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-generation"}
     if data_args.dataset_name is not None:
