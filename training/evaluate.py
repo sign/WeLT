@@ -51,7 +51,7 @@ def parse_args_into_dataclasses(args: list[str] | None | str = None):
 
 
 
-def seperate_task(example, task_word: str):
+def separate_task(example, task_word: str):
     """
     Splits the input text into "text" and "label" based on the task_word.
         For example, if task_word is "<count>" and the input text is
