@@ -20,7 +20,7 @@ class EvaluationArguments:
         default_factory = lambda: ["accuracy"],
         metadata={
             "help": (
-                "Names of the metrics to evalulate the data on. Should be a list of string"
+                "Names of the metrics to evaluate the data on. Should be a list of string"
             )
         },
     )
