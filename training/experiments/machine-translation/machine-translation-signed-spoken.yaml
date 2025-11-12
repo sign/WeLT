@@ -1,5 +1,5 @@
 # Model Setup
-image_encoder_model_name_or_path: WinKawaks/vit-tiny-patch16-224
+image_encoder_model_name_or_path: null
 bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
 latent_transformer_model_name_or_path: EleutherAI/pythia-31m
 bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
@@ -7,7 +7,9 @@ bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
 # Dataset setup
 dataset_name: sign/signbank-plus
 dataset_config_name: cleaned
-dataset_text_template: "<{sign_language}>\x0E{sign_text}\x0F<{spoken_language}> {spoken_text}"
+dataset_text_template:
+  - "<{sign_language}>\x0E{sign_text}\x0F<{spoken_language}> "
+  - "{spoken_text}"
 max_sequence_length: 64
 max_word_length: 128 # SignWriting has lots of bytes per sign
 
