@@ -7,14 +7,9 @@ class EvaluationArguments:
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
 
-
     task_word: str = field(
-        default = None,
-        metadata={
-            "help": (
-                "The task seperator enclosed in <>"
-            )
-        },
+        default=None,
+        metadata={"help": ("The task seperator enclosed in <>")},
     )
     eval_metrics: list[str] = field(
         default_factory = lambda: ["accuracy"],
@@ -46,34 +41,22 @@ class EvaluationArguments:
         default=None,
         metadata={
             "help": (
-                "The number of samples from test set to use to compute evaluation metrics. Defaults to"
-                "all if not set"
+                "The number of samples from test set to use to compute evaluation metrics. Defaults toall if not set"
             )
         },
     )
 
     log_examples_every: int | None = field(
         default=None,
-        metadata={
-            "help": (
-                "If set, logs example predictions every N batches."
-            )
-        },
+        metadata={"help": ("If set, logs example predictions every N batches.")},
     )
     batch_size: int = field(
         default=1024,
-        metadata={
-            "help": (
-                "Batch size for evaluation."
-            )
-        },
+        metadata={"help": ("Batch size for evaluation.")},
     )
 
-
-
-
     def __post_init__(self):
-        EVAL_METRICS = ["accuracy", "cer", "wer", "bleu", "rouge", "sacrebleu"]
+        viable_eval_metrics = ["accuracy", "cer", "wer", "bleu", "rouge", "sacrebleu"]
         if self.eval_metrics:
             for em in self.eval_metrics:
-                assert em in EVAL_METRICS, f"{em} should be in {EVAL_METRICS}"
+                assert em in viable_eval_metrics, f"{em} should be in {viable_eval_metrics}"
