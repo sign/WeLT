@@ -22,3 +22,6 @@ RUN mkdir -p /app/welt/vision && \
 WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 RUN pip install ".[train]"
+
+COPY welt /app/welt
+COPY training /app/training

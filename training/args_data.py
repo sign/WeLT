@@ -15,7 +15,7 @@ class DataTrainingArguments:
     dataset_config_name: str | None = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
     )
-    dataset_text_template: str | list[str] | None = field(
+    dataset_text_template: str | None | list[str] = field(
         default=None,
         metadata={
             "help": (
@@ -106,12 +106,6 @@ class DataTrainingArguments:
             )
         },
     )
-    metric_for_best_model: str | None = field(
-        default="accuracy",
-        metadata={
-            "help": "Metric to use for selecting the best model checkpoint. Must be in metric_name if specified."
-        },
-    )
 
     def __post_init__(self):
         if self.streaming:
@@ -132,14 +126,6 @@ class DataTrainingArguments:
                     f"Got {type(self.dataset_text_template).__name__}."
                 )
                 raise ValueError(msg)  # noqa: TRY003
-
-        # Validate metric_for_best_model is included in metric_name
-        if self.metric_for_best_model not in self.metric_name:
-            msg = (
-                f"metric_for_best_model '{self.metric_for_best_model}' must be included in metric_name. "
-                f"Got metric_name: '{self.metric_name}'"
-            )
-            raise ValueError(msg)  # noqa: TRY003
 
         if self.dataset_name is None and self.train_file is None and self.validation_file is None:
             raise ValueError("Need either a dataset name or a training/validation file.")  # noqa: TRY003
