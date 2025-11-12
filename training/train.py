@@ -13,6 +13,7 @@ from datasets import IterableDataset, IterableDatasetDict, load_dataset
 from safetensors.torch import load_model
 from transformers import (
     HfArgumentParser,
+    Seq2SeqTrainingArguments,
     Trainer,
     TrainingArguments,
     is_torch_xla_available,
@@ -94,7 +95,7 @@ def split_streaming_dataset(
 
 
 def parse_args_into_dataclasses(args: list[str] | None | str = None):
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
     # If we pass only one argument to the script and it's the path to a json or yaml file,
     # let's parse it to get our arguments.
     if isinstance(args, str):
@@ -282,33 +283,50 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
         column_names = list(raw_datasets["validation"].features)
     text_column_name = "text" if "text" in column_names else column_names[0]
 
-    def mapping_function(x):
-        text = data_args.dataset_text_template.format(**x) \
-            if data_args.dataset_text_template else x[text_column_name]
-        return {"text": text}
+    def process_split(dataset, split_name: str):
+        """Apply mapping and filtering to a dataset split."""
+        template = data_args.dataset_text_template
+        if template is None:
+            def mapping_fn(example):
+                return {"text": example[text_column_name]}
+        else:
+            is_single_text_template = isinstance(template, str)
+            single_text_template = template \
+                if is_single_text_template else "".join(template)
 
-    map_args = {}
-    if not data_args.streaming:
-        map_args = {
-            "num_proc": data_args.preprocessing_num_workers,
-            "load_from_cache_file": not data_args.overwrite_cache,
-        }
+            def mapping_fn(example):
+                if is_single_text_template or split_name == "train":
+                    return {"text": single_text_template.format(**example)}
 
-    text_datasets = raw_datasets.map(
-        mapping_function,
-        remove_columns=column_names,
-        desc="Keep only the text column & apply template",
-        **map_args
-    )
+                prefix = template[0].format(**example)
+                completion = template[1].format(**example)
+                return {
+                    "text": f"{prefix}{completion}",  # Full text for training loss calculation
+                    "prefix": prefix,  # For generation
+                    "completion": completion,  # Reference for metrics
+                }
 
-    # Filter out empty texts
-    text_datasets = text_datasets.filter(
-        lambda x: len(x["text"]) > 0,
-        desc="Filter out empty texts",
-        **map_args
-    )
+        map_args = {}
+        if not data_args.streaming:
+            map_args = {
+                "num_proc": data_args.preprocessing_num_workers,
+                "load_from_cache_file": not data_args.overwrite_cache,
+            }
 
-    return text_datasets
+        dataset = dataset.map(
+            mapping_fn,
+            remove_columns=column_names,
+            desc=f"Formatting {split_name} split",
+            **map_args
+        )
+        dataset = dataset.filter(
+            lambda x: len(x["text"]) > 0,
+            desc=f"Filtering empty examples from {split_name}",
+            **map_args
+        )
+        return dataset
+
+    return {split: process_split(raw_datasets[split], split) for split in raw_datasets}
 
 
 def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool = False):
@@ -321,7 +339,12 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
     return dataset
 
 
-def setup_evaluation_functions(training_args: TrainingArguments, pad_token_id: int, cache_dir=None):
+def setup_evaluation_functions(
+    training_args: Seq2SeqTrainingArguments,
+    data_args: DataTrainingArguments,
+    pad_token_id: int,
+    cache_dir=None
+):
     # Include everything for the metrics calculation
     training_args.include_for_metrics = ["loss"]
     # Tell trainer the correct name of our labels output column
@@ -336,7 +359,14 @@ def setup_evaluation_functions(training_args: TrainingArguments, pad_token_id: i
             logits = logits[0]
         return logits.argmax(dim=-1)  # torch.Size([16, 61, 13])
 
-    metric = evaluate.load("accuracy", cache_dir=cache_dir)
+    # For now, only support "accuracy" metric before implementing generation-based eval
+    # TODO: Implement generation-based evaluation with other metrics
+    assert data_args.metric_name == ["accuracy"], (
+        f"Currently only 'accuracy' metric is supported. Got: '{data_args.metric_name}'. "
+        "Generation-based evaluation with other metrics will be implemented later."
+    )
+
+    metric = evaluate.load(data_args.metric_name[0], cache_dir=cache_dir)
 
     def compute_metrics(eval_preds):
         all_preds = eval_preds.predictions
@@ -425,9 +455,12 @@ def train(args: list[str] | None | str = None):  # noqa: C901
         eval_dataset = eval_dataset.with_transform(processor)
 
     # Initialize our Trainer
-    compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(training_args,
-                                                                                processor.tokenizer.pad_token_id,
-                                                                                cache_dir)
+    compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(
+        training_args,
+        data_args,
+        processor.tokenizer.pad_token_id,
+        cache_dir
+    )
 
     trainer = Trainer(
         model=model,

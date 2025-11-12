@@ -15,21 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install rendering system dependencies
-        run: |
-          sudo sed -i 's|http://|https://|g' /etc/apt/sources.list{,.d/*.list,.d/*.sources} 2>/dev/null || true
-          sudo apt-get update
-          sudo apt-get install -y libgirepository-1.0-1 libcairo2 gir1.2-pango-1.0 pkg-config libcairo2-dev libgirepository1.0-dev
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v6.5.0
-        with:
-          python-version: "3.12"
-          enable-cache: true
-          activate-environment: true
-
-      - name: Install dependencies
-        run: uv pip install ".[dev]"
+      - name: Setup environment
+        uses: ./.github/actions/setup-environment
 
       - name: Lint code
         run: uv run ruff check .

@@ -135,7 +135,7 @@ def test_multiple_texts_batch_not_nan(device):
     batch = dataset_to_batch(model, processor, collator, dataset)
 
     # TODO: this fails on mps device, because of the attention mask
-    #   ONLY when no_grad is used https://github.com/huggingface/transformers/issues/40858
+    #   ONLY when no_grad is used https://github.com/pytorch/pytorch/issues/167515
     with torch.no_grad():
         outputs = model(**batch)
     assert not torch.isnan(outputs.loss).any(), "Loss contains NaN values"
