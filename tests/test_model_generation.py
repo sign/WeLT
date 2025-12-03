@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from tests.test_model import dataset_to_batch, make_dataset, setup_model
+from tests.test_model import dataset_to_batch, make_dataset, setup_tiny_model
 
 
 @pytest.fixture(scope="module")
@@ -9,7 +9,7 @@ def generation_model_setup():
     """Setup the generation model with trained weights."""
 
     # Setup the base model
-    model, processor, collator = setup_model()
+    model, processor, collator = setup_tiny_model()
 
     # Set to eval mode
     model.eval()
@@ -71,6 +71,13 @@ def test_batch_interference(generation_model_setup):
     assert all(result == single for result in all_a_results), \
         f"Not all 'a' generations are equal. Expected all to be '{single}', but got: {all_a_results}"
 
+    # Check that different inputs produce different outputs (model responds to input)
+    # From batch 3: ["a", "b", "a_long_word"] - "a" and "b" should differ
+    result_a = outputs[3][0]
+    result_b = outputs[3][1]
+    assert result_a != result_b, \
+        f"Different inputs 'a' and 'b' produced identical outputs: '{result_a}'. Model may not be responding to input."
+
     print("✅ Generation test passed - no batch interference detected")
 
 
@@ -93,6 +100,11 @@ def test_same_text_in_batch(generation_model_setup):
     assert all(
         result == batch_b[0] for result in batch_b), f"Same text 'b' in batch produced different outputs: {batch_b}"
     print("✅ All 'b' inputs in batch produced same output")
+
+    # Check that different inputs produce different outputs (model responds to input)
+    assert batch_a[0] != batch_b[0], \
+        f"Different inputs 'a' and 'b' produced identical outputs: '{batch_a[0]}'. Model may not be responding to input."
+    print("✅ 'a' and 'b' produce different outputs - model responds to input")
 
     print("✅ Test passed!")
 
