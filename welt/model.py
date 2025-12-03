@@ -409,60 +409,33 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         mapped_latent = self.decoder_mapping(latents)
         return latent_output.past_key_values, mapped_latent
 
-    def _build_decode_attention_mask(self, past_key_values: Any, initial_num_words: torch.Tensor,
-                                     device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        """
-        Build 2D attention mask for decode step that excludes padding positions.
-
-        Cache structure: [initial_positions | padding | generated_positions | new_position]
-
-        For each batch item i:
-        - Valid: positions 0 to initial_num_words[i]-1 (original input)
-        - Invalid: positions initial_num_words[i] to max_initial-1 (padding garbage)
-        - Valid: positions max_initial onwards (generated words + new position)
-        """
-        B = initial_num_words.size(0)  # noqa: N806
-        cache_length = past_key_values.get_seq_length()
-        total_length = cache_length + 1  # +1 for the new token
-        max_initial = initial_num_words.max().item()
-
-        attn_mask = torch.zeros((B, total_length), device=device, dtype=dtype)
-        for i in range(B):
-            init_len = initial_num_words[i].item()
-            attn_mask[i, :init_len] = 1        # Valid initial positions
-            attn_mask[i, max_initial:] = 1     # Valid generated + new position
-
-        return attn_mask
-
     def _generate_word_bytes(
             self,
             latents: torch.Tensor,
             tokenizer: UTF8Tokenizer,
+            bos_embed: torch.Tensor,
             bytes_generation_config: GenerationConfig | None = None,
-            **bytes_generation_kwargs
+            logits_processor: list | None = None,
+            stopping_criteria: list | None = None,
     ) -> torch.Tensor:
-        # Start generation with BOS token
-        current_input_ids = torch.full((len(latents), 1), tokenizer.bos_token_id,
-                                       dtype=torch.long, device=latents.device)
-        current_input_embeds = self.bytes_decoder.get_input_embeddings()(current_input_ids)
+        # Expand cached BOS embedding to batch size
+        batch_size = latents.size(0)
+        bos_embeds = bos_embed.expand(batch_size, -1, -1)  # (B, 1, hidden_dim)
 
-        inputs_embeds = torch.cat([latents, current_input_embeds], dim=1)  # (B, 2, bytes_decoder_dim)
+        inputs_embeds = torch.cat([latents, bos_embeds], dim=1)  # (B, 2, bytes_decoder_dim)
 
         # Generate bytes for this word
         return self.bytes_decoder.generate(
             inputs_embeds=inputs_embeds,
             generation_config=bytes_generation_config,
             tokenizer=tokenizer,
-            logits_processor=[UTF8ValidationLogitsProcessor()],
-            stopping_criteria=[WordStoppingCriteria(tokenizer)],
-            **bytes_generation_kwargs
+            logits_processor=logits_processor,
+            stopping_criteria=stopping_criteria,
         )
 
-    def prepare_next_inputs(self, words: list[str],
-                            words_indexes: torch.Tensor,
-                            processor: TextImageProcessor,
-                            encoded_input: torch.Tensor) -> torch.Tensor:
-        tokenized_words = processor.tokenize_words(words, device=encoded_input.device)
+    def _encode_words(self, words: list[str], processor: TextImageProcessor, device: torch.device) -> torch.Tensor:
+        """Encode words into embeddings for the next decode step."""
+        tokenized_words = processor.tokenize_words(words, device=device)
         new_input_ids = tokenized_words.input_ids.unsqueeze(1)
         new_attention_mask = tokenized_words.attention_mask.unsqueeze(1)
 
@@ -470,18 +443,8 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         new_input_images = new_input_images.unsqueeze(1)
         new_input_images_dimensions = new_input_images_dimensions.unsqueeze(1)
 
-        new_encoded_input = self.encode_input(new_input_ids, new_attention_mask,
-                                              new_input_images, new_input_images_dimensions)
-
-        # Extend the encoded input with an empty tensor
-        empty_word = torch.zeros_like(encoded_input[:, 0:1])
-        encoded_input = torch.cat([encoded_input, empty_word], dim=1)
-
-        # Apply the new words' indexes to the encoded input
-        batch_indices = torch.arange(encoded_input.size(0), device=encoded_input.device)
-        encoded_input[batch_indices, words_indexes] = new_encoded_input.squeeze(1)
-
-        return encoded_input
+        return self.encode_input(new_input_ids, new_attention_mask,
+                                 new_input_images, new_input_images_dimensions).squeeze(1)  # (B, hidden_dim)
 
     def _prep_bytes_generation_config(self,
                                       max_word_length: int,
@@ -501,7 +464,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
         return bytes_generation_config
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate(
             self,
             input_ids: torch.Tensor,
@@ -514,71 +477,67 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             bytes_generation_config: GenerationConfig | None = None,
             **_unused_kwargs):
         """
-        Generate text sequences using iterative latent-then-bytes generation.
+        Generate text using prefill/decode with KV-cache.
 
-        This method implements a two-level generation process:
-        1. Latent transformer generates latent states (greedy only for now)
-        2. Bytes decoder generates words using full HuggingFace generation capabilities
-
-        In practice, this means:
-        1. self.encode_input(input_ids, attention_mask, input_images)
-        2. self.latent_transformer.generate(...) to get latent states
-        3. self.bytes_decoder.generate(...) to generate a single word from latent states (sequence of bytes)
-        4. Detokenize the generated bytes to get the final word
-        5. Create a new input_ids tensor for the new bytes. new attention_mask,
-            and an input_images tensor only for the new word (using render_texts())
-        6. Call self.encode_input() again with the new input_ids, attention_mask, and input_images
-        7. Concatenate the encoded input with the previous encoded input to form the
-            new input for the next word generation
-        8. Repeat from step 2 until max_generated_words is reached, or the generated word is just an EOS token.
-
-        We utilize the HuggingFace generation cache to efficiently generate.
+        1. Prefill: encode input and process full sequence to build KV-cache
+        2. Decode loop: for each word, encode it, run single decode step, generate bytes
 
         Args:
-            input_ids: Text input tokens (B, L, T) for encoding
-            input_attention_mask: Attention within a word (B, L, T)
-            input_images: (BATCH, LENGTH, CHANNELS, HEIGHT, WIDTH)
-            input_images_dimensions: (BATCH, LENGTH, 2)
-            attention_mask: Attention across words (BATCH, 1, LENGTH, LENGTH)
-            processor: TextImageProcessor instance for tokenization and image processing
-            max_generated_words: Maximum number of words to generate
-            bytes_generation_config: Generation config for bytes_decoder
+            input_ids: (B, L, T) - text input tokens
+            input_attention_mask: (B, L, T) - attention within each word
+            input_images: (B, L, C, H, W) - input images
+            input_images_dimensions: (B, L, 2) - original image dimensions
+            attention_mask: (B, 1, L, L) - causal attention across words
+            processor: TextImageProcessor for tokenization and rendering
+            max_generated_words: maximum words to generate
+            bytes_generation_config: optional GenerationConfig for bytes_decoder
         """
-        bytes_generation_config = self._prep_bytes_generation_config(processor.max_word_length,
-                                                                     processor.tokenizer,
-                                                                     bytes_generation_config)
-
-        num_words = self._num_words_per_datum(input_attention_mask)
-        initial_num_words = num_words.clone()
-        batch_size = len(input_images)
+        tokenizer = processor.tokenizer
         device = input_ids.device
-        all_generated_words = [[] for _ in range(batch_size)]
+        batch_size = len(input_images)
 
-        # Encode initial input and prefill
+        bytes_generation_config = self._prep_bytes_generation_config(
+            processor.max_word_length, tokenizer, bytes_generation_config)
+        logits_processor = [UTF8ValidationLogitsProcessor()]
+        stopping_criteria = [WordStoppingCriteria(tokenizer)]
+        bos_embed = self.bytes_decoder.get_input_embeddings()(
+            torch.tensor([[tokenizer.bos_token_id]], device=device))
+
+        # Prefill: encode input and build KV-cache
+        initial_num_words = self._num_words_per_datum(input_attention_mask)
         encoded_input = self.encode_input(input_ids, input_attention_mask, input_images, input_images_dimensions)
-        past_key_values, latents = self._prefill(encoded_input, attention_mask, num_words)
+        past_key_values, latents = self._prefill(encoded_input, attention_mask, initial_num_words)
+
+        # Pre-allocate decode attention mask (1s everywhere except padding positions)
+        max_initial = initial_num_words.max().item()
+        decode_mask_full = torch.ones((batch_size, max_initial + max_generated_words), device=device,
+                                      dtype=attention_mask.dtype)
+        positions = torch.arange(decode_mask_full.size(1), device=device)
+        padding_mask = (positions >= initial_num_words.unsqueeze(1)) & (positions < max_initial)
+        decode_mask_full.masked_fill_(padding_mask, 0)
+
+        # Generation loop
+        all_generated_words = [[] for _ in range(batch_size)]
         words = None
 
         for _ in range(max_generated_words):
-            # Decode step (skip on first iteration - we already have latents from prefill)
             if words is not None:
-                encoded_input = self.prepare_next_inputs(words, num_words, processor, encoded_input)
-                num_words += 1
-                batch_indices = torch.arange(batch_size, device=device)
-                new_embedding = encoded_input[batch_indices, num_words - 1].unsqueeze(1)
-                decode_mask = self._build_decode_attention_mask(
-                    past_key_values, initial_num_words, device, attention_mask.dtype)
+                # Decode: encode new words and run single transformer step
+                new_embedding = self._encode_words(words, processor, device).unsqueeze(1)
+                decode_mask = decode_mask_full[:, :past_key_values.get_seq_length() + 1]
                 past_key_values, latents = self._decode(past_key_values, new_embedding, decode_mask)
 
-            # Generate word from latents
-            generated_bytes = self._generate_word_bytes(latents, processor.tokenizer, bytes_generation_config)
-            words = processor.tokenizer.batch_decode(generated_bytes, skip_special_tokens=True)
+            # Generate bytes from latents
+            generated_bytes = self._generate_word_bytes(
+                latents, tokenizer, bos_embed, bytes_generation_config, logits_processor, stopping_criteria)
+            words = tokenizer.batch_decode(generated_bytes, skip_special_tokens=True)
 
             if all(len(w) == 0 for w in words):
                 break
 
+            # Collect words (skip if previous word was empty = EOS for that sample)
             for word, collected in zip(words, all_generated_words, strict=False):
-                if len(collected) == 0 or len(collected[-1]) > 0:
+                if not collected or collected[-1]:
                     collected.append(word)
 
         return ["".join(words) for words in all_generated_words]

@@ -1,6 +1,6 @@
 # Generation Benchmark Results
 
-Benchmark comparing generation performance before and after the prefill/decode refactor.
+Benchmark comparing generation performance across different implementations.
 
 **Test Environment:**
 - Model: Tiny test model (~12.5M parameters)
@@ -8,7 +8,7 @@ Benchmark comparing generation performance before and after the prefill/decode r
 - Max generated words: 5
 - Runs: 20 (after 5 warmup runs)
 
-## Before (No KV-Cache)
+## V1: Before (No KV-Cache)
 
 The old implementation re-computed the full attention at each generation step without utilizing KV-cache.
 
@@ -20,9 +20,9 @@ The old implementation re-computed the full attention at each generation step wi
 | batch_4_medium | 4 | 146.76 | 123.11 | 208.89 |
 | batch_3_mixed | 3 | 125.32 | 113.26 | 157.48 |
 
-## After (With KV-Cache)
+## V2: With KV-Cache
 
-The new implementation uses prefill/decode pattern with KV-cache for incremental generation.
+Prefill/decode pattern with KV-cache for incremental generation.
 
 | Test Case | Batch Size | Avg (ms) | Min (ms) | Max (ms) |
 |-----------|------------|----------|----------|----------|
@@ -32,19 +32,37 @@ The new implementation uses prefill/decode pattern with KV-cache for incremental
 | batch_4_medium | 4 | 123.30 | 112.31 | 165.77 |
 | batch_3_mixed | 3 | 113.39 | 109.04 | 122.13 |
 
+## V3: Optimized (Current)
+
+Additional optimizations:
+- Vectorized attention mask construction (no Python loops)
+- Reuse logits processor and stopping criteria across iterations
+- Simplified word encoding (no growing tensor)
+- Cache BOS embedding (created once, reused every iteration)
+- Use `torch.inference_mode()` instead of `torch.no_grad()`
+- Pre-allocate decode attention mask (slice instead of concatenate each iteration)
+
+| Test Case | Batch Size | Avg (ms) | Min (ms) | Max (ms) |
+|-----------|------------|----------|----------|----------|
+| single_short | 1 | 62.02 | 57.72 | 83.71 |
+| single_medium | 1 | 65.91 | 61.57 | 81.09 |
+| batch_4_short | 4 | 90.18 | 87.32 | 98.47 |
+| batch_4_medium | 4 | 104.35 | 98.37 | 121.39 |
+| batch_3_mixed | 3 | 103.84 | 96.61 | 125.04 |
+
 ## Summary
 
-| Test Case | Speedup |
-|-----------|---------|
-| single_short | 1.07x |
-| single_medium | 1.12x |
-| batch_4_short | 1.07x |
-| batch_4_medium | 1.19x |
-| batch_3_mixed | 1.11x |
+| Test Case | V1 → V3 Speedup |
+|-----------|-----------------|
+| single_short | 1.19x |
+| single_medium | 1.22x |
+| batch_4_short | 1.34x |
+| batch_4_medium | 1.41x |
+| batch_3_mixed | 1.21x |
 
-**Average speedup: ~1.11x (11% faster)**
+**Total speedup from V1 to V3: ~1.27x (27% faster)**
 
-The KV-cache implementation provides modest but consistent speedups. The benefit is expected to be more pronounced with:
+The biggest gains are on batch_4_medium (1.41x). Benefits expected to be more pronounced with:
 - Longer sequences (more tokens to cache)
 - More generation steps
 - GPU execution (where memory bandwidth is more critical)
