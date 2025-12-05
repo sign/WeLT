@@ -3,7 +3,7 @@ from transformers import AutoConfig, AutoModel
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
-from vit_pytorch.na_vit_nested_tensor import NaViT
+from vit_pytorch.na_vit import NaViT
 
 
 class NaViTConfig(PretrainedConfig):

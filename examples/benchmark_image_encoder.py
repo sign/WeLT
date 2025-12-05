@@ -1,7 +1,11 @@
 import torch
+from font_download import FontConfig
+from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
+from pixel_renderer import PixelRendererProcessor
 from tqdm import tqdm
 from transformers import AutoImageProcessor, ViTModel
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
+from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.processor import TextImageProcessor
 from welt.vision.batch_image_encoder import encode_images, encode_padded_images
@@ -25,8 +29,11 @@ distributed & accumulation) = 176
 words = text.strip().split()  # 117~ words
 print(len(words))
 
+font_config = FontConfig(sources=FONTS_NOTO_SANS)
 processor = TextImageProcessor(
+    pretokenizer=WordsSegmentationTokenizer(),
     tokenizer=UTF8Tokenizer(),
+    renderer=PixelRendererProcessor(font=font_config),
     image_processor=AutoImageProcessor.from_pretrained("WinKawaks/vit-tiny-patch16-224", use_fast=True),
 )
 
