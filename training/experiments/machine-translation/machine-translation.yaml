@@ -11,8 +11,6 @@ dataset_text_template: "<en>\x0E{translation[en]}\x0F<he> {translation[he]}"
 max_sequence_length: 128
 max_word_length: 16
 
-max_eval_samples: 32
-
 # Data Loader
 dataloader_num_workers: 8
 dataloader_prefetch_factor: 4
@@ -36,6 +34,7 @@ eval_on_start: true
 eval_strategy: steps
 eval_steps: 500
 metric_for_best_model: accuracy
+max_eval_samples: 32
 
 # Logging
 logging_steps: 10

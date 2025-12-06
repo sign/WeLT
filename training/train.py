@@ -35,9 +35,6 @@ def enable_optimizations():
     torch.backends.cuda.enable_flash_sdp(True)
     torch.backends.cuda.enable_mem_efficient_sdp(True)
     torch.backends.cuda.enable_math_sdp(False)
-    # Enable TF32 on A100 even with bf16 (helps GEMMs when anything falls back to fp32):
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
 
     # For debugging purposes only:
     # torch.autograd.set_detect_anomaly(True)

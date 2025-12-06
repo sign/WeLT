@@ -3,6 +3,26 @@ import warnings
 import torch
 from utf8_tokenizer.control import ControlTokens
 
+# Module-level caches that grow as needed
+_tril_cache: torch.Tensor | None = None
+_arange_cache: torch.Tensor | None = None
+
+
+def _get_tril(size: int) -> torch.Tensor:
+    """Get a lower triangular matrix of at least the given size, using cached version if possible."""
+    global _tril_cache
+    if _tril_cache is None or len(_tril_cache) < size:
+        _tril_cache = torch.tril(torch.ones((size, size), dtype=torch.bool))
+    return _tril_cache
+
+
+def _get_arange(size: int) -> torch.Tensor:
+    """Get an arange tensor of at least the given size, using cached version if possible."""
+    global _arange_cache
+    if _arange_cache is None or len(_arange_cache) < size:
+        _arange_cache = torch.arange(size, dtype=torch.long)
+    return _arange_cache
+
 
 def get_shift_blocks(words: list[str]):
     """
@@ -59,11 +79,15 @@ def get_attention_mask_for_packed_sequence(seq_lengths: list[int], words: list[s
 
     mask = torch.zeros((1, total_length, total_length), dtype=torch.bool)
 
-    current_position = 0
+    # Use module-level cached tril matrix
+    max_len = max(seq_lengths)
+    tril = _get_tril(max_len)
+
+    start_position = 0
     for length in seq_lengths:
-        tril = torch.tril(torch.ones((length, length), dtype=torch.bool))
-        mask[0, current_position:current_position + length, current_position:current_position + length] = tril
-        current_position += length
+        end_position = start_position + length
+        mask[0, start_position:end_position, start_position:end_position] = tril[:length, :length]
+        start_position = end_position
 
     if words is not None:
         add_self_attention_blocks(mask, words)
@@ -72,13 +96,7 @@ def get_attention_mask_for_packed_sequence(seq_lengths: list[int], words: list[s
 
 
 def get_position_ids_for_packed_sequence(seq_lengths: list[int]) -> torch.Tensor:
-    total_length = sum(seq_lengths)
-
-    positions = torch.zeros(total_length, dtype=torch.long)
-
-    current_position = 0
-    for length in seq_lengths:
-        positions[current_position:current_position + length] = torch.arange(length, dtype=torch.long)
-        current_position += length
-
-    return positions
+    # Use module-level cached arange and slice
+    max_len = max(seq_lengths)
+    arange = _get_arange(max_len)
+    return torch.cat([arange[:length] for length in seq_lengths])

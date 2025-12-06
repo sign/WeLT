@@ -12,7 +12,8 @@ from welt.processor import TextImageProcessor
 @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 def sample(model_path: Path):
     last_checkpoint = get_last_checkpoint(model_path)
-    model = WordLatentTransformerForCausalLM.from_pretrained(last_checkpoint, attn_implementation="flash_attention_2")
+    model: WordLatentTransformerForCausalLM = \
+        WordLatentTransformerForCausalLM.from_pretrained(last_checkpoint, attn_implementation="flash_attention_2")
     processor = TextImageProcessor.from_pretrained(model_path)
 
     model.eval()
@@ -44,5 +45,5 @@ def sample(model_path: Path):
 
 
 if __name__ == "__main__":
-    model_path = Path(__file__).parent / "output"
+    model_path = Path(__file__).parent.parent / "output" / "signed-to-spoken"
     sample(model_path)

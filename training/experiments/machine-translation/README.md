@@ -63,6 +63,7 @@ With the following shared arguments:
 ### Using configs
 
 ```bash
+python -m training.train training/experiments/machine-translation/machine-translation.yaml
 python -m training.train training/experiments/machine-translation/machine-translation-signed-spoken.yaml
 modal run -m training.modal::train --config="training/experiments/machine-translation/machine-translation-signed-spoken.yaml"
 ```
