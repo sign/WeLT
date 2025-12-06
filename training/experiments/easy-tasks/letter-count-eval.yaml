@@ -14,10 +14,10 @@ max_word_length: 32
 
 # EvaluationArguments
 task_word: "<count>"
-batch_size: 256
-max_train_samples_for_eval: 256
-max_eval_samples_for_eval: 256
-max_test_samples_for_eval: 256
+batch_size: 64
+max_train_samples_for_eval: 64
+max_eval_samples_for_eval: 64
+max_test_samples_for_eval: 64
 eval_metrics: ["bleu", "cer", "rouge", "sacrebleu"]
 log_examples_every: 1 # Batch
 

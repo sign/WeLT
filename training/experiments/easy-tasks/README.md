@@ -16,6 +16,3 @@ python -m training.train training/experiments/easy-tasks/letter-count.yaml
 ```bash
 python -m training.evaluate training/experiments/easy-tasks/letter-count-eval.yaml
 ```
-```bash
-python -m training.train training/experiments/machine-translation/machine-translation-en-ne.yaml
-```
