@@ -3,15 +3,15 @@ import torch
 from cachetools import LRUCache
 from datasets import Dataset
 from pixel_renderer import PixelRendererProcessor
-from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
+from transformers import (ImageProcessingMixin, PreTrainedTokenizer,
+                          ProcessorMixin)
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
-from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
+from words_segmentation.tokenizer import \
+    WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
 
-from welt.attention import (
-    get_attention_mask_for_packed_sequence,
-    get_position_ids_for_packed_sequence,
-    get_shift_blocks,
-)
+from welt.attention import (get_attention_mask_for_packed_sequence,
+                            get_position_ids_for_packed_sequence,
+                            get_shift_blocks)
 from welt.collator import collate_fn, stack_pad_tensors
 from welt.noop import NoopImageProcessor
 
@@ -211,13 +211,21 @@ class TextImageProcessor(ProcessorMixin):
             else:
                 batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
 
+        def _process_example_with_optional_label(words, seq_lengths, label=None):
+            d = self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
+            if label is not None:
+                d["label"] = label
+            return d
         if "label" in batch:
-            dicts = [ {**self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed), "label": label}
-                for words, seq_lengths, label in zip(batch["words"], batch["seq_lengths"], batch["label"], strict=False)]
-
+            dicts = [
+                _process_example_with_optional_label(words, seq_lengths, label)
+                for words, seq_lengths, label in zip(batch["words"], batch["seq_lengths"], batch["label"], strict=False)
+            ]
         else:
-            dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
-                    for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)]
+            dicts = [
+                _process_example_with_optional_label(words, seq_lengths)
+                for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)
+            ]
 
         if collated:
             return collate_fn(dicts)
