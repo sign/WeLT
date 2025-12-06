@@ -68,6 +68,37 @@ def separate_task(example, task_word: str):
     cut = index + len(task_word) + 1
     return {"text": sentence[:cut], "label": sentence[cut:]}
 
+def run_eval_for_split(model, data_loader, processor, device, eval_args, bytes_generation_config, pred_file_path, name):
+    lst_pred_texts = []
+    lst_actual_texts = []
+
+    model.eval()
+    with torch.inference_mode():
+        for i, batch in enumerate(tqdm(data_loader, desc=name)):
+            pred_text = model.generate(
+                input_ids=batch["input_ids"].to(device),
+                input_attention_mask = batch["input_attention_mask"].to(device),
+                input_images = batch["input_images"].to(device),
+                attention_mask = batch["attention_mask"].to(device),
+                input_images_dimensions = batch["input_images_dimensions"].to(device),
+                processor=processor,
+                bytes_generation_config=bytes_generation_config
+            )
+            lst_pred_texts.extend(pred_text)
+            lst_actual_texts.extend(batch["label"])
+
+            if eval_args.log_examples_every and i % eval_args.log_examples_every == 0:
+                logger.info("Label: %s\tPred: %s\n", batch['label'][0], pred_text[0])
+
+
+    # Write to a file
+    with open(pred_file_path, "w") as f:
+        for ref, hyp in zip(lst_actual_texts, lst_pred_texts, strict=False):
+            f.write(json.dumps({"reference": ref, "prediction": hyp}) + "\n")
+    logger.info(f"{name} predictions written to {pred_file_path}")
+
+    return lst_actual_texts, lst_pred_texts
+
 def eval(args: list[str] | None | str = None): # noqa: C901
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -93,11 +124,11 @@ def eval(args: list[str] | None | str = None): # noqa: C901
                                   do_train=False)
 
 
-    # if "train" not in text_datasets:
-    #     raise ValueError("--do_train requires a train dataset")  # noqa: TRY003
-    # train_dataset = limit_dataset_size(text_datasets["train"],
-    #                                     max_samples=data_args.max_train_samples,
-    #                                     streaming=data_args.streaming)
+    if "train" not in text_datasets:
+        raise ValueError("--do_train requires a train dataset")  # noqa: TRY003
+    train_dataset = limit_dataset_size(text_datasets["train"],
+                                        max_samples=data_args.max_train_samples,
+                                        streaming=data_args.streaming)
 
     if "validation" not in text_datasets:
         raise ValueError("--do_eval requires a validation dataset")  # noqa: TRY003
@@ -112,26 +143,26 @@ def eval(args: list[str] | None | str = None): # noqa: C901
                                         streaming=data_args.streaming)
 
 
-    # train_dataset = train_dataset.map(lambda x: seperate_task(x, eval_args.task_word))
-    eval_dataset = eval_dataset.map(lambda x: seperate_task(x, eval_args.task_word))
-    test_dataset = test_dataset.map(lambda x: seperate_task(x, eval_args.task_word))
+    train_dataset = train_dataset.map(lambda x: separate_task(x, eval_args.task_word))
+    eval_dataset = eval_dataset.map(lambda x: separate_task(x, eval_args.task_word))
+    test_dataset = test_dataset.map(lambda x: separate_task(x, eval_args.task_word))
 
 
 
     # Transform the datasets to the format expected by the model
-    # if train_dataset:
-    #     train_dataset = train_dataset.with_transform(processor)
+    if train_dataset:
+        train_dataset = train_dataset.with_transform(processor)
     if eval_dataset:
         eval_dataset = eval_dataset.with_transform(processor)
     if test_dataset:
         test_dataset = test_dataset.with_transform(processor)
 
-    # train_loader = DataLoader(
-    #     train_dataset,
-    #     batch_size=eval_args.batch_size,
-    #     shuffle=False,
-    #     collate_fn=collator
-    # )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=eval_args.batch_size,
+        shuffle=False,
+        collate_fn=collator
+    )
     eval_loader = DataLoader(
         eval_dataset,
         batch_size=eval_args.batch_size,
@@ -161,74 +192,35 @@ def eval(args: list[str] | None | str = None): # noqa: C901
             else Path(model_args.model_name_or_path)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    # train_pred_file_path = model_dir / "train_predictions.jsonl"
+    train_pred_file_path = model_dir / "train_predictions.jsonl"
     eval_pred_file_path = model_dir / "eval_predictions.jsonl"
     test_pred_file_path = model_dir / "test_predictions.jsonl"
 
+    train_actual_texts, train_pred_texts = run_eval_for_split(
+        model, train_loader, processor, device, eval_args, bytes_generation_config, train_pred_file_path, "Train"
+    )
 
-    ## EVAL SET
-    eval_pred_texts = []
-    eval_actual_texts = []
+    eval_actual_texts, eval_pred_texts = run_eval_for_split(
+        model, eval_loader, processor, device, eval_args, bytes_generation_config, eval_pred_file_path, "Eval"
+    )
 
-    model.eval()
-    with torch.inference_mode():
-        for i, batch in enumerate(tqdm(eval_loader, desc="Eval")):
-            pred_text = model.generate(
-                input_ids=batch["input_ids"].to(device),
-                input_attention_mask = batch["input_attention_mask"].to(device),
-                input_images = batch["input_images"].to(device),
-                attention_mask = batch["attention_mask"].to(device),
-                input_images_dimensions = batch["input_images_dimensions"].to(device),
-                processor=processor,
-                bytes_generation_config=bytes_generation_config
-            )
-            eval_pred_texts.extend(pred_text)
-            eval_actual_texts.extend(batch["label"])
+    test_actual_texts, test_pred_texts = run_eval_for_split(
+        model, test_loader, processor, device, eval_args, bytes_generation_config, test_pred_file_path, "Test"
+    )
 
-            if eval_args.log_examples_every and i % eval_args.log_examples_every == 0:
-                logger.info("Label: %s\tPred: %s\n", batch['label'][0], pred_text[0])
-
-
-    # Write to a file
-    with open(eval_pred_file_path, "w") as f:
-        for ref, hyp in zip(eval_actual_texts, eval_pred_texts, strict=False):
-            f.write(json.dumps({"reference": ref, "prediction": hyp}) + "\n")
-    logger.info(f"Eval predictions written to {eval_pred_file_path}")
-
-
-    ## TEST SET
-    test_pred_texts = []
-    test_actual_texts = []
-    with torch.inference_mode():
-        for i, batch in enumerate(tqdm(test_loader, desc="Test")):
-            pred_text = model.generate(
-                input_ids=batch["input_ids"].to(device),
-                input_attention_mask = batch["input_attention_mask"].to(device),
-                input_images = batch["input_images"].to(device),
-                attention_mask = batch["attention_mask"].to(device),
-                input_images_dimensions = batch["input_images_dimensions"].to(device),
-                processor=processor,
-                bytes_generation_config=bytes_generation_config
-                )
-            test_pred_texts.extend(pred_text)
-            test_actual_texts.extend(batch["label"])
-
-            if eval_args.log_examples_every and i % eval_args.log_examples_every == 0:
-                logger.info("Label: %s\tPred: %s\n", batch['label'][0], pred_text[0])
-
-
-    # Write to a file
-    with open(test_pred_file_path, "w") as f:
-        for ref, hyp in zip(test_actual_texts, test_pred_texts, strict=False):
-            f.write(json.dumps({"reference": ref, "prediction": hyp}) + "\n")
-    logger.info(f"Test predictions written to {test_pred_file_path}")
-
-
+    train_results = {}
     eval_results = {}
     test_results = {}
     for metric_name in eval_args.eval_metrics:
         metric = evaluate.load(metric_name)
         is_sacrebleu = metric_name.lower() == "sacrebleu"
+
+        train_result = metric.compute(
+            predictions=train_pred_texts,
+            references=[[r] for r in train_actual_texts] if is_sacrebleu else train_actual_texts
+        )
+        logger.info("Train %s: %s", metric_name, train_result)
+        train_results[metric_name] = train_result
 
         eval_result = metric.compute(
             predictions=eval_pred_texts,
@@ -245,9 +237,14 @@ def eval(args: list[str] | None | str = None): # noqa: C901
         test_results[metric_name] = test_result
 
     # Save evals
+    with open(model_dir / "train_results.json", "w") as f:
+        json.dump(train_results, f, indent=4)
+    logger.info(f"Train results written to {model_dir / 'train_results.json'}")
+
     with open(model_dir / "eval_results.json", "w") as f:
         json.dump(eval_results, f, indent=4)
     logger.info(f"Eval results written to {model_dir / 'eval_results.json'}")
+
     with open(model_dir / "test_results.json", "w") as f:
         json.dump(test_results, f, indent=4)
     logger.info(f"Test results written to {model_dir / 'test_results.json'}")
