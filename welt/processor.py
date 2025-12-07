@@ -1,4 +1,6 @@
 
+from collections import defaultdict
+
 import torch
 from cachetools import LRUCache
 from datasets import Dataset
@@ -62,18 +64,25 @@ class TextImageProcessor(ProcessorMixin):
             return torch.empty(1,), torch.empty(1,)
 
         images = [self.images_cache.get(text, None) for text in texts]
-        missing_texts = [(i, texts[i]) for i, v in enumerate(images) if v is None]
-        renders = (self.renderer.render_text(text) for _, text in missing_texts)
-        processed = (self.image_processor(image, do_center_crop=False, do_resize=False, return_tensors="pt")
-                     for image in renders)
-        processed = (p.pixel_values[0] for p in processed)
-        # Update cache and images list
-        for (i, text), image in zip(missing_texts, processed, strict=False):
-            self.images_cache[text] = image
-            images[i] = image
+
+        # Render all missing texts and group by size for efficient batching
+        render_groups = defaultdict(list)
+        index_groups = defaultdict(list)
+        for i, v in enumerate(images):
+            if v is None:
+                render = self.renderer.render_text(texts[i])
+                index_groups[render.shape].append(i)
+                render_groups[render.shape].append(render)
+
+        # Process each shape group and update cache
+        for shape, renders in render_groups.items():
+            processed = self.image_processor(renders, return_tensors="pt", do_center_crop=False, do_resize=False)
+            pixel_values = processed.pixel_values
+            for i, pixel_value in zip(index_groups[shape], pixel_values, strict=True):
+                self.images_cache[texts[i]] = pixel_value
+                images[i] = pixel_value
 
         image_dimensions = torch.tensor([img.shape[-2:] for img in images], dtype=torch.long)
-
         return stack_pad_tensors(images), image_dimensions
 
     def pretokenize(self, text: str) -> list[str]:
