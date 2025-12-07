@@ -39,20 +39,3 @@ After encoding, the results are reordered and reassembled back into the original
 ensuring consistency and eliminating the artifacts introduced by padding.
 This provides a reliable and scalable way to extract embeddings from heterogeneous image sets while still
 leveraging batch parallelism where possible.
-
-### Masked ViT Patcher [./masked_vit_patcher.py](./masked_vit_patcher.py)
-
-This utility patches Hugging Face ViT models to be robust to zero-padding and mixed spatial sizes without changing
-external APIs. It:
-
-1. builds a per-sample patch-validity mask from pixel zeros;
-2. applies pre-softmax attention masking so padded patches never receive or send attention;
-3. recomputes positional embeddings on each sample’s tight (content-only) grid and scatters them into the full
-   sequence so identical content shares identical pos-encs regardless of padding, and;
-4. zeroes padded positions in the outputs (last hidden state, final hidden_states layer, pooler_output, logits)
-   while preserving the CLS token.
-
-Implementation-wise, it switches ViT to eager attention, monkey-patches the attention kernel to support
-pre-softmax masks, overrides ViTEmbeddings.forward to inject invariant positional encodings, and wraps
-`encoder.forward/model.forward` to merge masks and perform post-mask cleanup. Result: ViT becomes padding-invariant
-and returns consistent embeddings for variable-sized inputs, with minimal overhead and no caller-side changes.

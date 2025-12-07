@@ -28,13 +28,6 @@ def encode_images(image_encoder: ImageEncoder,
                   input_images: torch.Tensor,
                   input_images_dimensions: torch.Tensor) -> torch.Tensor:
     """Image encoder should accept variable size images and return consistent embeddings."""
-
-    # TODO: this is actually SLOWER right now. https://github.com/lucidrains/vit-pytorch/issues/347
-    # if is_vit_model(image_encoder):
-    #     # For ViT models we need to implement a "fast" path that knows how to handle padding correctly
-    #     maybe_patch_vit_model(image_encoder)
-    #     return encode_padded_images(image_encoder, input_images)
-
     B, L, *_ = input_images.shape  # noqa: N806
 
     # Recreate as list of lists if input is a nested tensor, cropping padding from each image
