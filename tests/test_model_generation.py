@@ -103,7 +103,8 @@ def test_same_text_in_batch(generation_model_setup):
 
     # Check that different inputs produce different outputs (model responds to input)
     assert batch_a[0] != batch_b[0], \
-        f"Different inputs 'a' and 'b' produced identical outputs: '{batch_a[0]}'. Model may not be responding to input."
+        (f"Different inputs 'a' and 'b' produced identical outputs: '{batch_a[0]}'. "
+         f"Model may not be responding to input.")
     print("✅ 'a' and 'b' produce different outputs - model responds to input")
 
     print("✅ Test passed!")
