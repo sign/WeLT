@@ -9,7 +9,6 @@ from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.processor import TextImageProcessor
 from welt.vision.batch_image_encoder import encode_images, encode_padded_images
-from welt.vision.masked_vit_patcher import maybe_patch_vit_model
 from welt.vision.navit import NaViTConfig, NaViTModel
 
 text = """
@@ -41,9 +40,6 @@ renders, dimensions = processor.render_texts(words)
 
 vit_model = ViTModel.from_pretrained("WinKawaks/vit-tiny-patch16-224")
 
-patched_vit_model = ViTModel.from_pretrained("WinKawaks/vit-tiny-patch16-224")
-maybe_patch_vit_model(patched_vit_model)
-
 # Similar model~
 navit_model = NaViTModel(NaViTConfig(
     image_size=512,  # Max size for pos embeddings
@@ -56,24 +52,20 @@ navit_model = NaViTModel(NaViTConfig(
 ))
 
 num_steps = 10
-batch_size = 1
+batch_size = 10
 batch = torch.stack([renders] * batch_size)
 dimensions_batch = torch.stack([dimensions] * batch_size)
 
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
-# if torch.backends.mps.is_available():
+# elif torch.backends.mps.is_available():
 #     device = "mps"
 
 vit_model = vit_model.to(device)
-patched_vit_model = patched_vit_model.to(device)
 navit_model = navit_model.to(device)
 batch = batch.to(device)
 dimensions_batch = dimensions_batch.to(device)
-
-for _ in tqdm(range(num_steps), desc="Patched ViT model with padding"):
-    encode_padded_images(image_encoder=patched_vit_model, input_images=batch)
 
 for _ in tqdm(range(num_steps), desc="ViT Model grouped"):
     encode_images(image_encoder=vit_model, input_images=batch, input_images_dimensions=dimensions_batch)
@@ -81,5 +73,5 @@ for _ in tqdm(range(num_steps), desc="ViT Model grouped"):
 for _ in tqdm(range(num_steps), desc="ViT Model with padding"):
     encode_padded_images(image_encoder=vit_model, input_images=batch)
 
-for _ in tqdm(range(num_steps), desc="NaViT Model grouped"):
+for _ in tqdm(range(num_steps), desc="NaViT Model direct"):
     encode_images(image_encoder=navit_model, input_images=batch, input_images_dimensions=dimensions_batch)

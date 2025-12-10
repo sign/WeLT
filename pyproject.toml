@@ -18,7 +18,7 @@ dependencies = [
     "vit-pytorch", # For NaViT model implementation
     # Our packages
     "words-segmentation", # For pre-tokenization into words
-    "utf8-tokenizer", # For tokenization of bytes
+    "utf8-tokenizer[fast]", # For tokenization of bytes
     "pixel-renderer[pangocairo]", # For text rendering into images
 ]
 
@@ -49,7 +49,6 @@ packages = [
 line-length = 120
 extend-exclude = [
     "training/experiments/*",
-    "welt/vision/masked_vit_patcher.py", # Hacky patching file
 ]
 
 [tool.ruff.lint]
