@@ -1,0 +1,26 @@
+# Model Setup
+image_encoder_model_name_or_path: null
+bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
+latent_transformer_model_name_or_path: sbintuitions/tiny-lm
+bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
+model_name_or_path: output/letter-count-small-cer/model.safetensors
+
+# Dataset setup
+dataset_name: magus4450/english-words-small-letter-count
+dataset_config_name: 
+dataset_text_template: "<text>\x0E{text}\x0F<count> {count}"
+max_sequence_length: 128
+max_word_length: 32
+
+# EvaluationArguments
+task_word: "<count>"
+batch_size: 64
+max_train_samples_for_eval: 64
+max_eval_samples_for_eval: 64
+max_test_samples_for_eval: 64
+eval_metrics: ["bleu", "cer", "rouge", "sacrebleu"]
+log_examples_every: 1 # Batch
+
+# Dtype
+# bf16: true
+dtype: bfloat16
