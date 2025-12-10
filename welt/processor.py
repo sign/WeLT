@@ -5,15 +5,15 @@ import torch
 from cachetools import LRUCache
 from datasets import Dataset
 from pixel_renderer import PixelRendererProcessor
-from transformers import (ImageProcessingMixin, PreTrainedTokenizer,
-                          ProcessorMixin)
+from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
-from words_segmentation.tokenizer import \
-    WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
+from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
 
-from welt.attention import (get_attention_mask_for_packed_sequence,
-                            get_position_ids_for_packed_sequence,
-                            get_shift_blocks)
+from welt.attention import (
+    get_attention_mask_for_packed_sequence,
+    get_position_ids_for_packed_sequence,
+    get_shift_blocks,
+)
 from welt.collator import collate_fn, stack_pad_tensors
 from welt.noop import NoopImageProcessor
 
@@ -201,10 +201,12 @@ class TextImageProcessor(ProcessorMixin):
             "labels_output": tokenized_labels.input_ids[:, 1:]  # Remove BOS token from output labels
         }
 
-    def __call__(self,
-                 batch: dict[str, list[str]] | str | list[str],
-                 collated=False,
-                 packed=False) -> dict[str, torch.Tensor]:
+    def __call__(  # noqa: C901
+        self,
+        batch: dict[str, list[str]] | str | list[str],
+        collated=False,
+        packed=False,
+    ) -> dict[str, torch.Tensor]:
         if isinstance(batch, str):
             batch = {"text": [batch]}
 

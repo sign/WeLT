@@ -8,14 +8,12 @@ Tests cover the custom methods that differ from standard Seq2SeqTrainer:
 """
 
 import tempfile
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from datasets import Dataset
 from transformers import GenerationConfig, Seq2SeqTrainingArguments
 
-from welt.collator import collate_fn
 from welt.model_utils import setup_model
 from welt.trainer import WeLTTrainer
 
@@ -246,7 +244,7 @@ class TestComputeGenerationMetrics:
                 metrics = trainer.compute_generation_metrics([], [])
                 # If it returns, should be a dict
                 assert isinstance(metrics, dict)
-            except Exception:
+            except (ValueError, ZeroDivisionError):
                 # Some metrics may fail on empty input, which is acceptable
                 pass
 
@@ -514,7 +512,7 @@ class TestCreateComputeMetricsFn:
             )
 
             metrics = compute_metrics_fn(eval_pred)
- 
+
             assert isinstance(metrics, dict)
             assert "cer" in metrics
 

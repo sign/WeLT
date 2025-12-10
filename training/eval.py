@@ -17,7 +17,7 @@ from transformers.utils import send_example_telemetry
 from training.args_data import DataTrainingArguments
 from training.args_eval import EvaluationArguments
 from training.args_model import ModelArguments
-from training.train import init_model, limit_dataset_size, load_dataset
+from training.train import init_model, limit_dataset_size, load_dataset, split_streaming_dataset
 from welt.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)

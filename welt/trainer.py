@@ -80,7 +80,7 @@ class WeLTTrainer(Seq2SeqTrainer):
         for metric_name in self.eval_metrics:
             try:
                 self._metrics[metric_name] = evaluate.load(metric_name)
-            except Exception as e:
+            except (FileNotFoundError, ValueError, ImportError) as e:
                 logger.warning(f"Failed to load metric {metric_name}: {e}")
 
     def prediction_step(
@@ -233,7 +233,7 @@ class WeLTTrainer(Seq2SeqTrainer):
                 else:
                     results[metric_name] = result
 
-            except Exception as e:
+            except (ValueError, TypeError, ZeroDivisionError) as e:
                 logger.warning(f"Failed to compute metric {metric_name}: {e}")
 
         return results
