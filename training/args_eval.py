@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from transformers import Seq2SeqTrainingArguments
 
@@ -10,7 +9,7 @@ class EvaluationArguments(Seq2SeqTrainingArguments):
     Extra arguments for evaluation on top of Seq2SeqTrainingArguments.
     """
 
-    eval_metrics: List[str] = field(
+    eval_metrics: list[str] = field(
         default_factory=lambda: ["accuracy"],
         metadata={
             "help": (
@@ -20,7 +19,7 @@ class EvaluationArguments(Seq2SeqTrainingArguments):
         },
     )
 
-    max_train_samples_for_eval: Optional[int] = field(
+    max_train_samples_for_eval: int | None = field(
         default=None,
         metadata={
             "help": (
@@ -29,7 +28,7 @@ class EvaluationArguments(Seq2SeqTrainingArguments):
             )
         },
     )
-    max_eval_samples_for_eval: Optional[int] = field(
+    max_eval_samples_for_eval: int | None = field(
         default=None,
         metadata={
             "help": (
@@ -38,7 +37,7 @@ class EvaluationArguments(Seq2SeqTrainingArguments):
             )
         },
     )
-    max_test_samples_for_eval: Optional[int] = field(
+    max_test_samples_for_eval: int | None = field(
         default=None,
         metadata={
             "help": (
@@ -48,7 +47,7 @@ class EvaluationArguments(Seq2SeqTrainingArguments):
         },
     )
 
-    log_examples_every: Optional[int] = field(
+    log_examples_every: int | None = field(
         default=None,
         metadata={"help": "If set, logs example predictions every N batches."},
     )
