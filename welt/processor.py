@@ -201,10 +201,12 @@ class TextImageProcessor(ProcessorMixin):
             "labels_output": tokenized_labels.input_ids[:, 1:]  # Remove BOS token from output labels
         }
 
-    def __call__(self,
-                 batch: dict[str, list[str]] | str | list[str],
-                 collated=False,
-                 packed=False) -> dict[str, torch.Tensor]:
+    def __call__(  # noqa: C901
+        self,
+        batch: dict[str, list[str]] | str | list[str],
+        collated=False,
+        packed=False,
+    ) -> dict[str, torch.Tensor]:
         if isinstance(batch, str):
             batch = {"text": [batch]}
 
@@ -214,10 +216,34 @@ class TextImageProcessor(ProcessorMixin):
         if "text" in batch and "words" not in batch:
             words = [self.pretokenize(t) for t in batch["text"]]
             # Create a similar batch object to a packed dataset
-            batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
+            new_batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
 
-        dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
-                 for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)]
+            # Pass through metadata fields (completion for eval, label for training)
+            for key in ("label", "completion"):
+                if key in batch:
+                    new_batch[key] = batch[key]
+
+            batch = new_batch
+
+        def _process_example(words, seq_lengths, completion=None):
+            d = self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
+            if completion is not None:
+                d["completion"] = completion
+            return d
+
+        completions = batch.get("completion")
+        if completions is not None:
+            dicts = [
+                _process_example(words, seq_lengths, completion)
+                for words, seq_lengths, completion in zip(
+                    batch["words"], batch["seq_lengths"], completions, strict=False
+                )
+            ]
+        else:
+            dicts = [
+                _process_example(words, seq_lengths)
+                for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)
+            ]
 
         if collated:
             return collate_fn(dicts)

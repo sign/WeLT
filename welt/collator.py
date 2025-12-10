@@ -88,7 +88,14 @@ def collate_fn(batch: list, pad_value=0):
     collated = {}
 
     for key in keys:
-        tensors = [item[key] for item in batch]
-        collated[key] = stack_pad_tensors(tensors, pad_value=pad_value)
+        values = [item[key] for item in batch]
+
+        # 1) Special-case label/completion keys OR any non-tensor values
+        if key in ("label", "labels", "completion", "prefix") or not torch.is_tensor(values[0]):
+            # keep as a plain list (no padding/stacking)
+            collated[key] = values
+        else:
+            # 2) Normal tensor fields get padded/stacked
+            collated[key] = stack_pad_tensors(values, pad_value=pad_value)
 
     return collated
