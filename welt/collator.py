@@ -90,8 +90,8 @@ def collate_fn(batch: list, pad_value=0):
     for key in keys:
         values = [item[key] for item in batch]
 
-        # 1) Special-case label keys OR any non-tensor values
-        if key in ("label", "labels") or not torch.is_tensor(values[0]):
+        # 1) Special-case label/completion keys OR any non-tensor values
+        if key in ("label", "labels", "completion", "prefix") or not torch.is_tensor(values[0]):
             # keep as a plain list (no padding/stacking)
             collated[key] = values
         else:

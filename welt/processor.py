@@ -205,25 +205,32 @@ class TextImageProcessor(ProcessorMixin):
         if "text" in batch and "words" not in batch:
             words = [self.pretokenize(t) for t in batch["text"]]
             # Create a similar batch object to a packed dataset
+            new_batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
 
-            if "label" in batch:
-                batch = {"words": words, "seq_lengths": [[len(w)] for w in words], "label": batch["label"]}
-            else:
-                batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
+            # Pass through metadata fields (completion for eval, label for training)
+            for key in ("label", "completion"):
+                if key in batch:
+                    new_batch[key] = batch[key]
 
-        def _process_example_with_optional_label(words, seq_lengths, label=None):
+            batch = new_batch
+
+        def _process_example(words, seq_lengths, completion=None):
             d = self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
-            if label is not None:
-                d["label"] = label
+            if completion is not None:
+                d["completion"] = completion
             return d
-        if "label" in batch:
+
+        completions = batch.get("completion")
+        if completions is not None:
             dicts = [
-                _process_example_with_optional_label(words, seq_lengths, label)
-                for words, seq_lengths, label in zip(batch["words"], batch["seq_lengths"], batch["label"], strict=False)
+                _process_example(words, seq_lengths, completion)
+                for words, seq_lengths, completion in zip(
+                    batch["words"], batch["seq_lengths"], completions, strict=False
+                )
             ]
         else:
             dicts = [
-                _process_example_with_optional_label(words, seq_lengths)
+                _process_example(words, seq_lengths)
                 for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)
             ]
 

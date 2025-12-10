@@ -1,3 +1,9 @@
+"""
+Evaluation script using WeLTTrainer for generation-based metrics.
+
+This script evaluates a trained model on train, validation, and test splits
+using the WeLTTrainer's generation-based evaluation loop.
+"""
 
 import json
 import logging
@@ -5,22 +11,175 @@ import os
 import sys
 from pathlib import Path
 
-import evaluate
-import torch
-from torch.utils.data import DataLoader
-from tqdm import tqdm
 from transformers import GenerationConfig, HfArgumentParser
 from transformers.utils import send_example_telemetry
 
 from training.args_data import DataTrainingArguments
 from training.args_eval import EvaluationArguments
 from training.args_model import ModelArguments
-from training.train import init_datasets, init_model, limit_dataset_size
+from training.train import init_model, limit_dataset_size, load_dataset
+from welt.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)
 
 
+def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
+                  trust_remote_code: bool,
+                  do_train: bool = True,
+                  cache_dir: str = None):
+    # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
+    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
+    # (the dataset will be downloaded automatically from the datasets Hub).
+    #
+    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
+    # 'text' is found. You can easily tweak this behavior (see below).
+    #
+    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
+    # download the dataset.
 
+    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
+    # https://huggingface.co/docs/datasets/loading_datasets.
+
+    if data_args.dataset_name is not None:
+        # Downloading and loading a dataset from the hub.
+        raw_datasets = load_dataset(
+            data_args.dataset_name,
+            data_args.dataset_config_name,
+            cache_dir=cache_dir,
+            streaming=data_args.streaming,
+            trust_remote_code=trust_remote_code,
+        )
+        if "validation" not in raw_datasets:
+            if data_args.streaming:
+                dataset_stream = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    split="train",
+                    cache_dir=cache_dir,
+                    streaming=data_args.streaming,
+                    trust_remote_code=trust_remote_code,
+                )
+                raw_datasets = split_streaming_dataset(dataset_stream, data_args.validation_split_percentage)
+            else:
+                raw_datasets["validation"] = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    split=f"train[:{data_args.validation_split_percentage}%]",
+                    cache_dir=cache_dir,
+                    streaming=data_args.streaming,
+                    trust_remote_code=trust_remote_code,
+                )
+                raw_datasets["train"] = load_dataset(
+                    data_args.dataset_name,
+                    data_args.dataset_config_name,
+                    split=f"train[{data_args.validation_split_percentage}%:]",
+                    cache_dir=cache_dir,
+                    streaming=data_args.streaming,
+                    trust_remote_code=trust_remote_code,
+                )
+    else:
+        data_files = {}
+        dataset_args = {}
+        if data_args.train_file is not None:
+            data_files["train"] = data_args.train_file
+        if data_args.validation_file is not None:
+            data_files["validation"] = data_args.validation_file
+        extension = (
+            data_args.train_file.split(".")[-1]
+            if data_args.train_file is not None
+            else data_args.validation_file.split(".")[-1]
+        )
+        if extension == "txt":
+            extension = "text"
+            dataset_args["keep_linebreaks"] = data_args.keep_linebreaks
+        raw_datasets = load_dataset(
+            extension,
+            data_files=data_files,
+            cache_dir=cache_dir,
+            **dataset_args,
+        )
+        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
+        if "validation" not in raw_datasets:
+            if data_args.streaming:
+                dataset_stream = load_dataset(
+                    extension,
+                    data_files=data_files,
+                    split="train",
+                    cache_dir=cache_dir,
+                    **dataset_args,
+                )
+                raw_datasets = split_streaming_dataset(dataset_stream, data_args.validation_split_percentage)
+            else:
+                raw_datasets["validation"] = load_dataset(
+                    extension,
+                    data_files=data_files,
+                    split=f"train[:{data_args.validation_split_percentage}%]",
+                    cache_dir=cache_dir,
+                    **dataset_args,
+                )
+
+                raw_datasets["train"] = load_dataset(
+                    extension,
+                    data_files=data_files,
+                    split=f"train[{data_args.validation_split_percentage}%:]",
+                    cache_dir=cache_dir,
+                    **dataset_args,
+                )
+
+    if do_train:
+        column_names = list(raw_datasets["train"].features)
+    else:
+        column_names = list(raw_datasets["validation"].features)
+    text_column_name = "text" if "text" in column_names else column_names[0]
+
+    def process_split(dataset, split_name: str):
+        """Apply mapping and filtering to a dataset split."""
+        template = data_args.dataset_text_template
+        if template is None:
+            def mapping_fn(example):
+                return {"text": example[text_column_name]}
+        else:
+            is_single_text_template = isinstance(template, str)
+            single_text_template = template if is_single_text_template else "".join(template)
+
+            # Only treat "train" specially when we are actually training
+            is_train_like = (split_name == "train") and do_train
+
+            def mapping_fn(example):
+                # During training: single "text" field for train split.
+                # During pure eval (do_train=False): even "train" gets prefix/completion.
+                if is_single_text_template or is_train_like:
+                    return {"text": single_text_template.format(**example)}
+
+                prefix = template[0].format(**example)
+                completion = template[1].format(**example)
+                return {
+                    "text": prefix,                   # Will be using this as input for prediction
+                    "prefix": prefix,                 # For generation
+                    "completion": completion,         # Reference for metrics
+                }
+
+        map_args = {}
+        if not data_args.streaming:
+            map_args = {
+                "num_proc": data_args.preprocessing_num_workers,
+                "load_from_cache_file": not data_args.overwrite_cache,
+            }
+
+        dataset = dataset.map(
+            mapping_fn,
+            remove_columns=column_names,
+            desc=f"Formatting {split_name} split",
+            **map_args
+        )
+        dataset = dataset.filter(
+            lambda x: len(x["text"]) > 0,
+            desc=f"Filtering empty examples from {split_name}",
+            **map_args
+        )
+        return dataset
+
+    return {split: process_split(raw_datasets[split], split) for split in raw_datasets}
 
 
 def init_logging(eval_args: EvaluationArguments):
@@ -31,7 +190,6 @@ def init_logging(eval_args: EvaluationArguments):
         level=logging.INFO,
     )
     logger.info(f"Evaluation arguments: {eval_args}")
-
 
 
 def parse_args_into_dataclasses(args: list[str] | None | str = None):
@@ -49,63 +207,21 @@ def parse_args_into_dataclasses(args: list[str] | None | str = None):
         return parser.parse_args_into_dataclasses(args=args)
 
 
-
-
-def separate_task(example, task_word: str):
-    """
-    Splits the input text into "text" and "label" based on the task_word.
-        For example, if task_word is "<count>" and the input text is
-        "<text>hello<count> H1 E1 L2 O1", then the output will be:
-        {
-            "text": "<text>hello<count>",
-            "label": "H1 E1 L2 O1"
-        }
-        """
-    sentence = example["text"]
-    index = sentence.find(task_word)
-    if index == -1:
-        return {"text": sentence, "label": ""}
-    cut = index + len(task_word) + 1
-    return {"text": sentence[:cut], "label": sentence[cut:]}
-
-def run_eval_for_split(model, data_loader, processor, device, eval_args, bytes_generation_config, pred_file_path, name):
-    lst_pred_texts = []
-    lst_actual_texts = []
-
-    model.eval()
-    with torch.inference_mode():
-        for i, batch in enumerate(tqdm(data_loader, desc=name)):
-            pred_text = model.generate(
-                input_ids=batch["input_ids"].to(device),
-                input_attention_mask = batch["input_attention_mask"].to(device),
-                input_images = batch["input_images"].to(device),
-                attention_mask = batch["attention_mask"].to(device),
-                input_images_dimensions = batch["input_images_dimensions"].to(device),
-                processor=processor,
-                bytes_generation_config=bytes_generation_config
-            )
-            lst_pred_texts.extend(pred_text)
-            lst_actual_texts.extend(batch["label"])
-
-            if eval_args.log_examples_every and i % eval_args.log_examples_every == 0:
-                logger.info("Label: %s\tPred: %s\n", batch['label'][0], pred_text[0])
-
-
-    # Write to a file
-    with open(pred_file_path, "w") as f:
-        for ref, hyp in zip(lst_actual_texts, lst_pred_texts, strict=False):
+def write_predictions(
+    predictions: list[str],
+    completions: list[str],
+    file_path: Path,
+    split_name: str,
+):
+    """Write predictions and gold completions to a JSONL file."""
+    with open(file_path, "w") as f:
+        for ref, hyp in zip(completions, predictions, strict=False):
             f.write(json.dumps({"reference": ref, "prediction": hyp}) + "\n")
-    logger.info(f"{name} predictions written to {pred_file_path}")
+    logger.info(f"{split_name} predictions written to {file_path}")
 
-    return lst_actual_texts, lst_pred_texts
 
-def eval(args: list[str] | None | str = None): # noqa: C901
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    cache_dir = None
-
-    # enable_optimizations()
+def eval(args: list[str] | None | str = None):  # noqa: C901
+    """Run evaluation on train, validation, and test splits."""
 
     model_args, data_args, eval_args = parse_args_into_dataclasses(args)
 
@@ -113,70 +229,48 @@ def eval(args: list[str] | None | str = None): # noqa: C901
 
     send_example_telemetry("run_clm", model_args, data_args)
 
+    # Initialize model, processor, and collator
     model, processor, collator = init_model(model_args, data_args, seed=42)
 
-    model = model.to(device)
+    # Load datasets
+    text_datasets = init_datasets(
+        data_args,
+        cache_dir=None,
+        trust_remote_code=model_args.trust_remote_code,
+        do_train=False,
+    )
 
-
-    text_datasets = init_datasets(data_args,
-                                  cache_dir=cache_dir,
-                                  trust_remote_code=model_args.trust_remote_code,
-                                  do_train=False)
-
-
+    # Prepare datasets for each split
     if "train" not in text_datasets:
         raise ValueError("--do_train requires a train dataset")  # noqa: TRY003
-    train_dataset = limit_dataset_size(text_datasets["train"],
-                                        max_samples=data_args.max_train_samples,
-                                        streaming=data_args.streaming)
+    train_dataset = limit_dataset_size(
+        text_datasets["train"],
+        max_samples=eval_args.max_train_samples_for_eval,
+        streaming=data_args.streaming,
+    )
 
     if "validation" not in text_datasets:
         raise ValueError("--do_eval requires a validation dataset")  # noqa: TRY003
-    eval_dataset = limit_dataset_size(text_datasets["validation"],
-                                        max_samples=eval_args.max_eval_samples_for_eval,
-                                        streaming=data_args.streaming)
+    eval_dataset = limit_dataset_size(
+        text_datasets["validation"],
+        max_samples=eval_args.max_eval_samples_for_eval,
+        streaming=data_args.streaming,
+    )
 
     if "test" not in text_datasets:
         raise ValueError("--do_eval requires a test dataset")  # noqa: TRY003
-    test_dataset = limit_dataset_size(text_datasets["test"],
-                                        max_samples=eval_args.max_test_samples_for_eval,
-                                        streaming=data_args.streaming)
-
-
-    train_dataset = train_dataset.map(lambda x: separate_task(x, eval_args.task_word))
-    eval_dataset = eval_dataset.map(lambda x: separate_task(x, eval_args.task_word))
-    test_dataset = test_dataset.map(lambda x: separate_task(x, eval_args.task_word))
-
-
-
-    # Transform the datasets to the format expected by the model
-    if train_dataset:
-        train_dataset = train_dataset.with_transform(processor)
-    if eval_dataset:
-        eval_dataset = eval_dataset.with_transform(processor)
-    if test_dataset:
-        test_dataset = test_dataset.with_transform(processor)
-
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=eval_args.batch_size,
-        shuffle=False,
-        collate_fn=collator
-    )
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=eval_args.batch_size,
-        shuffle=False,
-        collate_fn=collator
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=eval_args.batch_size,
-        shuffle=False,
-        collate_fn=collator
+    test_dataset = limit_dataset_size(
+        text_datasets["test"],
+        max_samples=eval_args.max_test_samples_for_eval,
+        streaming=data_args.streaming,
     )
 
+    # Apply processor transform to datasets
+    train_dataset = train_dataset.with_transform(processor)
+    eval_dataset = eval_dataset.with_transform(processor)
+    test_dataset = test_dataset.with_transform(processor)
 
+    # Set up generation config
     bytes_generation_config = GenerationConfig(
         temperature=1.0,
         top_p=1.0,
@@ -185,70 +279,76 @@ def eval(args: list[str] | None | str = None): # noqa: C901
         repetition_penalty=1.0,
     )
 
-
-    ## PATHS
-    model_dir = Path(model_args.model_name_or_path).parent \
-        if model_args.model_name_or_path.endswith(".safetensors") \
-            else Path(model_args.model_name_or_path)
+    # Set up output directory
+    model_dir = (
+        Path(model_args.model_name_or_path).parent
+        if model_args.model_name_or_path.endswith(".safetensors")
+        else Path(model_args.model_name_or_path)
+    )
     model_dir.mkdir(parents=True, exist_ok=True)
 
+    # File paths for predictions
     train_pred_file_path = model_dir / "train_predictions.jsonl"
     eval_pred_file_path = model_dir / "eval_predictions.jsonl"
     test_pred_file_path = model_dir / "test_predictions.jsonl"
 
-    train_actual_texts, train_pred_texts = run_eval_for_split(
-        model, train_loader, processor, device, eval_args, bytes_generation_config, train_pred_file_path, "Train"
+    # Create trainer
+    trainer = WeLTTrainer(
+        model=model,
+        args=eval_args,
+        data_collator=collator,
+        processing_class=processor,
+        eval_metrics=eval_args.eval_metrics,
+        generation_config=bytes_generation_config,
     )
 
-    eval_actual_texts, eval_pred_texts = run_eval_for_split(
-        model, eval_loader, processor, device, eval_args, bytes_generation_config, eval_pred_file_path, "Eval"
-    )
+    # Run evaluation on each split
+    splits = [
+        ("train", train_dataset, train_pred_file_path),
+        ("eval", eval_dataset, eval_pred_file_path),
+        ("test", test_dataset, test_pred_file_path),
+    ]
 
-    test_actual_texts, test_pred_texts = run_eval_for_split(
-        model, test_loader, processor, device, eval_args, bytes_generation_config, test_pred_file_path, "Test"
-    )
+    all_results = {}
+    for split_name, dataset, pred_file_path in splits:
+        logger.info(f"Evaluating {split_name} split...")
 
-    train_results = {}
-    eval_results = {}
-    test_results = {}
-    for metric_name in eval_args.eval_metrics:
-        metric = evaluate.load(metric_name)
-        is_sacrebleu = metric_name.lower() == "sacrebleu"
+        # Get dataloader for this split
+        trainer.eval_dataset = dataset
+        dataloader = trainer.get_eval_dataloader()
 
-        train_result = metric.compute(
-            predictions=train_pred_texts,
-            references=[[r] for r in train_actual_texts] if is_sacrebleu else train_actual_texts
+        # Run evaluation loop
+        output = trainer.evaluation_loop(
+            dataloader,
+            description=f"{split_name.capitalize()} evaluation",
+            metric_key_prefix=split_name,
         )
-        logger.info("Train %s: %s", metric_name, train_result)
-        train_results[metric_name] = train_result
 
-        eval_result = metric.compute(
-            predictions=eval_pred_texts,
-            references=[[r] for r in eval_actual_texts] if is_sacrebleu else eval_actual_texts
+        # Log metrics
+        logger.info(f"{split_name.capitalize()} metrics: {output.metrics}")
+        all_results[split_name] = output.metrics
+
+        # Write predictions
+        write_predictions(
+            predictions=output.predictions,
+            completions=output.label_ids,
+            file_path=pred_file_path,
+            split_name=split_name.capitalize(),
         )
-        logger.info("Eval %s: %s", metric_name, eval_result)
-        eval_results[metric_name] = eval_result
 
-        test_result = metric.compute(
-            predictions=test_pred_texts,
-            references=[[r] for r in test_actual_texts] if is_sacrebleu else test_actual_texts
-        )
-        logger.info("Test %s: %s", metric_name, test_result)
-        test_results[metric_name] = test_result
+        # Log example predictions
+        if eval_args.log_examples_every and len(output.predictions) > 0:
+            for i in range(min(eval_args.log_examples_every, len(output.predictions))):
+                logger.info(
+                    f"[{split_name}] Reference: {output.label_ids[i]}\tPrediction: {output.predictions[i]}"
+                )
 
-    # Save evals
-    with open(model_dir / "train_results.json", "w") as f:
-        json.dump(train_results, f, indent=4)
-    logger.info(f"Train results written to {model_dir / 'train_results.json'}")
-
-    with open(model_dir / "eval_results.json", "w") as f:
-        json.dump(eval_results, f, indent=4)
-    logger.info(f"Eval results written to {model_dir / 'eval_results.json'}")
-
-    with open(model_dir / "test_results.json", "w") as f:
-        json.dump(test_results, f, indent=4)
-    logger.info(f"Test results written to {model_dir / 'test_results.json'}")
-
+    # Save results
+    for split_name in ["train", "eval", "test"]:
+        results_file = model_dir / f"{split_name}_results.json"
+        with open(results_file, "w") as f:
+            json.dump(all_results[split_name], f, indent=4)
+        logger.info(f"{split_name.capitalize()} results written to {results_file}")
 
 
 if __name__ == "__main__":
