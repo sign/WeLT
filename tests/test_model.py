@@ -13,10 +13,10 @@ from welt.model_utils import setup_model
 def setup_tiny_model(**kwargs):
     """Set up a tiny version of the WordLatentTransformer model for testing, the tinyer the better."""
     return setup_model(
-        image_encoder_name="WinKawaks/vit-tiny-patch16-224",
-        bytes_encoder_name="prajjwal1/bert-tiny",
-        latent_transformer_name="sbintuitions/tiny-lm",
-        bytes_decoder_name="sbintuitions/tiny-lm",
+        image_encoder_name=kwargs.pop("image_encoder_name", "WinKawaks/vit-tiny-patch16-224"),
+        bytes_encoder_name=kwargs.pop("bytes_encoder_name", "prajjwal1/bert-tiny"),
+        latent_transformer_name=kwargs.pop("latent_transformer_name", "sbintuitions/tiny-lm"),
+        bytes_decoder_name=kwargs.pop("bytes_decoder_name", "sbintuitions/tiny-lm"),
         load_pretrained=False,
         **kwargs
     )

@@ -213,8 +213,8 @@ class TextImageProcessor(ProcessorMixin):
 
         if "text" in batch and "words" not in batch:
             words = [self.pretokenize(t) for t in batch["text"]]
-            # Create a similar batch object to a packed dataset
-            batch = {"words": words, "seq_lengths": [[len(w)] for w in words]}
+            # Preserve other fields in the batch (like "prefix", "completion")
+            batch = {**batch, "words": words, "seq_lengths": [[len(w)] for w in words]}
 
         dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
                  for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)]
@@ -225,6 +225,11 @@ class TextImageProcessor(ProcessorMixin):
         new_batch = {}
         for key in dicts[0].keys():
             new_batch[key] = [d[key] for d in dicts]
+
+        # Preserve extra fields from the original batch (e.g., "prefix", "completion")
+        for key in batch:
+            if key not in new_batch and key not in {"text", "words", "seq_lengths"}:
+                new_batch[key] = batch[key]
 
         return new_batch
 

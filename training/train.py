@@ -13,8 +13,6 @@ from datasets import IterableDataset, IterableDatasetDict, load_dataset
 from safetensors.torch import load_model
 from transformers import (
     HfArgumentParser,
-    Seq2SeqTrainingArguments,
-    Trainer,
     TrainingArguments,
     is_torch_xla_available,
     set_seed,
@@ -24,7 +22,9 @@ from trl import pack_dataset
 
 from training.args_data import DataTrainingArguments
 from training.args_model import ModelArguments
+from training.args_trainer import WeLTTrainingArguments
 from training.freeze_callback import FreezeWarmupCallback
+from training.trainer import WeLTTrainer
 from welt.model_utils import setup_model
 
 logger = logging.getLogger(__name__)
@@ -92,7 +92,7 @@ def split_streaming_dataset(
 
 
 def parse_args_into_dataclasses(args: list[str] | None | str = None):
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, WeLTTrainingArguments))
     # If we pass only one argument to the script and it's the path to a json or yaml file,
     # let's parse it to get our arguments.
     if isinstance(args, str):
@@ -337,7 +337,7 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
 
 
 def setup_evaluation_functions(
-    training_args: Seq2SeqTrainingArguments,
+    training_args: WeLTTrainingArguments,
     data_args: DataTrainingArguments,
     pad_token_id: int,
     cache_dir=None
@@ -356,14 +356,22 @@ def setup_evaluation_functions(
             logits = logits[0]
         return logits.argmax(dim=-1)  # torch.Size([16, 61, 13])
 
-    # For now, only support "accuracy" metric before implementing generation-based eval
-    # TODO: Implement generation-based evaluation with other metrics
-    assert data_args.metric_name == ["accuracy"], (
-        f"Currently only 'accuracy' metric is supported. Got: '{data_args.metric_name}'. "
-        "Generation-based evaluation with other metrics will be implemented later."
-    )
+    # Note: WeLTTrainer now computes generation-based metrics (BLEU, etc.)
+    # This accuracy metric is kept for backward compatibility but may not be used
+    # if WeLTTrainer overrides the evaluation completely
+    if data_args.metric_name != ["accuracy"]:
+        logger.warning(
+            f"metric_name is set to '{data_args.metric_name}' but WeLTTrainer uses "
+            "generation-based metrics (BLEU, ROUGE, etc.) instead."
+        )
 
-    metric = evaluate.load(data_args.metric_name[0], cache_dir=cache_dir)
+    # Load accuracy metric for compatibility
+    if data_args.metric_name == ["accuracy"]:
+        metric_name = "accuracy"
+    else:
+        metric_name = data_args.metric_name[0]
+
+    metric = evaluate.load(metric_name, cache_dir=cache_dir)
 
     def compute_metrics(eval_preds):
         all_preds = eval_preds.predictions
@@ -459,9 +467,11 @@ def train(args: list[str] | None | str = None):  # noqa: C901
         cache_dir
     )
 
-    trainer = Trainer(
+    # Use WeLTTrainer for generation-based evaluation
+    trainer = WeLTTrainer(
         model=model,
         args=training_args,
+        processor=processor,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         # Data collator will default to DataCollatorWithPadding, so we change it.
@@ -469,6 +479,10 @@ def train(args: list[str] | None | str = None):  # noqa: C901
         # Compute metrics
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        # Generation-based evaluation settings from training args
+        eval_metrics=training_args.eval_metrics if training_args.do_eval else None,
+        max_generated_words=training_args.generation_max_length or 50,
+        log_samples=training_args.log_samples,
     )
 
     # Freeze the pretrained models for some steps
