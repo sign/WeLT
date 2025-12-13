@@ -545,7 +545,13 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     if training_args.push_to_hub:
         trainer.push_to_hub(**kwargs)
     else:
-        trainer.create_model_card(**kwargs)
+        try:
+            trainer.create_model_card(**kwargs)
+        except KeyError as e:
+            logger.warning(
+                f"Could not create model card due to custom metrics: {e}. "
+                "This is expected when using custom generation metrics like sacrebleu, chrf, etc."
+            )
 
 
 if __name__ == "__main__":
