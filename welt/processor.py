@@ -213,8 +213,8 @@ class TextImageProcessor(ProcessorMixin):
 
         if "text" in batch and "words" not in batch:
             words = [self.pretokenize(t) for t in batch["text"]]
-            # Preserve other fields in the batch (like "prefix", "completion")
-            batch = {**batch, "words": words, "seq_lengths": [[len(w)] for w in words]}
+            batch["words"] = words
+            batch["seq_lengths"] = [[len(w)] for w in words]
 
         dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
                  for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)]
