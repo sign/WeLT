@@ -96,16 +96,6 @@ class DataTrainingArguments:
     keep_linebreaks: bool = field(
         default=True, metadata={"help": "Whether to keep line breaks when using TXT files or not."}
     )
-    metric_name: list[str] = field(
-        default_factory=lambda: ["accuracy"],
-        metadata={
-            "help": (
-                "Evaluation metric(s) to compute (via evaluate.load()). "
-                "For multiple metrics, use comma-separated list: 'bleu,chrf,meteor'. "
-                "Used with generation-based evaluation when dataset_text_template is a list."
-            )
-        },
-    )
 
     def __post_init__(self):
         if self.streaming:

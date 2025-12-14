@@ -1013,3 +1013,49 @@ def test_dataloader_reuse(trainer_setup):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
+
+
+
+def test_accuracy_is_computed(trainer_setup):
+    """Test that eval_accuracy is computed during evaluation."""
+    model, processor, collator = trainer_setup
+
+    # Create dataset
+    data = {
+        "text": ["The quick brown", "Another test"],
+        "prefix": ["The quick brown", "Another test"],
+        "completion": [" fox jumps", " sentence"],
+    }
+    eval_dataset = Dataset.from_dict(data).with_transform(processor)
+
+    # Setup trainer WITHOUT generation metrics (just accuracy)
+    args = Seq2SeqTrainingArguments(
+        output_dir="./test_accuracy",
+        do_eval=True,
+        per_device_eval_batch_size=2,
+        predict_with_generate=False,  # Disable generation to focus on accuracy
+        remove_unused_columns=False,  # Need to keep prefix/completion columns
+        report_to="none",
+    )
+
+    trainer = WeLTTrainer(
+        model=model,
+        args=args,
+        eval_dataset=eval_dataset,
+        processor=processor,
+        data_collator=collator,
+        eval_metrics=None,  # No generation metrics
+    )
+
+    # Evaluate
+    metrics = trainer.evaluate()
+
+    # Should have both byte and word accuracy
+    assert "eval_byte_accuracy" in metrics, f"eval_byte_accuracy not in metrics. Found: {list(metrics.keys())}"
+    assert "eval_word_accuracy" in metrics, f"eval_word_accuracy not in metrics. Found: {list(metrics.keys())}"
+    assert isinstance(metrics["eval_byte_accuracy"], float)
+    assert isinstance(metrics["eval_word_accuracy"], float)
+    assert 0.0 <= metrics["eval_byte_accuracy"] <= 1.0
+    assert 0.0 <= metrics["eval_word_accuracy"] <= 1.0
+    # Note: word_accuracy can be > byte_accuracy when many short words are fully correct
+    # while longer words are only partially correct

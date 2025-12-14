@@ -1,8 +1,13 @@
 """
-WeLT Trainer for generation-based evaluation.
+WeLT Trainer for generation-based evaluation with accuracy metrics.
 
-Minimal extension of Trainer that adds support for generation-based metrics
-by overriding prediction_step to do generation, and using compute_metrics callback.
+Minimal extension of Trainer that adds support for:
+- Generation-based metrics (BLEU, ROUGE, SacreBLEU, ChrF, etc.)
+- Byte-level accuracy (token-level) and word-level accuracy from logits
+- Perplexity computation from loss
+
+Overrides prediction_step to generate text predictions and store logits,
+then computes all metrics in evaluate().
 """
 import logging
 import math
@@ -20,17 +25,29 @@ class WeLTTrainer(Trainer):
     """
     Minimal trainer extension for WeLT generation-based evaluation.
 
-    Uses standard Trainer evaluation flow:
-    1. Override prediction_step to generate text predictions
-    2. Use compute_metrics callback for metric computation
+    Evaluation flow:
+    1. Override prediction_step to:
+       - Generate text predictions (if predict_with_generate=True)
+       - Store logits and labels for accuracy computation
+    2. Override evaluate to compute:
+       - Generation-based metrics (BLEU, ROUGE, SacreBLEU, ChrF, etc.)
+       - Byte-level and word-level accuracy from logits
+       - Perplexity from loss
     3. All logging, callbacks, progress bars work automatically
 
     Expected dataset format for generation-based evaluation:
     - prefix: Text to use as input for generation
     - completion: Gold reference text for metric computation
 
-    Note: Generation-based evaluation requires predict_with_generate=True
-    in training arguments. If False, only loss-based metrics will be computed.
+    Computed metrics:
+    - eval_loss: Cross-entropy loss
+    - eval_byte_accuracy: Token/byte-level accuracy (always computed)
+    - eval_word_accuracy: Word-level accuracy - all tokens in word must be correct (always computed)
+    - eval_{metric}: Generation metrics (e.g., eval_sacrebleu, eval_chrf)
+    - perplexity: exp(loss)
+
+    Note: Generation-based evaluation requires predict_with_generate=True.
+    If False, only loss and accuracy metrics will be computed.
     """
 
     def __init__(
@@ -47,15 +64,23 @@ class WeLTTrainer(Trainer):
 
         Args:
             processor: TextImageProcessor for tokenization and image rendering
-            eval_metrics: List of metric names to load (e.g., ["bleu", "rouge"])
+            eval_metrics: List of generation metric names to load (e.g., ["sacrebleu", "chrf"])
+                          Note: byte and word accuracy are always computed from logits automatically
             max_generated_words: Maximum words to generate during evaluation
             bytes_generation_config: Optional GenerationConfig for bytes decoder (e.g., beam search)
             log_samples: Number of prediction samples to log (0 to disable)
             **kwargs: Additional arguments passed to Trainer
+
+        Raises:
+            ValueError: If compute_metrics is provided (not supported)
         """
-        # Reserve compute_metrics slot - we'll set it after loading metrics
-        if "compute_metrics" not in kwargs and eval_metrics:
-            kwargs["compute_metrics"] = None
+        # WeLTTrainer computes metrics internally - don't allow external compute_metrics
+        if "compute_metrics" in kwargs:
+            raise ValueError(
+                "compute_metrics is not supported for WeLTTrainer. "
+                "Use eval_metrics parameter instead for generation metrics. "
+                "Accuracy is computed automatically from logits."
+            )
 
         super().__init__(**kwargs)
 
@@ -77,10 +102,6 @@ class WeLTTrainer(Trainer):
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"Failed to load metric '{metric_name}': {e}")
 
-        # Set compute_metrics callback if we loaded any metrics
-        if self.loaded_metrics and self.compute_metrics is None:
-            self.compute_metrics = self._compute_metrics_callback
-
         # Warn if metrics are loaded but predict_with_generate is disabled
         if self.loaded_metrics and not self.args.predict_with_generate:
             logger.warning(
@@ -89,20 +110,30 @@ class WeLTTrainer(Trainer):
                 "Set predict_with_generate=True to enable generation-based evaluation."
             )
 
-        # Track samples for logging
-        self._logged_samples_this_eval = False
+        # Initialize evaluation state
+        self._reset_eval_state()
 
-        # Store predictions and labels across batches
+    def _reset_eval_state(self):
+        """Reset evaluation state before each evaluation run."""
+        self._logged_samples_this_eval = False
         self._eval_predictions = []
         self._eval_labels = []
         self._eval_sample_count = 0
+        self._eval_logits = []
+        self._eval_labels_for_accuracy = []
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
         """
-        Override prediction_step to generate text predictions for evaluation.
+        Override prediction_step to generate predictions and store data for metrics.
 
         This method is called by Trainer.evaluation_loop for each batch.
-        We generate text predictions and store them for later metric computation.
+        It performs three operations:
+        1. Computes loss from model outputs
+        2. Stores logits and labels for accuracy computation
+        3. Generates text predictions (if predict_with_generate=True) for generation metrics
+
+        Returns:
+            tuple: (loss, None, None) - predictions/labels stored in instance variables
         """
         # Extract custom fields not needed for loss computation
         prefixes = inputs.pop("prefix", None)
@@ -117,7 +148,7 @@ class WeLTTrainer(Trainer):
         inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v
                  for k, v in inputs.items()}
 
-        # Compute loss
+        # Compute loss and store logits for accuracy
         with torch.no_grad():
             outputs = model(**inputs)
             loss = outputs.loss if hasattr(outputs, "loss") else outputs["loss"]
@@ -126,6 +157,19 @@ class WeLTTrainer(Trainer):
             if torch.isnan(loss) or torch.isinf(loss):
                 logger.warning(f"Encountered {'NaN' if torch.isnan(loss) else 'Inf'} loss in batch")
                 loss = torch.tensor(0.0, device=model.device)
+
+            # Store logits for accuracy computation (always during evaluation)
+            # Extract logits if available
+            if hasattr(outputs, "logits") or "logits" in outputs:
+                logits = outputs.logits if hasattr(outputs, "logits") else outputs["logits"]
+                # Get predicted token IDs (argmax over vocabulary)
+                pred_token_ids = logits.argmax(dim=-1)  # (batch, seq_len, vocab) -> (batch, seq_len)
+
+                # Store predictions and labels for accuracy
+                labels_output = inputs.get("labels_output")
+                if labels_output is not None:
+                    self._eval_logits.append(pred_token_ids.cpu())
+                    self._eval_labels_for_accuracy.append(labels_output.cpu())
 
         # Generate predictions if predict_with_generate is enabled
         # Only do generation when: (1) predict_with_generate is True, (2) we have prefixes,
@@ -155,7 +199,7 @@ class WeLTTrainer(Trainer):
 
                 predictions_text = model.generate(**generation_inputs, **generation_kwargs)
 
-                # Store predictions and labels for compute_metrics
+                # Store predictions and labels for generation metrics computation
                 self._eval_predictions.extend(predictions_text)
                 if completions is not None:
                     self._eval_labels.extend(completions)
@@ -165,22 +209,26 @@ class WeLTTrainer(Trainer):
             self._log_samples(predictions_text, prefixes, completions)
             self._logged_samples_this_eval = True
 
-        # Return loss; predictions/labels are stored in instance variables for compute_metrics
+        # Return loss; predictions/labels stored in instance variables for evaluate()
         # Return None to avoid Trainer's automatic tensor gathering (not compatible with strings)
         return (loss, None, None)
 
     def evaluate(self, eval_dataset=None, **kwargs):
         """
-        Override evaluate to add generation metrics and perplexity.
+        Override evaluate to compute accuracy, generation metrics, and perplexity.
 
-        Calls parent evaluate (which uses prediction_step), then computes
-        generation metrics from stored predictions and logs all metrics.
+        Workflow:
+        1. Calls parent evaluate() which calls prediction_step() for each batch
+        2. Computes generation metrics from stored string predictions
+        3. Computes token-level accuracy from stored logits
+        4. Computes perplexity from loss
+        5. Returns all metrics (parent's callback system handles logging)
+
+        Returns:
+            dict: Metrics including eval_loss, eval_accuracy, eval_{metric}, perplexity
         """
-        # Reset state
-        self._logged_samples_this_eval = False
-        self._eval_predictions = []
-        self._eval_labels = []
-        self._eval_sample_count = 0
+        # Reset evaluation state
+        self._reset_eval_state()
 
         # Validate dataset
         eval_dataset = eval_dataset or self.eval_dataset
@@ -195,8 +243,8 @@ class WeLTTrainer(Trainer):
         # Call parent evaluate - this handles loss computation and logging
         metrics = super().evaluate(eval_dataset=eval_dataset, **kwargs)
 
-        # Track if we added any new metrics
-        added_metrics = False
+        # Track additional metrics we compute (for logging)
+        additional_metrics = {}
 
         # Compute generation metrics from stored predictions
         if self._eval_predictions and self._eval_labels and self.loaded_metrics:
@@ -206,15 +254,27 @@ class WeLTTrainer(Trainer):
             )
             # Add generation metrics with eval_ prefix
             for key, value in generation_metrics.items():
-                metrics[f"eval_{key}"] = value
-            added_metrics = True
+                metric_key = f"eval_{key}"
+                metrics[metric_key] = value
+                additional_metrics[metric_key] = value
 
         # Add perplexity if we have loss
         if "eval_loss" in metrics:
             loss = metrics["eval_loss"]
             perplexity = math.exp(loss) if loss < 100 else float('inf')
             metrics["perplexity"] = perplexity
-            added_metrics = True
+            additional_metrics["perplexity"] = perplexity
+
+        # Compute byte and word accuracy from stored logits
+        if self._eval_logits and self._eval_labels_for_accuracy:
+            accuracy_metrics = self._compute_accuracy(
+                self._eval_logits,
+                self._eval_labels_for_accuracy
+            )
+            metrics["eval_byte_accuracy"] = accuracy_metrics["byte_accuracy"]
+            metrics["eval_word_accuracy"] = accuracy_metrics["word_accuracy"]
+            additional_metrics["eval_byte_accuracy"] = accuracy_metrics["byte_accuracy"]
+            additional_metrics["eval_word_accuracy"] = accuracy_metrics["word_accuracy"]
 
         # Add eval_samples count
         if self._eval_sample_count > 0:
@@ -222,23 +282,13 @@ class WeLTTrainer(Trainer):
         elif self._eval_predictions:
             metrics["eval_samples"] = len(self._eval_predictions)
 
-        # CRITICAL: Log the additional metrics we computed
-        # The parent's evaluate() already logged its metrics, but we added more
-        # So we need to log them explicitly for them to appear in wandb/terminal
-        if added_metrics and self.args.do_train:
-            self.log(metrics)
+        # Log only the additional metrics we computed (not all metrics)
+        # This allows them to appear in wandb and progress bars without creating
+        # duplicate log entries that would break model card generation
+        if additional_metrics and self.args.do_train:
+            self.log(additional_metrics)
 
         return metrics
-
-    def _compute_metrics_callback(self, eval_preds):
-        """
-        Compute metrics callback for Trainer.
-
-        Note: We don't use this directly since predictions are strings stored
-        in instance variables, not tensors. Metrics are computed in evaluate().
-        This is just a placeholder to satisfy the Trainer interface.
-        """
-        return {}
 
     def _log_samples(self, predictions, prefixes, completions):
         """Log sample predictions."""
@@ -296,3 +346,69 @@ class WeLTTrainer(Trainer):
                 logger.warning(f"Failed to compute metric '{metric_name}': {e}")
 
         return metrics
+
+    def _compute_accuracy(
+        self,
+        pred_token_ids: list[torch.Tensor],
+        labels: list[torch.Tensor]
+    ) -> dict[str, float]:
+        """
+        Compute byte-level and word-level accuracy from predictions and labels.
+
+        Byte accuracy: Percentage of correctly predicted tokens
+        Word accuracy: Percentage of words where ALL tokens are correctly predicted
+
+        Args:
+            pred_token_ids: List of predicted token ID tensors, shape (batch_size, num_words, tokens_per_word)
+            labels: List of label tensors, shape (batch_size, num_words, tokens_per_word)
+
+        Returns:
+            dict with 'byte_accuracy' and 'word_accuracy' as floats between 0 and 1
+        """
+        pad_token_id = self.processor.tokenizer.pad_token_id
+
+        total_bytes = 0
+        correct_bytes = 0
+        total_words = 0
+        correct_words = 0
+
+
+        for preds, label in zip(pred_token_ids, labels, strict=False):
+            # Shape: (batch_size, num_words, tokens_per_word)
+            batch_size, num_words, tokens_per_word = label.shape
+
+            # Iterate over batch
+            for batch_idx in range(batch_size):
+                # Iterate over words
+                for word_idx in range(num_words):
+                    pred_word = preds[batch_idx, word_idx]
+                    label_word = label[batch_idx, word_idx]
+
+                    # Skip words that are entirely padding
+                    word_mask = label_word != pad_token_id
+                    if not word_mask.any():
+                        continue
+
+                    # Extract non-padding tokens
+                    pred_tokens = pred_word[word_mask]
+                    label_tokens = label_word[word_mask]
+
+                    # Byte-level: count matching tokens
+                    correct_bytes += (pred_tokens == label_tokens).sum().item()
+                    total_bytes += label_tokens.numel()
+
+                    # Word-level: check if all tokens in word match
+                    total_words += 1
+                    if (pred_tokens == label_tokens).all():
+                        correct_words += 1
+
+        # Compute byte accuracy
+        byte_accuracy = correct_bytes / total_bytes if total_bytes > 0 else 0.0
+
+        # Compute word accuracy
+        word_accuracy = correct_words / total_words if total_words > 0 else 0.0
+
+        return {
+            "byte_accuracy": byte_accuracy,
+            "word_accuracy": word_accuracy
+        }

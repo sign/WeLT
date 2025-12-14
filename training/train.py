@@ -6,7 +6,6 @@ import os
 import sys
 
 import datasets
-import evaluate
 import torch
 import transformers
 from datasets import IterableDataset, IterableDatasetDict, load_dataset
@@ -14,7 +13,6 @@ from safetensors.torch import load_model
 from transformers import (
     HfArgumentParser,
     TrainingArguments,
-    is_torch_xla_available,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
@@ -336,72 +334,6 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
     return dataset
 
 
-def setup_evaluation_functions(
-    training_args: WeLTTrainingArguments,
-    data_args: DataTrainingArguments,
-    pad_token_id: int,
-    cache_dir=None
-):
-    # Include everything for the metrics calculation
-    training_args.include_for_metrics = ["loss"]
-    # Tell trainer the correct name of our labels output column
-    training_args.label_names = ["labels_output"]
-    # HuggingFace fails to concatenate the batches
-    training_args.eval_do_concat_batches = False
-
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)  # torch.Size([16, 61, 13])
-
-    # Note: WeLTTrainer now computes generation-based metrics (BLEU, etc.)
-    # This accuracy metric is kept for backward compatibility but may not be used
-    # if WeLTTrainer overrides the evaluation completely
-    if data_args.metric_name != ["accuracy"]:
-        logger.warning(
-            f"metric_name is set to '{data_args.metric_name}' but WeLTTrainer uses "
-            "generation-based metrics (BLEU, ROUGE, etc.) instead."
-        )
-
-    # Load accuracy metric for compatibility
-    if data_args.metric_name == ["accuracy"]:
-        metric_name = "accuracy"
-    else:
-        metric_name = data_args.metric_name[0]
-
-    metric = evaluate.load(metric_name, cache_dir=cache_dir)
-
-    def compute_metrics(eval_preds):
-        all_preds = eval_preds.predictions
-        all_labels = eval_preds.label_ids
-
-        flat_preds = []
-        flat_labels = []
-
-        for preds, labels in zip(all_preds, all_labels, strict=False):
-            preds = preds.reshape(-1)
-            labels = labels.reshape(-1)
-
-            # Remove pads
-            mask = labels != pad_token_id
-            preds = preds[mask]
-            labels = labels[mask]
-
-            # Accumulate
-            flat_preds.append(torch.tensor(preds))
-            flat_labels.append(torch.tensor(labels))
-
-        flat_preds = torch.cat(flat_preds)
-        flat_labels = torch.cat(flat_labels)
-
-        return metric.compute(predictions=flat_preds, references=flat_labels)
-
-    return (
-        compute_metrics if training_args.do_eval and not is_torch_xla_available() else None,
-        preprocess_logits_for_metrics if training_args.do_eval and not is_torch_xla_available() else None
-    )
 
 
 def train(args: list[str] | None | str = None):  # noqa: C901
@@ -460,25 +392,14 @@ def train(args: list[str] | None | str = None):  # noqa: C901
         eval_dataset = eval_dataset.with_transform(processor)
 
     # Initialize our Trainer
-    compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(
-        training_args,
-        data_args,
-        processor.tokenizer.pad_token_id,
-        cache_dir
-    )
-
-    # Use WeLTTrainer for generation-based evaluation
+    # Note: WeLTTrainer computes accuracy and generation-based metrics internally
     trainer = WeLTTrainer(
         model=model,
         args=training_args,
         processor=processor,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=collator,
-        # Compute metrics
-        compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         # Generation-based evaluation settings from training args
         eval_metrics=training_args.eval_metrics if training_args.do_eval else None,
         max_generated_words=training_args.generation_max_length or 50,
@@ -545,13 +466,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     if training_args.push_to_hub:
         trainer.push_to_hub(**kwargs)
     else:
-        try:
-            trainer.create_model_card(**kwargs)
-        except KeyError as e:
-            logger.warning(
-                f"Could not create model card due to custom metrics: {e}. "
-                "This is expected when using custom generation metrics like sacrebleu, chrf, etc."
-            )
+        trainer.create_model_card(**kwargs)
 
 
 if __name__ == "__main__":
