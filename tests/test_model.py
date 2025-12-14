@@ -10,13 +10,18 @@ from welt.model import WordLatentTransformer
 from welt.model_utils import setup_model
 
 
-def setup_tiny_model(**kwargs):
+def setup_tiny_model(
+        image_encoder_name="WinKawaks/vit-tiny-patch16-224",
+        bytes_encoder_name="prajjwal1/bert-tiny",
+        latent_transformer_name="sbintuitions/tiny-lm",
+        bytes_decoder_name="sbintuitions/tiny-lm",
+        **kwargs):
     """Set up a tiny version of the WordLatentTransformer model for testing, the tinyer the better."""
     return setup_model(
-        image_encoder_name=kwargs.pop("image_encoder_name", "WinKawaks/vit-tiny-patch16-224"),
-        bytes_encoder_name=kwargs.pop("bytes_encoder_name", "prajjwal1/bert-tiny"),
-        latent_transformer_name=kwargs.pop("latent_transformer_name", "sbintuitions/tiny-lm"),
-        bytes_decoder_name=kwargs.pop("bytes_decoder_name", "sbintuitions/tiny-lm"),
+        image_encoder_name=image_encoder_name,
+        bytes_encoder_name=bytes_encoder_name,
+        latent_transformer_name=latent_transformer_name,
+        bytes_decoder_name=bytes_decoder_name,
         load_pretrained=False,
         **kwargs
     )
@@ -100,7 +105,7 @@ def test_attention_does_look_back():
     texts = ["c b a", "d b a"]
 
     # Force every word to predict a single byte and special tokens
-    processor.max_word_length = 3 # # (BOS + 1 byte + EOS)
+    processor.max_word_length = 3  # # (BOS + 1 byte + EOS)
 
     _, outputs = predict_dataset(texts, model, processor, collator)
     for text in texts:
@@ -113,11 +118,13 @@ def test_attention_does_look_back():
             (f"Loss at position {i} should be different due to context: "
              f"{outputs[texts[0]].loss[i]} vs {outputs[texts[1]].loss[i]} (diff: {loss_diff})")
 
+
 DEVICES = ["cpu"]
 if torch.cuda.is_available():
     DEVICES.append("cuda")
 if torch.backends.mps.is_available():
     DEVICES.append("mps")
+
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_multiple_texts_batch_not_nan(device):
@@ -223,6 +230,7 @@ def test_freeze_unfreeze_model_works():
 
     for name, param in model.named_parameters():
         assert param.requires_grad, f"Parameter {name} should be unfrozen but is frozen."
+
 
 def test_model_from_pretrained_works_without_image_encoder():
     """Test that the model can be saved and loaded without issues."""

@@ -103,7 +103,7 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
 
     # Verify eval_chrf is a valid number
     chrf_score = eval_metrics["eval_chrf"]
-    assert isinstance(chrf_score, (int, float)), \
+    assert isinstance(chrf_score, int | float), \
         f"eval_chrf should be numeric, got {type(chrf_score)}"
     assert 0 <= chrf_score <= 100, \
         f"eval_chrf should be between 0 and 100, got {chrf_score}"
@@ -113,7 +113,7 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
     assert "eval_samples" in eval_metrics, "eval_samples should be present"
     assert "perplexity" in eval_metrics, "perplexity should be present"
 
-    print(f"\n✓ Training completed successfully!")
+    print("\n✓ Training completed successfully!")
     print(f"✓ eval_chrf = {chrf_score:.2f}")
     print(f"✓ eval_loss = {eval_metrics['eval_loss']:.4f}")
     print(f"✓ eval_samples = {eval_metrics['eval_samples']}")

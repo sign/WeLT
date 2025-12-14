@@ -76,11 +76,12 @@ class WeLTTrainer(Trainer):
         """
         # WeLTTrainer computes metrics internally - don't allow external compute_metrics
         if "compute_metrics" in kwargs:
-            raise ValueError(
+            msg = (
                 "compute_metrics is not supported for WeLTTrainer. "
                 "Use eval_metrics parameter instead for generation metrics. "
                 "Accuracy is computed automatically from logits."
             )
+            raise ValueError(msg)
 
         super().__init__(**kwargs)
 
@@ -230,20 +231,35 @@ class WeLTTrainer(Trainer):
         # Reset evaluation state
         self._reset_eval_state()
 
-        # Validate dataset
-        eval_dataset = eval_dataset or self.eval_dataset
-        if eval_dataset is not None:
-            self._validate_eval_dataset(eval_dataset)
-
-        # Apply processor transform if needed
-        if eval_dataset is not None:
-            if not hasattr(eval_dataset, '_transforms') or eval_dataset._transforms is None:
-                eval_dataset = eval_dataset.with_transform(self.processor)
+        # Prepare evaluation dataset
+        eval_dataset = self._prepare_eval_dataset(eval_dataset)
 
         # Call parent evaluate - this handles loss computation and logging
         metrics = super().evaluate(eval_dataset=eval_dataset, **kwargs)
 
-        # Track additional metrics we compute (for logging)
+        # Add custom metrics (generation, accuracy, perplexity)
+        additional_metrics = self._add_custom_metrics(metrics)
+
+        # Log only the additional metrics we computed (not all metrics)
+        # This allows them to appear in wandb and progress bars without creating
+        # duplicate log entries that would break model card generation
+        if additional_metrics and self.args.do_train:
+            self.log(additional_metrics)
+
+        return metrics
+
+    def _prepare_eval_dataset(self, eval_dataset):
+        """Prepare and validate evaluation dataset."""
+        eval_dataset = eval_dataset or self.eval_dataset
+        if eval_dataset is not None:
+            self._validate_eval_dataset(eval_dataset)
+            # Apply processor transform if needed
+            if not hasattr(eval_dataset, '_transforms') or eval_dataset._transforms is None:
+                eval_dataset = eval_dataset.with_transform(self.processor)
+        return eval_dataset
+
+    def _add_custom_metrics(self, metrics):
+        """Add custom metrics (generation, accuracy, perplexity) to metrics dict."""
         additional_metrics = {}
 
         # Compute generation metrics from stored predictions
@@ -282,13 +298,7 @@ class WeLTTrainer(Trainer):
         elif self._eval_predictions:
             metrics["eval_samples"] = len(self._eval_predictions)
 
-        # Log only the additional metrics we computed (not all metrics)
-        # This allows them to appear in wandb and progress bars without creating
-        # duplicate log entries that would break model card generation
-        if additional_metrics and self.args.do_train:
-            self.log(additional_metrics)
-
-        return metrics
+        return additional_metrics
 
     def _log_samples(self, predictions, prefixes, completions):
         """Log sample predictions."""
