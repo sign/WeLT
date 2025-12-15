@@ -6,17 +6,13 @@ import os
 import sys
 
 import datasets
-import evaluate
 import torch
 import transformers
 from datasets import IterableDataset, IterableDatasetDict, load_dataset
 from safetensors.torch import load_model
 from transformers import (
     HfArgumentParser,
-    Seq2SeqTrainingArguments,
-    Trainer,
     TrainingArguments,
-    is_torch_xla_available,
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint
@@ -24,7 +20,9 @@ from trl import pack_dataset
 
 from training.args_data import DataTrainingArguments
 from training.args_model import ModelArguments
+from training.args_trainer import WeLTTrainingArguments
 from training.freeze_callback import FreezeWarmupCallback
+from training.trainer import WeLTTrainer
 from welt.model_utils import setup_model
 
 logger = logging.getLogger(__name__)
@@ -92,7 +90,7 @@ def split_streaming_dataset(
 
 
 def parse_args_into_dataclasses(args: list[str] | None | str = None):
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, WeLTTrainingArguments))
     # If we pass only one argument to the script and it's the path to a json or yaml file,
     # let's parse it to get our arguments.
     if isinstance(args, str):
@@ -336,64 +334,6 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
     return dataset
 
 
-def setup_evaluation_functions(
-    training_args: Seq2SeqTrainingArguments,
-    data_args: DataTrainingArguments,
-    pad_token_id: int,
-    cache_dir=None
-):
-    # Include everything for the metrics calculation
-    training_args.include_for_metrics = ["loss"]
-    # Tell trainer the correct name of our labels output column
-    training_args.label_names = ["labels_output"]
-    # HuggingFace fails to concatenate the batches
-    training_args.eval_do_concat_batches = False
-
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)  # torch.Size([16, 61, 13])
-
-    # For now, only support "accuracy" metric before implementing generation-based eval
-    # TODO: Implement generation-based evaluation with other metrics
-    assert data_args.metric_name == ["accuracy"], (
-        f"Currently only 'accuracy' metric is supported. Got: '{data_args.metric_name}'. "
-        "Generation-based evaluation with other metrics will be implemented later."
-    )
-
-    metric = evaluate.load(data_args.metric_name[0], cache_dir=cache_dir)
-
-    def compute_metrics(eval_preds):
-        all_preds = eval_preds.predictions
-        all_labels = eval_preds.label_ids
-
-        flat_preds = []
-        flat_labels = []
-
-        for preds, labels in zip(all_preds, all_labels, strict=False):
-            preds = preds.reshape(-1)
-            labels = labels.reshape(-1)
-
-            # Remove pads
-            mask = labels != pad_token_id
-            preds = preds[mask]
-            labels = labels[mask]
-
-            # Accumulate
-            flat_preds.append(torch.tensor(preds))
-            flat_labels.append(torch.tensor(labels))
-
-        flat_preds = torch.cat(flat_preds)
-        flat_labels = torch.cat(flat_labels)
-
-        return metric.compute(predictions=flat_preds, references=flat_labels)
-
-    return (
-        compute_metrics if training_args.do_eval and not is_torch_xla_available() else None,
-        preprocess_logits_for_metrics if training_args.do_eval and not is_torch_xla_available() else None
-    )
 
 
 def train(args: list[str] | None | str = None):  # noqa: C901
@@ -452,23 +392,18 @@ def train(args: list[str] | None | str = None):  # noqa: C901
         eval_dataset = eval_dataset.with_transform(processor)
 
     # Initialize our Trainer
-    compute_metrics, preprocess_logits_for_metrics = setup_evaluation_functions(
-        training_args,
-        data_args,
-        processor.tokenizer.pad_token_id,
-        cache_dir
-    )
-
-    trainer = Trainer(
+    # Note: WeLTTrainer computes accuracy and generation-based metrics internally
+    trainer = WeLTTrainer(
         model=model,
         args=training_args,
+        processor=processor,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        # Data collator will default to DataCollatorWithPadding, so we change it.
         data_collator=collator,
-        # Compute metrics
-        compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        # Generation-based evaluation settings from training args
+        eval_metrics=training_args.eval_metrics if training_args.do_eval else None,
+        max_generated_words=training_args.generation_max_length or 50,
+        log_samples=training_args.log_samples,
     )
 
     # Freeze the pretrained models for some steps

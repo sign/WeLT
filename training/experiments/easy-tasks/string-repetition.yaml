@@ -7,7 +7,9 @@ bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
 # Dataset setup
 dataset_name: Helsinki-NLP/opus-100
 dataset_config_name: en-he
-dataset_text_template: "<text>\x0E{translation[en]}\x0F<repeat> {translation[en]}"
+dataset_text_template:
+  - "<text>\x0E{translation[en]}\x0F<repeat> "
+  - "{translation[en]}"
 max_sequence_length: 128
 max_word_length: 16
 
@@ -25,24 +27,29 @@ per_device_train_batch_size: 32
 per_device_eval_batch_size: 32
 auto_find_batch_size: true
 output_dir: ./output/string-repetition-tiny
+overwrite_output_dir: true
 do_train: true
 max_steps: 1000
 learning_rate: 3.0e-4
 optim: adamw_torch_fused
 
 # Evaluation
-do_eval: false
+do_eval: true
 eval_on_start: true
 eval_strategy: steps
 eval_steps: 100
-metric_for_best_model: accuracy
+metric_for_best_model: chrf  # Using generation-based metric
+eval_metrics: [sacrebleu, chrf]  # Generation-based evaluation metrics
+predict_with_generate: true
+generation_max_length: 50  # Max tokens/words to generate during evaluation
+log_samples: 3  # Number of sample predictions to log
 
 # Logging
 logging_steps: 10
 logging_strategy: steps
 include_tokens_per_second: true
 include_num_input_tokens_seen: true
-report_to: none
+report_to: wandb
 
 # Dtype
 bf16: true

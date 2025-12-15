@@ -37,11 +37,24 @@ pip install ".[dev]"
 Or using docker:
 
 ```shell
-docker build --platform="linux/amd64" -t welt .
-docker run  --platform="linux/amd64" -it --rm \
+docker build -t welt .
+
+# Run an interactive shell inside the container
+docker run -it --rm --gpus all \
+  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
   -v "$(pwd)/welt:/app/welt" \
   -v "$(pwd)/training:/app/training" \
   welt /bin/bash
+  
+# Run a training job
+docker run -it --rm --gpus all \
+  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+  -v "$(pwd)/welt:/app/welt" \
+  -v "$(pwd)/training:/app/training" \
+  -v /shared/.cache/huggingface:/root/.cache/huggingface \
+  -v ~/.netrc:/root/.netrc:ro \
+  -e WANDB_PROJECT="string-repetition" \
+  welt python -m training.train training/experiments/easy-tasks/string-repetition.yaml
 ```
 
 > [!TIP]
