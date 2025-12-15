@@ -53,8 +53,8 @@ docker run -it --rm --gpus all \
   -v "$(pwd)/training:/app/training" \
   -v /shared/.cache/huggingface:/root/.cache/huggingface \
   -v ~/.netrc:/root/.netrc:ro \
-  -e WANDB_PROJECT="string-repetition" \
-  welt python -m training.train training/experiments/easy-tasks/string-repetition.yaml
+  -e WANDB_PROJECT="ocr" \
+  welt python -m training.train training/experiments/easy-tasks/ocr.yaml
 ```
 
 > [!TIP]
