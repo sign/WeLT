@@ -42,7 +42,7 @@ class NaViTModel(PreTrainedModel):
     def __init__(self, config: NaViTConfig):
         super().__init__(config)
 
-        self.navit = NaViT(
+        navit = NaViT(
             image_size=config.image_size,
             patch_size=config.patch_size,
             num_classes=config.hidden_size,
@@ -54,6 +54,8 @@ class NaViTModel(PreTrainedModel):
             emb_dropout=config.emb_dropout,
             token_dropout_prob=config.token_dropout_prob,
         )
+        # Explicitly register as a submodule to ensure device changes are tracked
+        self.add_module('navit', navit)
 
         # Initialize weights via HF utility (won't disturb vit-pytorch-initialized weights unless uninitialized)
         self.post_init()

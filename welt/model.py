@@ -440,8 +440,8 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         new_attention_mask = tokenized_words.attention_mask.unsqueeze(1)
 
         new_input_images, new_input_images_dimensions = processor.render_texts(words)
-        new_input_images = new_input_images.unsqueeze(1)
-        new_input_images_dimensions = new_input_images_dimensions.unsqueeze(1)
+        new_input_images = new_input_images.unsqueeze(1).to(self.device)
+        new_input_images_dimensions = new_input_images_dimensions.unsqueeze(1).to(self.device)
 
         return self.encode_input(new_input_ids, new_attention_mask,
                                  new_input_images, new_input_images_dimensions).squeeze(1)  # (B, hidden_dim)

@@ -77,7 +77,7 @@ class TextImageProcessor(ProcessorMixin):
         # Process each shape group and update cache
         for shape, renders in render_groups.items():
             processed = self.image_processor(renders, return_tensors="pt", do_center_crop=False, do_resize=False)
-            pixel_values = processed.pixel_values
+            pixel_values = processed.pixel_values.to(torch.bfloat16) # TODO : make dtype configurable
             for i, pixel_value in zip(index_groups[shape], pixel_values, strict=True):
                 self.images_cache[texts[i]] = pixel_value
                 images[i] = pixel_value
