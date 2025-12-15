@@ -211,7 +211,9 @@ class TextImageProcessor(ProcessorMixin):
         if isinstance(batch, list):
             batch = {"text": batch}
 
+        # Copy batch before modifying to avoid mutating the input
         if "text" in batch and "words" not in batch:
+            batch = batch.copy()
             words = [self.pretokenize(t) for t in batch["text"]]
             batch["words"] = words
             batch["seq_lengths"] = [[len(w)] for w in words]

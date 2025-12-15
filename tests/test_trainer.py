@@ -1011,11 +1011,6 @@ def test_dataloader_reuse(trainer_setup):
     assert abs(metrics1["eval_loss"] - metrics2["eval_loss"]) < 0.1
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
-
-
-
 def test_accuracy_is_computed(trainer_setup):
     """Test that eval_accuracy is computed during evaluation."""
     model, processor, collator = trainer_setup
@@ -1059,3 +1054,7 @@ def test_accuracy_is_computed(trainer_setup):
     assert 0.0 <= metrics["eval_word_accuracy"] <= 1.0
     # Note: word_accuracy can be > byte_accuracy when many short words are fully correct
     # while longer words are only partially correct
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])

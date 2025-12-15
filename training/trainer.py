@@ -136,22 +136,24 @@ class WeLTTrainer(Trainer):
         Returns:
             tuple: (loss, None, None) - predictions/labels stored in instance variables
         """
-        # Extract custom fields not needed for loss computation
-        prefixes = inputs.pop("prefix", None)
-        completions = inputs.pop("completion", None)
-        inputs.pop("text", None)
+        # Extract custom fields and create model inputs (without mutating original batch)
+        prefixes = inputs.get("prefix", None)
+        completions = inputs.get("completion", None)
 
         # Count samples in this batch
         if prefixes is not None:
             self._eval_sample_count += len(prefixes)
 
-        # Move inputs to device
-        inputs = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v
-                 for k, v in inputs.items()}
+        # Create model inputs without custom fields
+        model_inputs = {
+            k: v.to(model.device) if isinstance(v, torch.Tensor) else v
+            for k, v in inputs.items()
+            if k not in ("prefix", "completion", "text")
+        }
 
         # Compute loss and store logits for accuracy
         with torch.no_grad():
-            outputs = model(**inputs)
+            outputs = model(**model_inputs)
             loss = outputs.loss if hasattr(outputs, "loss") else outputs["loss"]
 
             # Handle NaN/Inf losses
@@ -277,7 +279,8 @@ class WeLTTrainer(Trainer):
         # Add perplexity if we have loss
         if "eval_loss" in metrics:
             loss = metrics["eval_loss"]
-            perplexity = math.exp(loss) if loss < 100 else float('inf')
+            # Use 709 as threshold to avoid float overflow; exp(709) ~ 8.2e307 is the largest representable float
+            perplexity = math.exp(loss) if loss < 709 else float('inf')
             metrics["perplexity"] = perplexity
             additional_metrics["perplexity"] = perplexity
 
@@ -302,26 +305,52 @@ class WeLTTrainer(Trainer):
 
     def _log_samples(self, predictions, prefixes, completions):
         """Log sample predictions."""
-        print("\n" + "="*60)
-        print("Sample predictions:")
-        print("="*60)
+        logger.info("\n" + "="*60)
+        logger.info("Sample predictions:")
+        logger.info("="*60)
         for i in range(min(self.log_samples, len(predictions))):
-            print(f"  Input: {prefixes[i] if prefixes else 'N/A'}")
-            print(f"  Generated: {predictions[i]}")
+            logger.info(f"  Input: {prefixes[i] if prefixes else 'N/A'}")
+            logger.info(f"  Generated: {predictions[i]}")
             if completions and i < len(completions):
-                print(f"  Reference: {completions[i]}")
-            print()  # Empty line between samples
+                logger.info(f"  Reference: {completions[i]}")
+            logger.info("")  # Empty line between samples
 
     def _validate_eval_dataset(self, eval_dataset):
         """Validate that eval dataset has required columns."""
         if eval_dataset is None:
             raise ValueError("No evaluation dataset provided")  # noqa: TRY003
 
-        if hasattr(eval_dataset, "features") and "prefix" not in eval_dataset.features:
-            raise ValueError(  # noqa: TRY003
-                "Evaluation dataset must have 'prefix' column for generation. "
-                f"Found columns: {list(eval_dataset.features.keys())}"
-            )
+        # Check for 'prefix' column based on dataset type
+        if hasattr(eval_dataset, "features"):
+            # Standard Dataset with features
+            if "prefix" not in eval_dataset.features:
+                raise ValueError(  # noqa: TRY003
+                    "Evaluation dataset must have 'prefix' column for generation. "
+                    f"Found columns: {list(eval_dataset.features.keys())}"
+                )
+        else:
+            # IterableDataset or transformed dataset - check first element
+            try:
+                # Try __getitem__ first (for indexable datasets)
+                first = eval_dataset[0]
+            except Exception:  # noqa: BLE001
+                try:
+                    # Try iter (for IterableDataset)
+                    first = next(iter(eval_dataset))
+                except Exception:  # noqa: BLE001
+                    # Cannot validate - skip check
+                    logger.warning(
+                        "Cannot validate evaluation dataset: unable to access first element "
+                        "to check for 'prefix' column. Ensure your dataset has 'prefix' column "
+                        "for generation-based evaluation."
+                    )
+                    return
+
+            if not isinstance(first, dict) or "prefix" not in first:
+                raise ValueError(  # noqa: TRY003
+                    "Evaluation dataset must have 'prefix' column for generation. "
+                    f"First element: {first}"
+                )
 
     def _compute_generation_metrics(
         self,
@@ -382,40 +411,26 @@ class WeLTTrainer(Trainer):
         total_words = 0
         correct_words = 0
 
-
+        # Process each batch separately (can't concatenate if tokens_per_word differs between batches)
+        # but vectorize operations within each batch for efficiency
         for preds, label in zip(pred_token_ids, labels, strict=False):
-            # Shape: (batch_size, num_words, tokens_per_word)
-            batch_size, num_words, tokens_per_word = label.shape
+            # preds/label shape: (batch_size, num_words, tokens_per_word)
+            # Mask for non-padding tokens
+            non_pad_mask = label != pad_token_id  # (batch_size, num_words, tokens_per_word)
 
-            # Iterate over batch
-            for batch_idx in range(batch_size):
-                # Iterate over words
-                for word_idx in range(num_words):
-                    pred_word = preds[batch_idx, word_idx]
-                    label_word = label[batch_idx, word_idx]
+            # Byte-level: count matching non-padding tokens across entire batch
+            byte_matches = (preds == label) & non_pad_mask
+            correct_bytes += byte_matches.sum().item()
+            total_bytes += non_pad_mask.sum().item()
 
-                    # Skip words that are entirely padding
-                    word_mask = label_word != pad_token_id
-                    if not word_mask.any():
-                        continue
+            # Word-level: a word is correct if all its non-padding tokens are correct
+            word_nonpad = non_pad_mask.any(dim=2)  # (batch_size, num_words)
+            word_matches = ((preds == label) | ~non_pad_mask).all(dim=2)  # (batch_size, num_words)
+            valid_words = word_nonpad.sum().item()
+            correct_words += (word_matches & word_nonpad).sum().item()
+            total_words += valid_words
 
-                    # Extract non-padding tokens
-                    pred_tokens = pred_word[word_mask]
-                    label_tokens = label_word[word_mask]
-
-                    # Byte-level: count matching tokens
-                    correct_bytes += (pred_tokens == label_tokens).sum().item()
-                    total_bytes += label_tokens.numel()
-
-                    # Word-level: check if all tokens in word match
-                    total_words += 1
-                    if (pred_tokens == label_tokens).all():
-                        correct_words += 1
-
-        # Compute byte accuracy
         byte_accuracy = correct_bytes / total_bytes if total_bytes > 0 else 0.0
-
-        # Compute word accuracy
         word_accuracy = correct_words / total_words if total_words > 0 else 0.0
 
         return {

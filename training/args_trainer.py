@@ -23,7 +23,7 @@ class WeLTTrainingArguments(Seq2SeqTrainingArguments):
             "help": (
                 "List of evaluation metrics to compute during generation-based evaluation. "
                 "Examples: ['sacrebleu', 'chrf', 'bleu', 'rouge']. "
-                "If None, only eval_loss will be computed."
+                "If None, only eval_loss, byte_accuracy, word_accuracy, and perplexity will be computed."
             )
         },
     )
