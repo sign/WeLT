@@ -45,29 +45,6 @@ python -m training.train \
 Use `warmup_freeze_steps=N` to freeze the pretrained modules for the first N steps
 ([#7](https://github.com/sign/WeLT/issues/7)).
 
-## Using Modal.com
-
-Setup:
-
-```bash
-modal setup
-```
-
-Training:
-
-```bash
-modal run --detach -m training.modal::train
-modal run -m training.modal::train --config="training/experiments/easy-tasks/string-repetition.yaml"
-modal run -m training.modal::predict
-```
-
-Download trained model:
-
-```bash
-mkdir -p output
-modal volume get model-output / output
-```
-
 ### Training Quirks
 
 `num_input_tokens_seen` and `train_tokens_per_second` are calculated based on the number of bytes the model decodes.
