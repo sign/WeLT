@@ -99,7 +99,7 @@ class WeLTTrainer(Trainer):
             for metric_name in eval_metrics:
                 try:
                     self.loaded_metrics[metric_name] = evaluate.load(metric_name)
-                    logger.info(f"Loaded metric: {metric_name}")
+                    print(f"Loaded metric: {metric_name}")
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"Failed to load metric '{metric_name}': {e}")
 
@@ -305,15 +305,15 @@ class WeLTTrainer(Trainer):
 
     def _log_samples(self, predictions, prefixes, completions):
         """Log sample predictions."""
-        logger.info("\n" + "="*60)
-        logger.info("Sample predictions:")
-        logger.info("="*60)
+        print("\n" + "="*60)
+        print("Sample predictions:")
+        print("="*60)
         for i in range(min(self.log_samples, len(predictions))):
-            logger.info(f"  Input: {prefixes[i] if prefixes else 'N/A'}")
-            logger.info(f"  Generated: {predictions[i]}")
+            print(f"  Input: {prefixes[i] if prefixes else 'N/A'}")
+            print(f"  Generated: {predictions[i]}")
             if completions and i < len(completions):
-                logger.info(f"  Reference: {completions[i]}")
-            logger.info("")  # Empty line between samples
+                print(f"  Reference: {completions[i]}")
+            print("")  # Empty line between samples
 
     def _validate_eval_dataset(self, eval_dataset):
         """Validate that eval dataset has required columns."""
