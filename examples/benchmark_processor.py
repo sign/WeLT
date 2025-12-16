@@ -1,34 +1,34 @@
 from datasets import load_dataset
-from font_download import FontConfig
-from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
-from pixel_renderer import PixelRendererProcessor
+from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoImageProcessor
 from trl import pack_dataset
-from utf8_tokenizer.tokenizer import UTF8Tokenizer
-from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
-from welt.processor import TextImageProcessor
-
-dataset = load_dataset("Helsinki-NLP/opus-100", "en-he", split="train")
+from tests.test_model import setup_tiny_model
 
 
-font_config = FontConfig(sources=FONTS_NOTO_SANS)
-processor = TextImageProcessor(
-    pretokenizer=WordsSegmentationTokenizer(),
-    tokenizer=UTF8Tokenizer(),
-    renderer=PixelRendererProcessor(font=font_config),
-    image_processor=AutoImageProcessor.from_pretrained("WinKawaks/vit-tiny-patch16-224", use_fast=True),
-)
+def collate_fn(batch):
+    """Custom collate function to handle batches with variable-sized tensors."""
+    # Don't collate, just return the list of examples
+    return batch
 
-# Convert dataset to text
-dataset = dataset.map(
-    lambda batch: {"text": f"<en>\x0E{batch['translation']['en']}\x0F<he> {batch['translation']['he']}"},
-    remove_columns=["translation"])
-dataset = processor.pretokenize_dataset(dataset)
+if __name__ == '__main__':
+    dataset = load_dataset("Helsinki-NLP/opus-100", "en-he", split="train")
 
-dataset = pack_dataset(dataset, seq_length=128)
-dataset = dataset.with_transform(processor)
+    model, processor, collator = setup_tiny_model()
 
-for _ in tqdm(dataset):
-    pass
+    # Convert dataset to text
+    dataset = dataset.map(
+        lambda batch: {"text": f"<en>\x0E{batch['translation']['en']}\x0F<he> {batch['translation']['he']}"},
+        remove_columns=["translation"])
+    dataset = processor.pretokenize_dataset(dataset)
+
+    dataset = pack_dataset(dataset, seq_length=128)
+    dataset = dataset.with_transform(processor)
+
+    dataloader = DataLoader(dataset,
+                            batch_size=2,
+                            num_workers=2,
+                            collate_fn=collator)
+
+    for _ in tqdm(dataloader):
+        pass
