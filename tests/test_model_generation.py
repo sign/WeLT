@@ -1,5 +1,6 @@
 import pytest
 import torch
+from transformers import AutoModelForCausalLM
 
 from tests.test_model import dataset_to_batch, make_dataset, setup_tiny_model
 
@@ -108,6 +109,89 @@ def test_same_text_in_batch(generation_model_setup):
     print("✅ 'a' and 'b' produce different outputs - model responds to input")
 
     print("✅ Test passed!")
+
+def test_batch_vs_individual_different_lengths():
+    """
+    BUG from: https://github.com/sign/WeLT/issues/49
+
+    Test that batch generation matches individual generation for texts of different lengths.
+
+    This test uses the "sign/WeLT-string-repetition" model from HuggingFace and tests
+    three texts of different lengths: "A B C D" (4 words), "E F G" (3 words), "H I" (2 words).
+
+    The test should fail if there's a bug where batch processing doesn't properly handle
+    texts of different lengths.
+    """
+    print("\n=== Testing batch vs individual generation for different lengths ===")
+
+    # Load the trained model from HuggingFace
+    print("Loading model from HuggingFace: sign/WeLT-string-repetition")
+    model = AutoModelForCausalLM.from_pretrained("sign/WeLT-string-repetition", trust_remote_code=True)
+    model.eval()
+
+    # Get processor from setup_tiny_model with no image encoder
+    print("Setting up processor")
+    _, processor, collator = setup_tiny_model(image_encoder_name=None)
+
+    # Test texts of different lengths using the string-repetition task format
+    # Format: <text>\x0E<content>\x0F<repeat>
+    texts = [
+        "<text>\x0EA B C D\x0F<repeat> ",  # 4 words (longest)
+        "<text>\x0EE F G\x0F<repeat> ",    # 3 words (medium)
+        "<text>\x0EH I\x0F<repeat> ",      # 2 words (shortest)
+    ]
+
+    print(f"\nTest texts: {texts}")
+
+    def generate_batch(batch):
+        """Helper function to generate outputs for a batch."""
+        with torch.no_grad():
+            return model.generate(
+                **batch,
+                processor=processor,
+                max_generated_words=10,
+            )
+
+    # Prepare batches ahead of time
+    individual_batches = [dataset_to_batch(model, processor, collator, make_dataset([text])) for text in texts]
+    combined_batch = dataset_to_batch(model, processor, collator, make_dataset(texts))
+
+    # Generate each text individually
+    print("\n--- Individual generation ---")
+    individual_outputs = []
+    for text, batch in zip(texts, individual_batches, strict=False):
+        outputs = generate_batch(batch)
+        individual_outputs.append(outputs[0])
+        print(f"  '{text}' -> '{outputs[0]}'")
+
+    # Generate all texts as a batch
+    print("\n--- Batch generation ---")
+    batch_outputs = generate_batch(combined_batch)
+    for text, output in zip(texts, batch_outputs, strict=False):
+        print(f"  '{text}' -> '{output}'")
+
+    # Check that batch outputs match individual outputs
+    print("\n--- Checking consistency ---")
+    all_match = True
+    for i, (text, individual, batch) in enumerate(zip(texts, individual_outputs, batch_outputs, strict=False)):
+        match = individual == batch
+        status = "✅" if match else "❌"
+        print(f"{status} Text {i} ('{text}'):")
+        print(f"    Individual: '{individual}'")
+        print(f"    Batch:      '{batch}'")
+        print(f"    Match:      {match}")
+
+        if not match:
+            all_match = False
+
+    # This assertion should fail if there's a bug
+    assert all_match, (
+        "Batch generation does not match individual generation for texts of different lengths!\n"
+        "Individual outputs: " + str(individual_outputs) + "\n"
+        "Batch outputs:      " + str(batch_outputs)
+    )
+
+    print("\n✅ All outputs match - batch and individual generation are consistent!")
 
 
 if __name__ == "__main__":

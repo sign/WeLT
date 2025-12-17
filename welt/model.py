@@ -355,7 +355,7 @@ class WordLatentTransformer(PreTrainedModel):
 class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
     def _prefill(self, encoded_input: torch.Tensor, attention_mask: torch.Tensor,
-                 num_words: torch.Tensor) -> tuple[Any, torch.Tensor]:
+                 num_words: torch.Tensor, position_ids: torch.Tensor | None = None) -> tuple[Any, torch.Tensor]:
         """
         Prefill stage: Process the full input sequence and build the KV-cache.
 
@@ -363,6 +363,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             encoded_input: Full encoded input (B, L, hidden_dim)
             attention_mask: 4D attention mask (B, 1, L, L) with causal + padding masking
             num_words: Number of valid words per batch item (B,)
+            position_ids: Optional position IDs (B, L) for handling variable-length sequences
 
         Returns:
             past_key_values: KV-cache for subsequent decode steps
@@ -371,6 +372,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         latent_output = self.latent_transformer(
             inputs_embeds=encoded_input,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             use_cache=True,
             output_hidden_states=True
         )
@@ -384,7 +386,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         return latent_output.past_key_values, mapped_latent
 
     def _decode(self, past_key_values: Any, new_embedding: torch.Tensor,
-                attention_mask: torch.Tensor) -> tuple[Any, torch.Tensor]:
+                attention_mask: torch.Tensor, position_ids: torch.Tensor | None = None) -> tuple[Any, torch.Tensor]:
         """
         Decode stage: Process a single new token using the KV-cache.
 
@@ -392,6 +394,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             past_key_values: KV-cache from prefill or previous decode step
             new_embedding: Embedding for the new token (B, 1, hidden_dim)
             attention_mask: 2D attention mask (B, seq_len) indicating which cached positions to attend to
+            position_ids: Optional position IDs (B, 1) for the new tokens
 
         Returns:
             past_key_values: Updated KV-cache
@@ -401,6 +404,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             inputs_embeds=new_embedding,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
+            position_ids=position_ids,
             use_cache=True,
             output_hidden_states=True
         )
@@ -506,10 +510,12 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         # Prefill: encode input and build KV-cache
         initial_num_words = self._num_words_per_datum(input_attention_mask)
         encoded_input = self.encode_input(input_ids, input_attention_mask, input_images, input_images_dimensions)
+
+        # Use default position_ids for prefill (sequential), attention mask handles padding
+        max_initial = initial_num_words.max().item()
         past_key_values, latents = self._prefill(encoded_input, attention_mask, initial_num_words)
 
         # Pre-allocate decode attention mask (1s everywhere except padding positions)
-        max_initial = initial_num_words.max().item()
         decode_mask_full = torch.ones((batch_size, max_initial + max_generated_words), device=device,
                                       dtype=attention_mask.dtype)
         positions = torch.arange(decode_mask_full.size(1), device=device)
@@ -520,12 +526,17 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         all_generated_words = [[] for _ in range(batch_size)]
         words = None
 
-        for _ in range(max_generated_words):
+        for step_idx in range(max_generated_words):
             if words is not None:
                 # Decode: encode new words and run single transformer step
                 new_embedding = self._encode_words(words, processor, device).unsqueeze(1)
                 decode_mask = decode_mask_full[:, :past_key_values.get_seq_length() + 1]
-                past_key_values, latents = self._decode(past_key_values, new_embedding, decode_mask)
+
+                # Compute position_ids for each batch item: continuing from their last valid position
+                # position_id = initial_num_words + (step_idx - 1), since step 0 doesn't do decode
+                decode_position_ids = (initial_num_words + step_idx - 1).unsqueeze(1)  # (B, 1)
+
+                past_key_values, latents = self._decode(past_key_values, new_embedding, decode_mask, decode_position_ids)
 
             # Generate bytes from latents
             generated_bytes = self._generate_word_bytes(
