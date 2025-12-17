@@ -21,6 +21,7 @@ from trl import pack_dataset
 from training.args_data import DataTrainingArguments
 from training.args_model import ModelArguments
 from training.args_trainer import WeLTTrainingArguments
+from training.extendable_yaml import resolve_yaml_file
 from training.freeze_callback import FreezeWarmupCallback
 from training.trainer import WeLTTrainer
 from welt.model_utils import setup_model
@@ -94,12 +95,14 @@ def parse_args_into_dataclasses(args: list[str] | None | str = None):
     # If we pass only one argument to the script and it's the path to a json or yaml file,
     # let's parse it to get our arguments.
     if isinstance(args, str):
-        return parser.parse_yaml_file(yaml_file=os.path.abspath(args))
+        resolved_path = resolve_yaml_file(os.path.abspath(args))
+        return parser.parse_yaml_file(yaml_file=resolved_path)
 
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         return parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     elif len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
-        return parser.parse_yaml_file(yaml_file=os.path.abspath(sys.argv[1]))
+        resolved_path = resolve_yaml_file(os.path.abspath(sys.argv[1]))
+        return parser.parse_yaml_file(yaml_file=resolved_path)
     else:
         return parser.parse_args_into_dataclasses(args=args)
 
