@@ -2,7 +2,7 @@
 image_encoder_model_name_or_path: "NaViT-tiny"
 bytes_encoder_model_name_or_path: null
 latent_transformer_model_name_or_path: sbintuitions/tiny-lm
-bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
+bytes_decoder_model_name_or_path: sign/utf8-lm-tiny
 load_pretrained: true
 
 # Dataset setup

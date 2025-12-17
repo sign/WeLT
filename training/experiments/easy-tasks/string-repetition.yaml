@@ -2,7 +2,8 @@
 image_encoder_model_name_or_path: null
 bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
 latent_transformer_model_name_or_path: sbintuitions/tiny-lm
-bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
+bytes_decoder_model_name_or_path: sign/utf8-lm-tiny
+load_pretrained: true
 
 # Dataset setup
 dataset_name: Helsinki-NLP/opus-100
@@ -29,7 +30,7 @@ auto_find_batch_size: true
 output_dir: ./output/string-repetition-tiny
 overwrite_output_dir: true
 do_train: true
-max_steps: 1000
+max_steps: 10000
 learning_rate: 3.0e-4
 optim: adamw_torch_fused
 
@@ -42,7 +43,7 @@ metric_for_best_model: chrf  # Using generation-based metric
 eval_metrics: [sacrebleu, chrf]  # Generation-based evaluation metrics
 predict_with_generate: true
 generation_max_length: 50  # Max tokens/words to generate during evaluation
-log_samples: 3  # Number of sample predictions to log
+log_samples: 5  # Number of sample predictions to log
 
 # Logging
 logging_steps: 10

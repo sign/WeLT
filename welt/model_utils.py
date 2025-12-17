@@ -83,7 +83,7 @@ def setup_model(
         image_encoder_name="WinKawaks/vit-tiny-patch16-224",
         bytes_encoder_name="prajjwal1/bert-tiny",
         latent_transformer_name="EleutherAI/pythia-70m",
-        bytes_decoder_name="EleutherAI/pythia-70m",
+        bytes_decoder_name="sign/utf8-lm-tiny",
         pretokenizer_name: str | None = None,
         trust_remote_code=False,
         modality_dropout=0.15,
