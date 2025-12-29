@@ -19,4 +19,4 @@ COPY pyproject.toml /app/pyproject.toml
 RUN pip install ".[train]"
 
 COPY welt /app/welt
-COPY training /app/training
+COPY welt_training /app/welt_training

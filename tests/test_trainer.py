@@ -7,7 +7,7 @@ from datasets import Dataset
 from transformers import GenerationConfig, Seq2SeqTrainingArguments
 
 from tests.test_model import setup_tiny_model
-from training.trainer import WeLTTrainer
+from welt_training.trainer import WeLTTrainer
 
 
 @pytest.fixture(scope="module")

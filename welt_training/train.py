@@ -18,13 +18,13 @@ from transformers import (
 from transformers.trainer_utils import get_last_checkpoint
 from trl import pack_dataset
 
-from training.args_data import DataTrainingArguments
-from training.args_model import ModelArguments
-from training.args_trainer import WeLTTrainingArguments
-from training.extendable_yaml import resolve_yaml_file
-from training.freeze_callback import FreezeWarmupCallback
-from training.trainer import WeLTTrainer
 from welt.model_utils import setup_model
+from welt_training.args_data import DataTrainingArguments
+from welt_training.args_model import ModelArguments
+from welt_training.args_trainer import WeLTTrainingArguments
+from welt_training.extendable_yaml import resolve_yaml_file
+from welt_training.freeze_callback import FreezeWarmupCallback
+from welt_training.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)
 

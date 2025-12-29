@@ -536,7 +536,9 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
                 # position_id = initial_num_words + (step_idx - 1), since step 0 doesn't do decode
                 decode_position_ids = (initial_num_words + step_idx - 1).unsqueeze(1)  # (B, 1)
 
-                past_key_values, latents = self._decode(past_key_values, new_embedding, decode_mask, decode_position_ids)
+                past_key_values, latents = self._decode(
+                    past_key_values, new_embedding, decode_mask, decode_position_ids
+                )
 
             # Generate bytes from latents
             generated_bytes = self._generate_word_bytes(

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from training.train import train
+from welt_training.train import train
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
     5. Verifies that eval_chrf metric is reported
     """
     # Load the base config from the experiment
-    base_config_path = Path(__file__).parent.parent / "training/experiments/easy-tasks/string-repetition.yaml"
+    base_config_path = Path(__file__).parent.parent / "welt_training/experiments/easy-tasks/string-repetition.yaml"
     with open(base_config_path) as f:
         config = yaml.safe_load(f)
 
@@ -122,7 +122,7 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
 
 def test_training_without_generation_metrics(temp_output_dir):
     """Test that training works without generation-based metrics (backward compatibility)."""
-    base_config_path = Path(__file__).parent.parent / "training/experiments/easy-tasks/string-repetition.yaml"
+    base_config_path = Path(__file__).parent.parent / "welt_training/experiments/easy-tasks/string-repetition.yaml"
     with open(base_config_path) as f:
         config = yaml.safe_load(f)
 
@@ -174,7 +174,7 @@ def test_training_without_generation_metrics(temp_output_dir):
 
 def test_training_with_sacrebleu(temp_output_dir):
     """Test training with sacrebleu metric specifically."""
-    base_config_path = Path(__file__).parent.parent / "training/experiments/easy-tasks/string-repetition.yaml"
+    base_config_path = Path(__file__).parent.parent / "welt_training/experiments/easy-tasks/string-repetition.yaml"
     with open(base_config_path) as f:
         config = yaml.safe_load(f)
 
@@ -223,7 +223,7 @@ def test_training_with_sacrebleu(temp_output_dir):
 
 def test_training_determinism(temp_output_dir):
     """Test that training with same seed produces similar results."""
-    base_config_path = Path(__file__).parent.parent / "training/experiments/easy-tasks/string-repetition.yaml"
+    base_config_path = Path(__file__).parent.parent / "welt_training/experiments/easy-tasks/string-repetition.yaml"
     with open(base_config_path) as f:
         config = yaml.safe_load(f)
 

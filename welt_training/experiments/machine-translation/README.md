@@ -19,7 +19,7 @@ python run_clm.py \
 
 Compared to our model setup:
 ```shell
-python -m training.train \
+welt-train \
     --image_encoder_model_name_or_path WinKawaks/vit-tiny-patch16-224 \
     --bytes_encoder_model_name_or_path prajjwal1/bert-tiny \
     --latent_transformer_model_name_or_path EleutherAI/pythia-70m \
@@ -63,6 +63,6 @@ With the following shared arguments:
 ### Using configs
 
 ```bash
-python -m training.train training/experiments/machine-translation/machine-translation.yaml
-python -m training.train training/experiments/machine-translation/machine-translation-signed-spoken.yaml
+welt-train welt_training/experiments/machine-translation/machine-translation.yaml
+welt-train welt_training/experiments/machine-translation/machine-translation-signed-spoken.yaml
 ```

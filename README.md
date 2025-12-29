@@ -43,18 +43,18 @@ docker build -t welt .
 docker run -it --rm --gpus all \
   --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
   -v "$(pwd)/welt:/app/welt" \
-  -v "$(pwd)/training:/app/training" \
+  -v "$(pwd)/welt_training:/app/welt_training" \
   welt /bin/bash
   
 # Run a training job
 docker run -it --rm --gpus all \
   --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
   -v "$(pwd)/welt:/app/welt" \
-  -v "$(pwd)/training:/app/training" \
+  -v "$(pwd)/welt_training:/app/welt_training" \
   -v /shared/.cache/huggingface:/root/.cache/huggingface \
   -v ~/.netrc:/root/.netrc:ro \
   -e WANDB_PROJECT="ocr" \
-  welt python -m training.train training/experiments/easy-tasks/ocr.yaml
+  welt python -m welt_training.train training/experiments/easy-tasks/ocr.yaml
 ```
 
 > [!TIP]
@@ -87,7 +87,7 @@ You can also turn off a specific encoder after training has completed, for testi
 
 ## Training
 
-Training instructions are available in the [training/README.md](./training/README.md).
+Training instructions are available in the [welt_training/README.md](./welt_training/README.md).
 There, you can select the model architectures you want to use for each component, and the dataset you want to train on.
 
 ## Inference

@@ -67,10 +67,12 @@ def load_yaml_with_extends(yaml_path: str | Path) -> dict[str, Any]:
     def _load_recursive(path: Path, visited: set[Path]) -> dict[str, Any]:
         """Recursively load and merge YAML files."""
         if path in visited:
-            raise ValueError(f"Circular dependency detected: {path}")
+            msg = f"Circular dependency detected: {path}"
+            raise ValueError(msg)
 
         if not path.exists():
-            raise FileNotFoundError(f"YAML file not found: {path}")
+            msg = f"YAML file not found: {path}"
+            raise FileNotFoundError(msg)
 
         visited.add(path)
 

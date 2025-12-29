@@ -42,12 +42,13 @@ train = [
 packages = [
     "welt",
     "welt.vision",
+    "welt_training",
 ]
 
 [tool.ruff]
 line-length = 120
 extend-exclude = [
-    "training/experiments/*",
+    "welt_training/experiments/*",
 ]
 
 [tool.ruff.lint]
@@ -72,3 +73,6 @@ testpaths = [
     "welt",
     "tests",
 ]
+
+[project.scripts]
+welt-train = "welt_training.train:train"

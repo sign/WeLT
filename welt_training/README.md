@@ -14,7 +14,7 @@ Run:
 [//]: # (TODO: Unclear why `remove_unused_columns=False` is needed, but it is required to avoid errors during training.)
 
 ```bash
-python -m training.train \
+python -m welt_training.train \
     --image_encoder_model_name_or_path "WinKawaks/vit-tiny-patch16-224" \
     --bytes_encoder_model_name_or_path "prajjwal1/bert-tiny" \
     --latent_transformer_model_name_or_path "sbintuitions/tiny-lm" \
