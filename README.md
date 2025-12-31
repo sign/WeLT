@@ -54,7 +54,8 @@ docker run -it --rm --gpus all \
   -v /shared/.cache/huggingface:/root/.cache/huggingface \
   -v ~/.netrc:/root/.netrc:ro \
   -e WANDB_PROJECT="ocr" \
-  welt python -m welt_training.train training/experiments/easy-tasks/ocr.yaml
+  -e CONFIG="welt_training/experiments/easy-tasks/ocr.yaml" \
+  welt 
 ```
 
 > [!TIP]

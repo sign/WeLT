@@ -1,4 +1,4 @@
-FROM nvcr.io/nvidia/pytorch:25.11-py3
+FROM nvcr.io/nvidia/pytorch:25.12-py3
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -13,6 +13,7 @@ RUN apt-get update && \
 
 # Install package dependencies
 RUN mkdir -p /app/welt/vision && \
+    mkdir -p /app/welt_training && \
     touch /app/README.md
 WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
@@ -20,3 +21,5 @@ RUN pip install ".[train]"
 
 COPY welt /app/welt
 COPY welt_training /app/welt_training
+
+CMD ["bash", "-lc", "accelerate launch --num_processes 1 --mixed_precision bf16 -m welt_training.train \"$CONFIG\""]

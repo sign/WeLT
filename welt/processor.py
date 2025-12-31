@@ -60,9 +60,9 @@ class TextImageProcessor(ProcessorMixin):
 
         self.images_cache = LRUCache(maxsize=self.cache_size)
 
-    def render_texts(self, texts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
+    def render_texts(self, texts: list[str], device=None) -> tuple[torch.Tensor, torch.Tensor]:
         if isinstance(self.image_processor, NoopImageProcessor):
-            return torch.empty(1,), torch.empty(1,)
+            return torch.empty(1, device=device), torch.empty(1, device=device)
 
         images = [self.images_cache.get(text, None) for text in texts]
 
@@ -78,12 +78,12 @@ class TextImageProcessor(ProcessorMixin):
         # Process each shape group and update cache
         for shape, renders in render_groups.items():
             processed = self.image_processor(renders, return_tensors="pt", do_center_crop=False, do_resize=False)
-            pixel_values = processed.pixel_values.to(torch.bfloat16) # TODO : make dtype configurable
+            pixel_values = processed.pixel_values.to(torch.bfloat16, device=device) # TODO : make dtype configurable
             for i, pixel_value in zip(index_groups[shape], pixel_values, strict=True):
                 self.images_cache[texts[i]] = pixel_value
                 images[i] = pixel_value
 
-        image_dimensions = torch.tensor([img.shape[-2:] for img in images], dtype=torch.long)
+        image_dimensions = torch.tensor([img.shape[-2:] for img in images], dtype=torch.long, device=device)
         return stack_pad_tensors(images), image_dimensions
 
     def pretokenize(self, text: str) -> list[str]:

@@ -6,7 +6,6 @@ import os
 import sys
 
 import datasets
-import torch
 import transformers
 from datasets import IterableDataset, IterableDatasetDict, load_dataset
 from safetensors.torch import load_model
@@ -27,27 +26,6 @@ from welt_training.freeze_callback import FreezeWarmupCallback
 from welt_training.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)
-
-
-def enable_optimizations():
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(False)
-
-    # For debugging purposes only:
-    # torch.autograd.set_detect_anomaly(True)
-
-    # TODO --use_cuda_graphs true ?
-
-    # TODO pin_memory_device="cuda" (PyTorch ≥2.3)
-
-    # TODO
-    #     torch_compile=True,
-    #     torch_compile_backend="inductor",
-    #     torch_compile_mode="default",
-
-    # TODO use accelerate launch
 
 
 def split_streaming_dataset(
@@ -158,6 +136,7 @@ def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, see
     if model_args.model_name_or_path:
         load_model(model, model_args.model_name_or_path)
 
+    model.enable_optimizations()
     return model, processor, collator
 
 
@@ -341,8 +320,6 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
 
 def train(args: list[str] | None | str = None):  # noqa: C901
     cache_dir = None  # Use the default cache directory / Environment variable
-
-    enable_optimizations()
 
     model_args, data_args, training_args = parse_args_into_dataclasses(args)
 
