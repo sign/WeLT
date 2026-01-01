@@ -248,18 +248,46 @@ def test_model_from_pretrained_works_without_image_encoder():
 
 
 def test_model_from_pretrained_works_without_bytes_encoder():
-    """Test that the model can be saved and loaded without bytes encoder."""
+    """Test that the model can be saved and loaded without bytes encoder, checking actual values."""
     model, processor, collator = setup_model(bytes_encoder_name=None)
+    model.eval()
+
+    # Test with some sample data
+    texts = ["hello world", "test"]
+
+    # Get outputs before saving
+    original_losses, original_outputs = predict_dataset(texts, model, processor, collator)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         original_num_parameters = num_model_params(model)
         model.save_pretrained(save_directory=temp_dir, push_to_hub=False)
 
         new_model = WordLatentTransformer.from_pretrained(temp_dir)
+        new_model.eval()
         loaded_num_parameters = num_model_params(new_model)
 
         assert original_num_parameters == loaded_num_parameters, \
             f"Number of parameters mismatch: {original_num_parameters:,} vs {loaded_num_parameters:,}"
+
+        # Get outputs after loading
+        loaded_losses, loaded_outputs = predict_dataset(texts, new_model, processor, collator)
+
+        # Check that losses are identical
+        for text in texts:
+            original_loss = original_losses[text]
+            loaded_loss = loaded_losses[text]
+            assert abs(original_loss - loaded_loss) < 1e-6, \
+                f"Loss mismatch for '{text}': {original_loss} vs {loaded_loss}"
+
+        # Check that logits are identical
+        for text in texts:
+            original_logits = original_outputs[text].logits
+            loaded_logits = loaded_outputs[text].logits
+            max_diff = torch.max(torch.abs(original_logits - loaded_logits)).item()
+            assert max_diff < 1e-5, \
+                f"Logits mismatch for '{text}': max difference {max_diff}"
+
+        print(f"✓ Model outputs are identical after save/load")
 
 
 if __name__ == "__main__":

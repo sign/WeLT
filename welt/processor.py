@@ -64,6 +64,7 @@ class TextImageProcessor(ProcessorMixin):
         if isinstance(self.image_processor, NoopImageProcessor):
             return torch.empty(1, device=device), torch.empty(1, device=device)
 
+        device_kwargs = {"device": device} if device else {}
         images = [self.images_cache.get(text, None) for text in texts]
 
         # Render all missing texts and group by size for efficient batching
@@ -78,7 +79,7 @@ class TextImageProcessor(ProcessorMixin):
         # Process each shape group and update cache
         for shape, renders in render_groups.items():
             processed = self.image_processor(renders, return_tensors="pt", do_center_crop=False, do_resize=False)
-            pixel_values = processed.pixel_values.to(torch.bfloat16, device=device) # TODO : make dtype configurable
+            pixel_values = processed.pixel_values.to(torch.bfloat16, **device_kwargs)  # TODO : make dtype configurable
             for i, pixel_value in zip(index_groups[shape], pixel_values, strict=True):
                 self.images_cache[texts[i]] = pixel_value
                 images[i] = pixel_value

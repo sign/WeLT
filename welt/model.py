@@ -66,6 +66,15 @@ class WordLatentTransformer(PreTrainedModel):
     config_class = WordLatentTransformerConfig
 
     _supports_flash_attn = True
+    _keys_to_ignore_on_load_missing = [
+        # Layers we replace with Identity
+        r"bytes_encoder\.cls.*",
+        r"bytes_encoder\.decoder.*"
+    ]
+
+    def _initialize_missing_keys(self, missing_keys, is_quantized):
+        """Override to prevent initialization of missing keys when loading from pretrained."""
+        pass
 
     def __init__(self, config: WordLatentTransformerConfig,
                  load_pretrained: bool = False,
