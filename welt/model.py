@@ -175,8 +175,15 @@ class WordLatentTransformer(PreTrainedModel):
         input_ids = input_ids.view(B * L, T)
         attention_mask = attention_mask.view(B * L, T)
         # Encode texts using the bytes decoder as encoder
-        text_outputs = self.bytes_encoder(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
-        text_embeds = text_outputs.hidden_states[-1]
+        if hasattr(self.bytes_encoder, "model"):
+            # For models like ModernBertForMaskedLM
+            text_outputs = self.bytes_encoder.model(input_ids=input_ids, attention_mask=attention_mask)
+            text_embeds = text_outputs.last_hidden_state
+        else:
+            text_outputs = self.bytes_encoder(input_ids=input_ids,
+                                              attention_mask=attention_mask,
+                                              output_hidden_states=True)
+            text_embeds = text_outputs.hidden_states[-1]
 
         # Apply attention mask to text embeddings
         text_embeds *= attention_mask.unsqueeze(-1)
@@ -359,21 +366,19 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         self._original_decode = None
         self._compile_enabled = False
 
-    def enable_optimizations(self, compile_mode: str = "default"):
+        self.logits_processor = UTF8ValidationLogitsProcessor()
+
+    def enable_backend_optimizations(self):
         """
-        Enable performance optimizations for inference.
+        Enable PyTorch backend optimizations (TF32, Flash Attention, cudnn benchmark).
 
-        This method applies torch.compile to hot paths and enables PyTorch performance features.
-        Provides ~30% speedup for single-batch inference.
+        These optimizations are safe for both training and inference and provide
+        significant speedups (especially Flash Attention). They don't use torch.compile
+        so they're compatible with Hugging Face Trainer and Accelerate.
 
-        Args:
-            compile_mode: Compilation mode ('default', 'reduce-overhead', 'max-autotune')
-                         'default' recommended for best compatibility
-
-        Example:
-            model.enable_optimizations(compile_mode="default")
+        Call this before training or inference for best performance.
         """
-        print(f"Enabling optimizations (compile_mode={compile_mode})...")
+        print("Enabling backend optimizations...")
 
         torch.set_float32_matmul_precision('high')  # Use TF32 for faster matmul
 
@@ -385,10 +390,30 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
             # Enable Flash Attention for scaled_dot_product (significant speedup)
             torch.backends.cuda.enable_flash_sdp(True)
-            torch.backends.cuda.enable_mem_efficient_sdp(False)  # Conflicts with flash, disable
+            torch.backends.cuda.enable_mem_efficient_sdp(True)
             torch.backends.cuda.enable_math_sdp(False)  # Force optimized paths only
 
-            print("  Enabled cudnn benchmark, TF32, Flash Attention, and CUDA optimizations")
+            print("✓ Enabled cudnn benchmark, TF32, Flash Attention, and CUDA optimizations")
+        else:
+            print("✓ Enabled TF32 optimizations (CPU mode)")
+
+    def enable_optimizations(self, compile_mode: str = "default"):
+        """
+        Enable performance optimizations for inference.
+
+        WARNING: Do NOT use this during training with Hugging Face Trainer!
+        The torch.compile calls conflict with Accelerate's model unwrapping.
+        For training, use enable_backend_optimizations() instead.
+        """
+        print(f"Enabling optimizations (compile_mode={compile_mode})...")
+
+        # First enable backend optimizations
+        self.enable_backend_optimizations()
+
+        if not torch.cuda.is_available():
+            # Fix for CPU torch.compile inductor bug with missing variable declarations
+            torch._dynamo.config.suppress_errors = True
+            torch._inductor.config.cpp.simdlen = None  # Disable vectorization that causes the bug
 
         # Compile _decode (called repeatedly in generation loop)
         print("  Compiling _decode...")
@@ -407,6 +432,9 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         # Compile bytes_decoder forward (called in character generation loop)
         print("  Compiling bytes_decoder...")
         self.bytes_decoder.forward = torch.compile(self.bytes_decoder.forward, mode=compile_mode)
+
+        print("  Compiling logits processor...")
+        self.logits_processor = torch.compile(self.logits_processor, mode=compile_mode)
 
         # Compile bytes_encoder forward (called in _encode_words per word)
         if self.bytes_encoder is not None:
@@ -481,7 +509,6 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             tokenizer: UTF8Tokenizer,
             bos_embed: torch.Tensor,
             bytes_generation_config: GenerationConfig | None = None,
-            logits_processor: list | None = None,
             stopping_criteria: list | None = None,
     ) -> torch.Tensor:
         # Expand cached BOS embedding to batch size
@@ -495,7 +522,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             inputs_embeds=inputs_embeds,
             generation_config=bytes_generation_config,
             tokenizer=tokenizer,
-            logits_processor=logits_processor,
+            logits_processor=[self.logits_processor],
             stopping_criteria=stopping_criteria,
         )
 
@@ -564,7 +591,6 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
         bytes_generation_config = self._prep_bytes_generation_config(
             processor.max_word_length, tokenizer, bytes_generation_config)
-        logits_processor = [UTF8ValidationLogitsProcessor()]
         stopping_criteria = [WordStoppingCriteria(tokenizer)]
         bos_embed = self.bytes_decoder.get_input_embeddings()(
             torch.tensor([[tokenizer.bos_token_id]], device=device))
@@ -604,7 +630,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
             # Generate bytes from latents
             generated_bytes = self._generate_word_bytes(
-                latents, tokenizer, bos_embed, bytes_generation_config, logits_processor, stopping_criteria)
+                latents, tokenizer, bos_embed, bytes_generation_config, stopping_criteria)
             words = tokenizer.batch_decode(generated_bytes, skip_special_tokens=True)
 
             if all(len(w) == 0 for w in words):

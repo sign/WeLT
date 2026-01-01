@@ -22,4 +22,4 @@ RUN pip install ".[train]"
 COPY welt /app/welt
 COPY welt_training /app/welt_training
 
-CMD ["bash", "-lc", "accelerate launch --num_processes 1 --mixed_precision bf16 -m welt_training.train \"$CONFIG\""]
+CMD accelerate launch --mixed_precision bf16 -m welt_training.train $CONFIG

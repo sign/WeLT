@@ -136,7 +136,7 @@ def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, see
     if model_args.model_name_or_path:
         load_model(model, model_args.model_name_or_path)
 
-    model.enable_optimizations()
+    model.enable_backend_optimizations()
     return model, processor, collator
 
 
