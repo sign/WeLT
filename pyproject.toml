@@ -66,7 +66,6 @@ select = [
     "PT", # flake8-pytest-style
     "W605", # invalid escape sequence
     "BLE", # flake8-blind-except
-    "TRY", # tryceratops
 ]
 
 [tool.pytest.ini_options]

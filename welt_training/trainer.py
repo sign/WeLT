@@ -150,7 +150,7 @@ class WeLTTrainer(Trainer):
 
         # Validate optimizer type
         if "adamw" not in args.optim.lower():
-            raise ValueError(  # noqa: TRY003
+            raise ValueError(
                 f"WeLTTrainer only supports AdamW optimizer variants. "
                 f"Got optim='{args.optim}'. Use 'adamw_torch' or 'adamw_torch_fused'."
             )
@@ -395,13 +395,13 @@ class WeLTTrainer(Trainer):
     def _validate_eval_dataset(self, eval_dataset):
         """Validate that eval dataset has required columns."""
         if eval_dataset is None:
-            raise ValueError("No evaluation dataset provided")  # noqa: TRY003
+            raise ValueError("No evaluation dataset provided")
 
         # Check for 'prefix' column based on dataset type
         if hasattr(eval_dataset, "features"):
             # Standard Dataset with features
             if "prefix" not in eval_dataset.features:
-                raise ValueError(  # noqa: TRY003
+                raise ValueError(
                     "Evaluation dataset must have 'prefix' column for generation. "
                     f"Found columns: {list(eval_dataset.features.keys())}"
                 )
@@ -424,7 +424,7 @@ class WeLTTrainer(Trainer):
                     return
 
             if not isinstance(first, dict) or "prefix" not in first:
-                raise ValueError(  # noqa: TRY003
+                raise ValueError(
                     "Evaluation dataset must have 'prefix' column for generation. "
                     f"First element: {first}"
                 )

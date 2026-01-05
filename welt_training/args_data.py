@@ -109,16 +109,16 @@ class DataTrainingArguments:
                         f"dataset_text_template must be either a string or a list of size 2. "
                         f"Got a list of size {len(self.dataset_text_template)}."
                     )
-                    raise ValueError(msg)  # noqa: TRY003
+                    raise ValueError(msg)
             elif not isinstance(self.dataset_text_template, str):
                 msg = (
                     f"dataset_text_template must be either a string or a list of size 2. "
                     f"Got {type(self.dataset_text_template).__name__}."
                 )
-                raise ValueError(msg)  # noqa: TRY003
+                raise ValueError(msg)
 
         if self.dataset_name is None and self.train_file is None and self.validation_file is None:
-            raise ValueError("Need either a dataset name or a training/validation file.")  # noqa: TRY003
+            raise ValueError("Need either a dataset name or a training/validation file.")
         else:
             if self.train_file is not None:
                 extension = self.train_file.split(".")[-1]

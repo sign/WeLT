@@ -21,11 +21,14 @@ def generation_model_setup():
 def predict_texts(texts: list[str], model, processor, collator):
     """Helper function to predict texts using the generation model."""
 
+    # add trailing space to each text to ensure proper "word" boundary
+    texts = [text.strip() + " " for text in texts]
+
     print("-" * 30)
     dataset = make_dataset(texts)
     batch = dataset_to_batch(model, processor, collator, dataset)
 
-    processor.max_word_length = 5
+    processor.max_word_length = 64
 
     with torch.no_grad():
         outputs = model.generate(
@@ -50,7 +53,7 @@ def test_batch_interference(generation_model_setup):
     print("\n=== Testing batch interference ===")
     batches = [
         ["a"],
-        ["a", "two words", ""],
+        ["a", "two words"],
         ["a", "even three words"],
         ["a", "b", "a_long_word"],
         ["a", "a"]
@@ -192,6 +195,32 @@ def test_batch_vs_individual_different_lengths():
     )
 
     print("\n✅ All outputs match - batch and individual generation are consistent!")
+
+
+def test_mid_word_generation():
+    """Test that the model can continue generating from a partial word."""
+    from words_segmentation.pretokenizer import is_word_complete
+
+    model = AutoModelForCausalLM.from_pretrained("sign/WeLT-string-repetition", trust_remote_code=True)
+    model.eval()
+
+    _, processor, _ = setup_tiny_model(image_encoder_name=None)
+
+    # First, the real output
+    text = "<text>\x0eHello\x0f<repeat> "
+    words = processor.pretokenize(text)
+    assert is_word_complete(words[-1])
+    batch = processor([text], collated=True, packed=False)
+    output = model.generate(**batch, processor=processor, max_generated_words=2)[0]
+    assert output == "Hello"
+
+    # Then, test with a partial word
+    text = "<text>\x0eHello\x0f<repeat> Hel"
+    words = processor.pretokenize(text)
+    assert not is_word_complete(words[-1])
+    batch = processor([text], collated=True, packed=False)
+    output = model.generate(**batch, processor=processor, max_generated_words=2)[0]
+    assert output == "lo"
 
 
 if __name__ == "__main__":

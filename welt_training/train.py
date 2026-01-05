@@ -46,7 +46,7 @@ def split_streaming_dataset(
             two IterableDataset objects: (train_stream, validation_stream).
     """
     if not (0 < validation_percentage < 100):
-        raise ValueError(  # noqa: TRY003
+        raise ValueError(
             f"validation_percentage must be between 0 and 100 (exclusive). Passed: {validation_percentage}"
         )
 
@@ -346,7 +346,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     train_dataset = None
     if training_args.do_train:
         if "train" not in text_datasets:
-            raise ValueError("--do_train requires a train dataset")  # noqa: TRY003
+            raise ValueError("--do_train requires a train dataset")
         train_dataset = limit_dataset_size(text_datasets["train"],
                                            max_samples=data_args.max_train_samples,
                                            streaming=data_args.streaming)
@@ -354,7 +354,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     eval_dataset = None
     if training_args.do_eval:
         if "validation" not in text_datasets:
-            raise ValueError("--do_eval requires a validation dataset")  # noqa: TRY003
+            raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = limit_dataset_size(text_datasets["validation"],
                                           max_samples=data_args.max_eval_samples,
                                           streaming=data_args.streaming)

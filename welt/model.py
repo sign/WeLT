@@ -19,7 +19,7 @@ from transformers.models.auto.auto_factory import _get_model_class
 from utf8_tokenizer.embeddings import patch_embedding_layers
 from utf8_tokenizer.logits_processor import UTF8ValidationLogitsProcessor
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
-from words_segmentation.pretokenizer import WordStoppingCriteria
+from words_segmentation.pretokenizer import WordStoppingCriteria, is_word_complete
 
 from welt.config import WordLatentTransformerConfig
 from welt.noop import NoopConfig
@@ -376,6 +376,36 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
         self.logits_processor = UTF8ValidationLogitsProcessor()
 
+    def _get_partial_word_prefix(
+            self,
+            input_ids: torch.Tensor,
+            input_attention_mask: torch.Tensor,
+            initial_num_words: torch.Tensor,
+            tokenizer: UTF8Tokenizer,
+    ) -> torch.Tensor | None:
+        """
+        Get prefix token IDs for partial (incomplete) last words.
+
+        Returns:
+            prefix_ids: (B, T) tensor if any words are incomplete, else None.
+                       Complete words get [BOS, PAD, ...], incomplete get their tokens (without EOS).
+        """
+        batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
+        last_word_ids = input_ids[batch_indices, initial_num_words - 1]
+        last_word_mask = input_attention_mask[batch_indices, initial_num_words - 1]
+
+        last_words = [tokenizer.decode(ids[mask.bool()].tolist(), skip_special_tokens=True)
+                      for ids, mask in zip(last_word_ids, last_word_mask, strict=True)]
+
+        print("last_words", last_words, last_word_ids)
+        if all(is_word_complete(w) for w in last_words):
+            return None
+
+        prefix_ids = last_word_ids.clone()
+        prefix_ids[prefix_ids == tokenizer.eos_token_id] = tokenizer.pad_token_id
+
+        return prefix_ids
+
     def enable_backend_optimizations(self):
         """
         Enable PyTorch backend optimizations (TF32, Flash Attention, cudnn benchmark).
@@ -512,16 +542,28 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             bos_embed: torch.Tensor,
             bytes_generation_config: GenerationConfig | None = None,
             stopping_criteria: list | None = None,
+            prefix_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Expand cached BOS embedding to batch size
         batch_size = latents.size(0)
-        bos_embeds = bos_embed.expand(batch_size, -1, -1)  # (B, 1, hidden_dim)
+        embed_layer = self.bytes_decoder.get_input_embeddings()
 
-        inputs_embeds = torch.cat([latents, bos_embeds], dim=1)  # (B, 2, bytes_decoder_dim)
+        if prefix_ids is not None:
+            # Mid-word generation only supports batch_size=1 (checked in generate())
+            # Trim prefix_ids to actual length (remove trailing PAD tokens)
+            prefix_len = (prefix_ids[0] != tokenizer.pad_token_id).sum().item()
+            trimmed_ids = prefix_ids[:, :prefix_len]
 
-        # Generate bytes for this word
+            prefix_embeds = embed_layer(trimmed_ids)
+            inputs_embeds = torch.cat([latents, prefix_embeds], dim=1)
+            attention_mask = None  # No padding, no mask needed
+        else:
+            bos_embeds = bos_embed.expand(batch_size, -1, -1)
+            inputs_embeds = torch.cat([latents, bos_embeds], dim=1)
+            attention_mask = None
+
         return self.bytes_decoder.generate(
             inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
             generation_config=bytes_generation_config,
             tokenizer=tokenizer,
             logits_processor=[self.logits_processor],
@@ -601,6 +643,16 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         initial_num_words = self._num_words_per_datum(input_attention_mask)
         encoded_input = self.encode_input(input_ids, input_attention_mask, input_images, input_images_dimensions)
 
+        prefix_ids = self._get_partial_word_prefix(
+                input_ids, input_attention_mask, initial_num_words, tokenizer)
+        if prefix_ids is not None:
+            if batch_size > 1:
+                raise ValueError("Mid-word generation with prefix_ids is only supported for batch_size=1")
+            # Exclude the partial word from prefill - we use it as generation prefix instead
+            encoded_input = encoded_input[:, :-1]
+            attention_mask = attention_mask[:, :, :-1, :-1]
+            initial_num_words = initial_num_words - 1
+
         # Use default position_ids for prefill (sequential), attention mask handles padding
         max_initial = initial_num_words.max().item()
         past_key_values, latents = self._prefill(encoded_input, attention_mask, initial_num_words)
@@ -632,7 +684,9 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
             # Generate bytes from latents
             generated_bytes = self._generate_word_bytes(
-                latents, tokenizer, bos_embed, bytes_generation_config, stopping_criteria)
+                latents, tokenizer, bos_embed, bytes_generation_config, stopping_criteria,
+                prefix_ids=prefix_ids)
+            prefix_ids = None  # Only use prefix for the first generated word
             words = tokenizer.batch_decode(generated_bytes, skip_special_tokens=True)
 
             if all(len(w) == 0 for w in words):

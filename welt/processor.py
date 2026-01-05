@@ -7,7 +7,6 @@ from datasets import Dataset
 from pixel_renderer import PixelRendererProcessor
 from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
-from words_segmentation.pretokenizer import is_word_complete
 from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
 
 from welt.attention import (
@@ -90,15 +89,7 @@ class TextImageProcessor(ProcessorMixin):
 
     def pretokenize(self, text: str) -> list[str]:
         # Add BOS token at the start
-        text = self.tokenizer.bos_token + text.strip()
-
-        # TODO: Ensure all texts end with a valid word. this is a model quirk and needs to be handled generally
-        #  if the text does not end with a word, the model should continue generating the last word directly
-        #  https://github.com/sign/WeLT/issues/2
-        if not is_word_complete(text[-1]):
-            text += " "
-
-        return self.pretokenizer.tokenize(text)
+        return self.pretokenizer.tokenize(self.tokenizer.bos_token + text)
 
     def pretokenize_dataset(self, dataset: Dataset) -> Dataset:
         """Pretokenize a dataset in place, adding a 'words' column."""
