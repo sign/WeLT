@@ -203,6 +203,8 @@ class WordLatentTransformer(PreTrainedModel):
         # Pool sequence dimension weighted by attention mask
         sequence_lengths = attention_mask.sum(dim=1, keepdim=True).clamp(min=1)  # Avoid division by zero
         text_embeds = text_embeds.sum(dim=1) / sequence_lengths
+        # The alternative - using the BOS token - `text_embeds = text_embeds[:, 0]`
+        # can also work, but mean pooling seems to yield better results for variable-length inputs.
         return text_embeds.view(B, L, -1)
 
     def encode_input(self,

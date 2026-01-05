@@ -165,7 +165,6 @@ class WeLTTrainer(Trainer):
             'image_encoder',
             'encoder_mapping',
             'latent_transformer',
-            'decoder_mapping',
             'bytes_decoder',
         ]
 
