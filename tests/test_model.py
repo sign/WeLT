@@ -219,10 +219,16 @@ def test_freeze_unfreeze_model_works():
 
     model.freeze_pretrained_models()
 
+    decoder_mapping = model.latent_transformer.get_output_embeddings()
+    decoder_mapping_params = {param for _, param in decoder_mapping.named_parameters()}
+
+    # All latent transformer parameters should be frozen except decoder mapping which is freshly initialized
     for name, param in model.latent_transformer.named_parameters():
+        if param in decoder_mapping_params:
+            continue
         assert not param.requires_grad, f"Parameter {name} should be frozen but is unfrozen."
 
-    for layer in [model.encoder_mapping, model.decoder_mapping]:
+    for layer in [model.encoder_mapping, decoder_mapping]:
         for name, param in layer.named_parameters():
             assert param.requires_grad, f"Parameter {name} should be unfrozen but is frozen."
 
@@ -287,7 +293,7 @@ def test_model_from_pretrained_works_without_bytes_encoder():
             assert max_diff < 1e-5, \
                 f"Logits mismatch for '{text}': max difference {max_diff}"
 
-        print(f"✓ Model outputs are identical after save/load")
+        print("✓ Model outputs are identical after save/load")
 
 
 if __name__ == "__main__":

@@ -79,7 +79,8 @@ class TextImageProcessor(ProcessorMixin):
         # Process each shape group and update cache
         for shape, renders in render_groups.items():
             processed = self.image_processor(renders, return_tensors="pt", do_center_crop=False, do_resize=False)
-            pixel_values = processed.pixel_values.to(torch.bfloat16, **device_kwargs)  # TODO : make dtype configurable
+            # TODO : make dtype configurable
+            pixel_values = processed.pixel_values.to(dtype=torch.bfloat16, **device_kwargs)
             for i, pixel_value in zip(index_groups[shape], pixel_values, strict=True):
                 self.images_cache[texts[i]] = pixel_value
                 images[i] = pixel_value
@@ -158,7 +159,8 @@ class TextImageProcessor(ProcessorMixin):
                 labels += [label[:self.max_word_length] for label in raw_labels]
 
                 # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
-                labels[-2] = labels[-2].rstrip()  # Remove last trailing space to avoid generating it
+                if len(labels) > 1:
+                    labels[-2] = labels[-2].rstrip()  # Remove last trailing space to avoid generating it
 
             offset += length
 
@@ -205,7 +207,7 @@ class TextImageProcessor(ProcessorMixin):
         }
 
     def __call__(self,
-                 batch: dict[str, list[str]] | str | list[str],
+                 batch: dict[str, list[str]] | dict[str] | str | list[str],
                  collated=False,
                  packed=False) -> dict[str, torch.Tensor]:
         if isinstance(batch, str):
@@ -213,6 +215,9 @@ class TextImageProcessor(ProcessorMixin):
 
         if isinstance(batch, list):
             batch = {"text": batch}
+
+        if "text" in batch and isinstance(batch["text"], str):
+            batch["text"] = [batch["text"]]
 
         # Copy batch before modifying to avoid mutating the input
         if "text" in batch and "words" not in batch:

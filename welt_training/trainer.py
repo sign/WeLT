@@ -126,18 +126,18 @@ class WeLTTrainer(Trainer):
 
     def create_optimizer(self):
         """
-        Create optimizer with 4 parameter groups (one per component).
+        Create optimizer with component-specific parameter groups.
 
         This improves optimization dynamics by isolating Adam state per component,
         resulting in ~3x better loss compared to the default optimizer.
 
         Hypothesis why does this work?
-        With 4 param groups, Adam's momentum (m) and variance (v) estimates are computed separately per-group.
-        The model has 4 distinct components:
-        - **bytes_encoder** (529K params): Sees ~4096 samples/batch (32 batch * 128 words)
-        - **latent_transformer** (3M params): Sees only 32 samples/batch
-        - **bytes_decoder** (3.2M params): Sees ~4096 samples/batch
-        - **mapping_layers** (99K params): Bridge layers
+        With separate param groups, Adam's momentum (m) and variance (v) estimates are computed per-group.
+        The model has distinct components with different sample exposure rates:
+        - **bytes_encoder/decoder**: See ~4096 samples/batch (32 batch * 128 words)
+        - **latent_transformer**: Sees only 32 samples/batch
+        - **image_encoder**: Processes visual features
+        - **encoder/decoder_mapping**: Bridge layers
 
         The encoder/decoder process 128x more samples per optimizer step than the transformer.
         In a single param group, their gradient statistics may dominate Adam's m/v estimates,
@@ -150,7 +150,7 @@ class WeLTTrainer(Trainer):
 
         # Validate optimizer type
         if "adamw" not in args.optim.lower():
-            raise ValueError(
+            raise ValueError(  # noqa: TRY003
                 f"WeLTTrainer only supports AdamW optimizer variants. "
                 f"Got optim='{args.optim}'. Use 'adamw_torch' or 'adamw_torch_fused'."
             )
@@ -159,48 +159,27 @@ class WeLTTrainer(Trainer):
         model = self.model
         param_groups = []
 
-        # bytes_encoder parameters
-        if hasattr(model, 'bytes_encoder') and model.bytes_encoder is not None:
-            encoder_params = [p for p in model.bytes_encoder.parameters() if p.requires_grad]
-            if encoder_params:
-                param_groups.append({
-                    'params': encoder_params,
-                    'lr': args.learning_rate,
-                    'name': 'bytes_encoder'
-                })
+        # Create parameter groups for each component
+        component_names = [
+            'bytes_encoder',
+            'image_encoder',
+            'encoder_mapping',
+            'latent_transformer',
+            'decoder_mapping',
+            'bytes_decoder',
+        ]
 
-        # latent_transformer parameters
-        if hasattr(model, 'latent_transformer') and model.latent_transformer is not None:
-            transformer_params = [p for p in model.latent_transformer.parameters() if p.requires_grad]
-            if transformer_params:
-                param_groups.append({
-                    'params': transformer_params,
-                    'lr': args.learning_rate,
-                    'name': 'latent_transformer'
-                })
-
-        # bytes_decoder parameters
-        if hasattr(model, 'bytes_decoder') and model.bytes_decoder is not None:
-            decoder_params = [p for p in model.bytes_decoder.parameters() if p.requires_grad]
-            if decoder_params:
-                param_groups.append({
-                    'params': decoder_params,
-                    'lr': args.learning_rate,
-                    'name': 'bytes_decoder'
-                })
-
-        # Mapping layers
-        mapping_params = []
-        if hasattr(model, 'encoder_mapping'):
-            mapping_params.extend([p for p in model.encoder_mapping.parameters() if p.requires_grad])
-        if hasattr(model, 'decoder_mapping'):
-            mapping_params.extend([p for p in model.decoder_mapping.parameters() if p.requires_grad])
-        if mapping_params:
-            param_groups.append({
-                'params': mapping_params,
-                'lr': args.learning_rate,
-                'name': 'mapping_layers'
-            })
+        for component_name in component_names:
+            if hasattr(model, component_name):
+                component = getattr(model, component_name)
+                if component is not None:
+                    params = [p for p in component.parameters() if p.requires_grad]
+                    if params:
+                        param_groups.append({
+                            'params': params,
+                            'lr': args.learning_rate,
+                            'name': component_name
+                        })
 
         # Log the configuration
         print(f"\n{'=' * 60}")

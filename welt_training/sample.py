@@ -9,7 +9,7 @@ from welt.model import WordLatentTransformerForCausalLM
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-@torch.no_grad()
+@torch.inference_mode()
 @torch.autocast(device_type=DEVICE, dtype=torch.bfloat16)
 def sample(model_name_or_path: str|Path):
     print("Loading model from:", model_path)

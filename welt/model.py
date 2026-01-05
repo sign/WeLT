@@ -132,7 +132,10 @@ class WordLatentTransformer(PreTrainedModel):
         # Mapping layers
         encoder_dim = self.bytes_encoder_dim + self.image_encoder_dim
         self.encoder_mapping = nn.Linear(encoder_dim, model_dim, dtype=self.latent_transformer.dtype)
-        self.decoder_mapping = nn.Linear(model_dim, bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
+
+        # Set decoder_mapping as the LM head so we can use .logits directly
+        decoder_mapping = nn.Linear(model_dim, bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
+        self.latent_transformer.set_output_embeddings(decoder_mapping)
 
         # Post init
         self.post_init()
@@ -210,18 +213,15 @@ class WordLatentTransformer(PreTrainedModel):
         embeds = []
         if self.image_encoder_dim > 0:
             image_embeds = self.encode_images(input_images, input_images_dimensions, device=input_ids.device)
-            logger.debug("Image embeddings shape: %s", image_embeds.shape)
             embeds.append(image_embeds)
 
         if self.bytes_encoder_dim > 0:
             text_embeds = self.encode_texts(input_ids, attention_mask)
-            logger.debug("Text embeddings shape: %s", text_embeds.shape)
             embeds.append(text_embeds)
 
         assert len(embeds) > 0, "At least one type of encoder must be provided"
 
         concatenated_embeds = torch.cat(embeds, dim=-1)
-        logger.debug("Concatenated embeddings shape: %s", concatenated_embeds.shape)
 
         # # For dropout, scale embedding by number of zeros in the concatenated embeddings
         # if len(embeds) > 1 and self.training and self.config.modality_dropout > 0:
@@ -264,13 +264,9 @@ class WordLatentTransformer(PreTrainedModel):
             inputs_embeds=mapped_embeds,
             position_ids=position_ids,
             attention_mask=attention_mask,
-            output_hidden_states=True
         )
-        latent_vectors = latent_outputs.hidden_states[-1]  # (B, L, hidden_dim)
-
-        logger.debug("Latent vectors shape: %s", latent_vectors.shape)
-        mapped_embeds = self.decoder_mapping(latent_vectors)
-        logger.debug("Mapped embeddings shape: %s", mapped_embeds.shape)
+        # they aren't really "logits", since we replace the lm_head with decoder_mapping
+        mapped_embeds = latent_outputs.logits
 
         # Decode the latent vectors to bytes using parallel causal decoding
         logits = self.parallel_causal_decode(mapped_embeds, labels_input, labels_attention_mask)
@@ -361,7 +357,8 @@ class WordLatentTransformer(PreTrainedModel):
         set_module_trainable(self.bytes_decoder.get_output_embeddings())
 
         set_module_trainable(self.encoder_mapping)
-        set_module_trainable(self.decoder_mapping)
+        # decoder_mapping
+        set_module_trainable(self.latent_transformer.get_output_embeddings())
 
     def unfreeze(self):
         """Unfreeze everything."""
@@ -433,10 +430,9 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         # Replace instance method with compiled version
         self._decode = compiled_decode.__get__(self, type(self))
 
-        # Compile encoder_mapping and decoder_mapping (small but called frequently)
+        # Compile encoder_mapping (small but called frequently)
         print("  Compiling mapping layers...")
         self.encoder_mapping = torch.compile(self.encoder_mapping, mode=compile_mode)
-        self.decoder_mapping = torch.compile(self.decoder_mapping, mode=compile_mode)
 
         # Compile bytes_decoder forward (called in character generation loop)
         print("  Compiling bytes_decoder...")
@@ -473,15 +469,13 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             attention_mask=attention_mask,
             position_ids=position_ids,
             use_cache=True,
-            output_hidden_states=True
         )
 
-        # Extract the last valid latent for each batch item
-        latents = latent_output.hidden_states[-1]  # (B, L, hidden_dim)
-        batch_indices = torch.arange(latents.size(0), device=latents.device)
-        latents = latents[batch_indices, num_words - 1].unsqueeze(1)  # (B, 1, hidden_dim)
+        # LM head (decoder_mapping) is applied internally, output via .logits
+        logits = latent_output.logits  # (B, L, bytes_decoder_dim)
+        batch_indices = torch.arange(logits.size(0), device=logits.device)
+        mapped_latent = logits[batch_indices, num_words - 1].unsqueeze(1)  # (B, 1, bytes_decoder_dim)
 
-        mapped_latent = self.decoder_mapping(latents)
         return latent_output.past_key_values, mapped_latent
 
     def _decode(self, past_key_values: Any, new_embedding: torch.Tensor,
@@ -505,12 +499,9 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             past_key_values=past_key_values,
             position_ids=position_ids,
             use_cache=True,
-            output_hidden_states=True
         )
 
-        latents = latent_output.hidden_states[-1]  # (B, 1, hidden_dim)
-        mapped_latent = self.decoder_mapping(latents)
-        return latent_output.past_key_values, mapped_latent
+        return latent_output.past_key_values, latent_output.logits
 
     def _generate_word_bytes(
             self,

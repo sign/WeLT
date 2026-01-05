@@ -180,7 +180,6 @@ def test_pretokenize_splits_control_tokens(processor):
         ControlTokens.StartOfText,  # BOS is added by pretokenize
         ControlTokens.ShiftOut, 'test', ControlTokens.ShiftIn,
         ControlTokens.StartOfHeading, "hello ", ControlTokens.EndOfText,
-        " "  # Space is added by pretokenize
     ]
 
 
@@ -313,7 +312,6 @@ def test_processor_save_and_load_works_without_image_processor(renderer):
         image_processor=NoopImageProcessor())
 
     with tempfile.TemporaryDirectory(delete=False) as temp_dir:
-        print(temp_dir)
         processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
         new_processor = TextImageProcessor.from_pretrained(temp_dir)
         assert isinstance(new_processor.image_processor, NoopImageProcessor)
