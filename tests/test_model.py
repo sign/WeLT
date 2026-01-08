@@ -23,6 +23,7 @@ def setup_tiny_model(
         latent_transformer_name=latent_transformer_name,
         bytes_decoder_name=bytes_decoder_name,
         load_pretrained=False,
+        max_word_length=32,
         **kwargs
     )
 
@@ -82,10 +83,6 @@ def test_attention_no_look_ahead():
     # Test sequences that share prefixes
     texts = ["a b c x y z", "a b d m"]
 
-    # Force every word to predict a single byte (and EOS)
-    # "a <eos>, b <eos>, c <eos>, <eos> <pad>" and "a <eos>, b <eos>, d <eos>, <eos> <pad>"
-    processor.max_word_length = 1
-
     _, outputs = predict_dataset(texts, model, processor, collator)
     for text in texts:
         print(f"Loss for '{text}':", outputs[text].loss.cpu().numpy())
@@ -103,9 +100,6 @@ def test_attention_does_look_back():
 
     # Test sequences with shared suffix but different prefix
     texts = ["c b a", "d b a"]
-
-    # Force every word to predict a single byte and special tokens
-    processor.max_word_length = 3  # # (BOS + 1 byte + EOS)
 
     _, outputs = predict_dataset(texts, model, processor, collator)
     for text in texts:

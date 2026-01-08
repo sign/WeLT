@@ -124,8 +124,8 @@ def test_evaluation_with_generate(trainer_setup):
 
     # Create a small evaluation dataset with prefix/completion pairs
     eval_dataset = make_generation_dataset(
-        prefixes=["Hello", "Test", "Another"],
-        completions=[" world", " text", " example"],
+        prefixes=["Hello ", "Test ", "Another "],
+        completions=["world", "text ", "example"],
     )
 
     training_args = Seq2SeqTrainingArguments(
@@ -147,7 +147,7 @@ def test_evaluation_with_generate(trainer_setup):
     )
 
     # Set smaller max_word_length for faster testing
-    trainer.processor.max_word_length = 5
+    
 
     # Run evaluation
     metrics = trainer.evaluate(eval_dataset)
@@ -237,7 +237,7 @@ def test_evaluate_simple(trainer_setup):
         max_generated_words=2,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     # Run evaluation
     metrics = trainer.evaluate(eval_dataset)
@@ -285,8 +285,8 @@ def test_evaluate_without_completions(trainer_setup):
 
     # Create dataset without 'completion' column (only prefixes)
     eval_dataset = Dataset.from_dict({
-        "text": ["Hello", "Test"],  # For loss calculation
-        "prefix": ["Hello", "Test"],  # For generation
+        "text": ["Hello ", "Test "],  # For loss calculation
+        "prefix": ["Hello ", "Test "],  # For generation
     })
 
     training_args = Seq2SeqTrainingArguments(
@@ -307,7 +307,7 @@ def test_evaluate_without_completions(trainer_setup):
         max_generated_words=3,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     # Should generate predictions but skip generation metric computation
     metrics = trainer.evaluate(eval_dataset)
@@ -484,7 +484,7 @@ def test_deterministic_evaluation(trainer_setup):
         max_generated_words=3,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     # Run evaluation twice with same seed
     import transformers
@@ -521,7 +521,7 @@ def test_batch_size_edge_cases(trainer_setup):
         max_generated_words=3,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     # Test with single example
     single_dataset = make_generation_dataset(
@@ -572,7 +572,7 @@ def test_transform_idempotency(trainer_setup):
         max_generated_words=3,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     # Should handle pre-transformed dataset gracefully
     metrics = trainer.evaluate(eval_dataset)
@@ -607,7 +607,7 @@ def test_perplexity_computation(trainer_setup):
         max_generated_words=3,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -651,7 +651,7 @@ def test_eval_samples_count(trainer_setup):
         eval_metrics=None,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -665,8 +665,8 @@ def test_multi_evaluation_stability(trainer_setup):
     model, processor, collator = trainer_setup
 
     eval_dataset = make_generation_dataset(
-        prefixes=["Hello", "Test"],
-        completions=[" world", " text"],
+        prefixes=["Hello ", "Test "],
+        completions=["world", "text"],
     )
 
     training_args = Seq2SeqTrainingArguments(
@@ -687,7 +687,7 @@ def test_multi_evaluation_stability(trainer_setup):
         max_generated_words=3,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     # Run evaluation 3 times in a row
     metrics1 = trainer.evaluate(eval_dataset)
@@ -712,8 +712,8 @@ def test_generation_with_varying_lengths(trainer_setup):
 
     # Create dataset with varying length inputs
     eval_dataset = make_generation_dataset(
-        prefixes=["a", "ab", "abc", "abcd"],
-        completions=[" x", " xy", " xyz", " xyzw"],
+        prefixes=["a ", "ab ", "abc ", "abcd "],
+        completions=["x", "xy", "xyz", "xyzw"],
     )
 
     training_args = Seq2SeqTrainingArguments(
@@ -734,7 +734,7 @@ def test_generation_with_varying_lengths(trainer_setup):
         max_generated_words=5,
     )
 
-    trainer.processor.max_word_length = 10
+    
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -772,7 +772,7 @@ def test_generation_max_words_limit(trainer_setup):
         max_generated_words=1,  # Very small limit
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -808,7 +808,7 @@ def test_no_metrics_evaluation(trainer_setup):
         eval_metrics=None,  # No generation metrics
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -827,8 +827,8 @@ def test_sacrebleu_metric(trainer_setup):
     model, processor, collator = trainer_setup
 
     eval_dataset = make_generation_dataset(
-        prefixes=["The quick brown", "Another test"],
-        completions=[" fox jumps", " sentence"],
+        prefixes=["The quick brown ", "Another test "],
+        completions=["fox jumps", "sentence"],
     )
 
     training_args = Seq2SeqTrainingArguments(
@@ -846,10 +846,11 @@ def test_sacrebleu_metric(trainer_setup):
         args=training_args,
         processor=processor,
         data_collator=collator,
+        max_generated_words=5,
         eval_metrics=["sacrebleu"],
     )
 
-    trainer.processor.max_word_length = 10
+    
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -864,8 +865,8 @@ def test_chrf_metric(trainer_setup):
     model, processor, collator = trainer_setup
 
     eval_dataset = make_generation_dataset(
-        prefixes=["Hello", "Test"],
-        completions=[" world", " text"],
+        prefixes=["Hello ", "Test "],
+        completions=["world", "text"],
     )
 
     training_args = Seq2SeqTrainingArguments(
@@ -883,10 +884,11 @@ def test_chrf_metric(trainer_setup):
         args=training_args,
         processor=processor,
         data_collator=collator,
+        max_generated_words=5,
         eval_metrics=["chrf"],
     )
 
-    trainer.processor.max_word_length = 10
+    
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -901,8 +903,8 @@ def test_multiple_generation_metrics(trainer_setup):
     model, processor, collator = trainer_setup
 
     eval_dataset = make_generation_dataset(
-        prefixes=["The quick brown fox", "Another test sentence"],
-        completions=[" jumps over the dog", " for evaluation"],
+        prefixes=["The quick brown fox ", "Another test sentence "],
+        completions=["jumps over the dog", "for evaluation"],
     )
 
     training_args = Seq2SeqTrainingArguments(
@@ -920,10 +922,9 @@ def test_multiple_generation_metrics(trainer_setup):
         args=training_args,
         processor=processor,
         data_collator=collator,
+        max_generated_words=5,
         eval_metrics=["sacrebleu", "chrf"],
     )
-
-    trainer.processor.max_word_length = 15
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -997,7 +998,7 @@ def test_dataloader_reuse(trainer_setup):
         max_generated_words=2,
     )
 
-    trainer.processor.max_word_length = 5
+    
 
     # Run evaluation twice on same dataset
     # This tests if pop() operations corrupt the dataset

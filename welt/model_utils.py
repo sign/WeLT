@@ -145,7 +145,7 @@ def setup_model(
                                                      use_fast=True,
                                                      trust_remote_code=trust_remote_code)
     else:
-        print("Using pretokenizer: WordsSegmentationTokenizer")
+        print(f"Using pretokenizer: WordsSegmentationTokenizer(max_bytes={max_bytes})")
         pretokenizer = WordsSegmentationTokenizer(max_bytes=max_bytes)
 
     font_config = FontConfig(sources=FONTS_NOTO_SANS)
@@ -157,7 +157,6 @@ def setup_model(
         renderer=renderer,
         image_processor=image_processor,
         max_seq_length=max_seq_length,
-        max_word_length=max_word_length,
     )
 
     collator = partial(collate_fn, pad_value=tokenizer.pad_token_type_id)

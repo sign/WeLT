@@ -264,7 +264,7 @@ class WeLTTrainer(Trainer):
         if should_generate:
             with torch.no_grad():
                 # Process prefixes for generation
-                generation_inputs = self.processor(prefixes, collated=True, packed=False)
+                generation_inputs = self.processor(prefixes, collated=True)
                 generation_inputs = {
                     k: v.to(model.device) if isinstance(v, torch.Tensor) else v
                     for k, v in generation_inputs.items()

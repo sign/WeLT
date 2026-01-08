@@ -1,0 +1,67 @@
+# Model Setup
+image_encoder_model_name_or_path: null
+bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
+latent_transformer_model_name_or_path: PleIAs/Monad
+bytes_decoder_model_name_or_path: sign/utf8-lm-tiny
+
+# pretrained weights
+load_pretrained: true
+warmup_freeze_steps: 1000
+
+# Dataset setup
+dataset_name: PleIAs/SYNTH
+dataset_text_template: # Following the chat format from the "Back to bytes" paper
+  - "\x01user\n\x0E{query}\x0F\x17\n"
+  - "\x01assistant\n\x05{synthetic_reasoning}\x06\n{synthetic_answer}\x17"
+max_sequence_length: 512
+max_word_length: 16 # 14 bytes + BOS + EOS
+
+# Data Loader
+dataloader_num_workers: 8
+dataloader_prefetch_factor: 4
+dataloader_pin_memory: true
+dataloader_persistent_workers: true
+
+# Training setup
+remove_unused_columns: false # Necessary
+per_device_train_batch_size: 32
+per_device_eval_batch_size: 32
+auto_find_batch_size: true
+output_dir: ./output/monad-chat
+overwrite_output_dir: true
+do_train: true
+
+# Optimizer setup
+optim: adamw_torch_fused
+weight_decay: 0.001
+max_steps: 10000
+warmup_ratio: 0.05
+learning_rate: 6.0e-4
+
+# Evaluation
+do_eval: true
+eval_on_start: true
+eval_strategy: steps
+eval_steps: 1000
+metric_for_best_model: chrf  # Using generation-based metric
+eval_metrics: [sacrebleu, chrf]  # Generation-based evaluation metrics
+predict_with_generate: true
+generation_max_length: 50  # Max tokens/words to generate during evaluation
+log_samples: 5  # Number of sample predictions to log
+
+# Logging
+logging_steps: 10
+logging_strategy: steps
+include_tokens_per_second: true
+include_num_input_tokens_seen: true
+report_to: wandb
+
+# FLOPS profiling
+profile_flops: true
+flops_profile_steps: 500
+flops_warmup_steps: 10
+flops_active_steps: 10
+
+# Dtype
+bf16: true
+dtype: bfloat16

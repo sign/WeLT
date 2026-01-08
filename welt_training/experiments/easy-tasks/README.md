@@ -11,7 +11,7 @@ welt-train welt_training/experiments/easy-tasks/string-repetition.yaml
 
 Or
 ```shell
-mkdir -p output
+mkdir -p output && \
 docker build -t welt . && \
 docker run -it --rm --gpus all \
   --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \

@@ -28,8 +28,6 @@ def predict_texts(texts: list[str], model, processor, collator):
     dataset = make_dataset(texts)
     batch = dataset_to_batch(model, processor, collator, dataset)
 
-    processor.max_word_length = 64
-
     with torch.no_grad():
         outputs = model.generate(
             input_ids=batch["input_ids"],
@@ -210,7 +208,7 @@ def test_mid_word_generation():
     text = "<text>\x0eHello\x0f<repeat> "
     words = processor.pretokenize(text)
     assert is_word_complete(words[-1])
-    batch = processor([text], collated=True, packed=False)
+    batch = processor([text], collated=True)
     output = model.generate(**batch, processor=processor, max_generated_words=2)[0]
     assert output == "Hello"
 
@@ -218,7 +216,7 @@ def test_mid_word_generation():
     text = "<text>\x0eHello\x0f<repeat> Hel"
     words = processor.pretokenize(text)
     assert not is_word_complete(words[-1])
-    batch = processor([text], collated=True, packed=False)
+    batch = processor([text], collated=True)
     output = model.generate(**batch, processor=processor, max_generated_words=2)[0]
     assert output == "lo"
 

@@ -39,7 +39,7 @@ def sample(model_name_or_path: str|Path):
         "<text>\x0EYOu dOn't know the half Of it.\x0F<repeat> ",
     ]
 
-    inputs = processor(texts, collated=True, packed=False)
+    inputs = processor(texts, collated=True)
     inputs = {k: v.to(device=DEVICE) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
 
     outputs = model.generate(
