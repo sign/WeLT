@@ -37,3 +37,35 @@ class WeLTTrainingArguments(Seq2SeqTrainingArguments):
             )
         },
     )
+
+    # FLOPS profiling options
+    profile_flops: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable FLOPS profiling to measure GPU utilization and TFLOPS/s by dtype. "
+                "Uses PyTorch profiler to capture CUDA operations."
+            )
+        },
+    )
+
+    flops_profile_steps: int = field(
+        default=50,
+        metadata={
+            "help": "Profile FLOPS every N training steps."
+        },
+    )
+
+    flops_warmup_steps: int = field(
+        default=2,
+        metadata={
+            "help": "Number of warmup steps before recording profiler data."
+        },
+    )
+
+    flops_active_steps: int = field(
+        default=3,
+        metadata={
+            "help": "Number of active profiling steps to record."
+        },
+    )

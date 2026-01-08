@@ -22,6 +22,7 @@ from welt_training.args_data import DataTrainingArguments
 from welt_training.args_model import ModelArguments
 from welt_training.args_trainer import WeLTTrainingArguments
 from welt_training.extendable_yaml import resolve_yaml_file
+from welt_training.flops_callback import FlopsCallback
 from welt_training.freeze_callback import FreezeWarmupCallback
 from welt_training.trainer import WeLTTrainer
 
@@ -46,7 +47,7 @@ def split_streaming_dataset(
             two IterableDataset objects: (train_stream, validation_stream).
     """
     if not (0 < validation_percentage < 100):
-        raise ValueError(
+        raise ValueError(  
             f"validation_percentage must be between 0 and 100 (exclusive). Passed: {validation_percentage}"
         )
 
@@ -346,7 +347,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     train_dataset = None
     if training_args.do_train:
         if "train" not in text_datasets:
-            raise ValueError("--do_train requires a train dataset")
+            raise ValueError("--do_train requires a train dataset")  
         train_dataset = limit_dataset_size(text_datasets["train"],
                                            max_samples=data_args.max_train_samples,
                                            streaming=data_args.streaming)
@@ -354,7 +355,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     eval_dataset = None
     if training_args.do_eval:
         if "validation" not in text_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
+            raise ValueError("--do_eval requires a validation dataset")  
         eval_dataset = limit_dataset_size(text_datasets["validation"],
                                           max_samples=data_args.max_eval_samples,
                                           streaming=data_args.streaming)
@@ -388,6 +389,14 @@ def train(args: list[str] | None | str = None):  # noqa: C901
 
     # Freeze the pretrained models for some steps
     trainer.add_callback(FreezeWarmupCallback(steps=model_args.warmup_freeze_steps, model=model))
+
+    # Add FLOPS profiling callback if enabled
+    if training_args.profile_flops:
+        trainer.add_callback(FlopsCallback(
+            profile_steps=training_args.flops_profile_steps,
+            warmup_steps=training_args.flops_warmup_steps,
+            active_steps=training_args.flops_active_steps,
+        ))
 
     # Training
     if training_args.do_train:

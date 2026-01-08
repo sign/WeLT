@@ -56,6 +56,12 @@ include_tokens_per_second: true
 include_num_input_tokens_seen: true
 report_to: wandb
 
+# FLOPS profiling
+profile_flops: true
+flops_profile_steps: 500
+flops_warmup_steps: 10
+flops_active_steps: 10
+
 # Dtype
 bf16: true
 dtype: bfloat16
