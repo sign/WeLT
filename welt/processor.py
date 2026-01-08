@@ -1,4 +1,3 @@
-
 from collections import defaultdict
 
 import torch
@@ -103,7 +102,7 @@ class TextImageProcessor(ProcessorMixin):
                            remove_columns=["text"],
                            desc="Pretokenizing texts into 'words'")
 
-    def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None, pack=True) -> list[str]:
+    def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None) -> list[str]:
         """
         Generate labels for word-level sequences.
 
@@ -127,31 +126,8 @@ class TextImageProcessor(ProcessorMixin):
         # Process each sequence separately, to support efficient packing
         offset = 0
         for length in seq_lengths:
-            if pack:
-                # Next several characters as label, last word has no label
-                segment_words = words[offset:offset + length]
-                text = "".join(segment_words)
-                label_idx = 0
-
-                for word in segment_words:
-                    label_idx += len(word)
-
-                    # For efficiency, we don't just use the next word as label, but a longer token string
-                    # max_word_length characters, not bytes, will be trimmed by the tokenizer later
-                    label = text[label_idx:label_idx + self.max_word_length]
-                    # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
-                    label = label.rstrip()  # Remove trailing spaces to avoid generating them
-
-                    labels.append(label)
-            else:
-                # Next word as label, last word has no label
-                raw_labels = words[offset + 1:offset + length] + [""]
-                # Truncate labels to max_word_length (characters, not bytes)
-                labels += [label[:self.max_word_length] for label in raw_labels]
-
-                # TODO: remove once https://github.com/sign/WeLT/issues/2 is solved
-                if len(labels) > 1:
-                    labels[-2] = labels[-2].rstrip()  # Remove last trailing space to avoid generating it
+            # Next word as label, last word has no label
+            labels += words[offset + 1:offset + length] + [""]
 
             offset += length
 
@@ -168,14 +144,14 @@ class TextImageProcessor(ProcessorMixin):
             padding=True,
             add_special_tokens=True,
             device=device,
-            # Truncation happens in pre-tokenization.
-            # This is just for additional safety:
+            # Truncation happens mostly in pre-tokenization.
+            # This is just for additional safety, for UTF-16 use cases.
             max_length=self.max_word_length,
             truncation=True,
         )
 
-    def process_single_example(self, words: list[str], seq_lengths: list[int], pack=True):
-        labels = self.get_sequence_labels(words, seq_lengths, pack=pack)
+    def process_single_example(self, words: list[str], seq_lengths: list[int]):
+        labels = self.get_sequence_labels(words, seq_lengths)
 
         # Tokenize words with BOS and EOS tokens
         tokenized = self.tokenize_words(words)  # Tokenized inputs
@@ -199,8 +175,7 @@ class TextImageProcessor(ProcessorMixin):
 
     def __call__(self,
                  batch: dict[str, list[str]] | dict[str] | str | list[str],
-                 collated=False,
-                 packed=False) -> dict[str, torch.Tensor]:
+                 collated=False) -> dict[str, torch.Tensor]:
         if isinstance(batch, str):
             batch = {"text": [batch]}
 
@@ -217,7 +192,7 @@ class TextImageProcessor(ProcessorMixin):
             batch["words"] = words
             batch["seq_lengths"] = [[len(w)] for w in words]
 
-        dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths, pack=packed)
+        dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths)
                  for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=False)]
 
         if collated:
@@ -233,4 +208,3 @@ class TextImageProcessor(ProcessorMixin):
                 new_batch[key] = batch[key]
 
         return new_batch
-

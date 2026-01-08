@@ -57,13 +57,14 @@ def test_processor_single_text_not_collated(processor):
 
 def test_processor_single_text_value(processor):
     text = "a b"
-    inputs = processor(text, packed=True)
-    assert torch.equal(inputs["input_ids"][0], torch.tensor([[2, 2, 3, 0], [2, 97, 32, 3], [2, 98, 32, 3]]))
+    inputs = processor(text)
+    assert torch.equal(inputs["input_ids"][0], torch.tensor([[2, 2, 3, 0], [2, 97, 32, 3], [2, 98, 3, 0]]))
     assert inputs["input_attention_mask"][0].shape == (3, 4)
     assert inputs["attention_mask"][0].shape == (1, 3, 3)
     assert torch.equal(inputs["position_ids"][0], torch.tensor([0, 1, 2]))
-    assert torch.equal(inputs["labels_input"][0], torch.tensor([[2, 97, 32, 98], [2, 98, 3, 0], [2, 3, 0, 0]]))
-    assert torch.equal(inputs["labels_output"][0], torch.tensor([[97, 32, 98, 3], [98, 3, 0, 0], [3, 0, 0, 0]]))
+    # Unpacked mode: labels are shorter (only next token, not all remaining)
+    assert torch.equal(inputs["labels_input"][0], torch.tensor([[2, 97, 32], [2, 98, 3], [2, 3, 0]]))
+    assert torch.equal(inputs["labels_output"][0], torch.tensor([[97, 32, 3], [98, 3, 0], [3, 0, 0]]))
 
 
 def test_processor_list_format_collated(processor):
@@ -113,55 +114,14 @@ def test_processor_multiple_strings_collated_attention_mask(processor):
         assert torch.equal(mask[0], expected_mask)
 
 
-def test_processor_packed_vs_unpacked_labels(processor):
-    text = "hello world test"
-
-    # Test packed=True (default)
-    inputs_packed = processor(text, collated=True, packed=True)
-
-    # Test packed=False
-    inputs_unpacked = processor(text, collated=True, packed=False)
-
-    # Both should have same structure
-    assert all(key in inputs_packed for key in expected_keys)
-    assert all(key in inputs_unpacked for key in expected_keys)
-
-    # Input tokens should be the same
-    assert torch.equal(inputs_packed["input_ids"], inputs_unpacked["input_ids"])
-    assert torch.equal(inputs_packed["attention_mask"], inputs_unpacked["attention_mask"])
-
-    # Labels should be different due to different packing strategies
-    assert not torch.equal(inputs_packed["labels_input"], inputs_unpacked["labels_input"])
-    assert not torch.equal(inputs_packed["labels_output"], inputs_unpacked["labels_output"])
-
-
-def test_processor_packed_false_default_behavior(processor):
-    text = "example text for testing"
-
-    # Default should be packed=True
-    inputs_default = processor(text, collated=True)
-    inputs_explicit_packed = processor(text, collated=True, packed=False)
-
-    # Should be identical
-    assert torch.equal(inputs_default["labels_input"], inputs_explicit_packed["labels_input"])
-    assert torch.equal(inputs_default["labels_output"], inputs_explicit_packed["labels_output"])
-
-
-def test_get_words_and_labels_packed_vs_unpacked(processor):
+def test_get_words_and_labels(processor):
     text = "hello world test"
     words = processor.pretokenize(text)
 
-    # Test packed=True
-    labels_packed = processor.get_sequence_labels(words, pack=True)
+    labels = processor.get_sequence_labels(words)
 
-    # Test packed=False
-    labels_unpacked = processor.get_sequence_labels(words, pack=False)
-
-    # Labels should be different
-    assert labels_packed != labels_unpacked
-
-    assert labels_packed == ['hello world test', 'world test', 'test', '']
-    assert labels_unpacked == ['hello ', 'world ', 'test', '']
+    # Unpacked mode: each token predicts only the next token
+    assert labels == ['hello ', 'world ', 'test', '']
 
 
 def test_render_images_shape(processor):
@@ -189,29 +149,26 @@ def test_pretokenize_multiple_whitespace(processor):
         return "bar"
     """.strip()
     words = processor.pretokenize(text)
-    assert words == [ControlTokens.StartOfText, "def ", "foo():\n", " " * 8, 'return ', '"bar" ']
+    assert words == [ControlTokens.StartOfText, "def ", "foo():\n", " " * 8, 'return ', '"bar"']
 
 
-def test_get_words_and_labels_packed_vs_unpacked_respect_max_word_length(processor, renderer):
+def test_get_words_and_labels_respect_max_word_length(processor, renderer):
     text = "this is a long-test"
-    words = processor.pretokenize(text)
 
     new_processor = TextImageProcessor(
-        pretokenizer=WordsSegmentationTokenizer(),
+        pretokenizer=WordsSegmentationTokenizer(max_bytes=3),
         tokenizer=processor.tokenizer,
         renderer=renderer,
         image_processor=processor.image_processor,
-        max_word_length=3
     )
 
-    # Test packed=True
-    labels_packed = new_processor.get_sequence_labels(words, pack=True)
+    words = new_processor.pretokenize(text)
+    labels = new_processor.get_sequence_labels(words)
 
-    # Test packed=False
-    labels_unpacked = new_processor.get_sequence_labels(words, pack=False)
-
-    assert labels_packed == ['thi', 'is', 'a l', 'lon', '']
-    assert labels_unpacked == ['thi', 'is ', 'a ', 'lon', '']
+    # max_bytes=3 truncates words during pretokenization
+    assert words == [ControlTokens.StartOfText, 'thi', 's ', 'is ', 'a ', 'lon', 'g-t', 'est']
+    # Unpacked mode: each token predicts the next token
+    assert labels == ['thi', 's ', 'is ', 'a ', 'lon', 'g-t', 'est', '']
 
 
 def test_pretokenize_dataset(processor):
@@ -224,8 +181,8 @@ def test_pretokenize_dataset(processor):
 
     assert dataset[:] == {
         'words': [
-            [ControlTokens.StartOfText, 'hi! '],
-            [ControlTokens.StartOfText, 'hello ', 'world '],
+            [ControlTokens.StartOfText, 'hi!'],
+            [ControlTokens.StartOfText, 'hello ', 'world'],
         ],
     }
 
@@ -248,12 +205,12 @@ def test_packed_dataset(processor):
         ],
         'words': [
             [
-                ControlTokens.StartOfText, 'a ', 'b ', 'c ',
-                ControlTokens.StartOfText, 'hello ', 'world ',
+                ControlTokens.StartOfText, 'a ', 'b ', 'c',
+                ControlTokens.StartOfText, 'hello ', 'world',
             ],
             [
-                ControlTokens.StartOfText, 'hi! ',
-                ControlTokens.StartOfText, 'yes. ',
+                ControlTokens.StartOfText, 'hi!',
+                ControlTokens.StartOfText, 'yes.',
             ],
         ],
     }
@@ -269,11 +226,12 @@ def test_packed_dataset_labels_independent(processor):
     packed_dataset = pack_dataset(dataset, seq_length=8)
 
     datum = next(iter(packed_dataset))
-    labels = processor.get_sequence_labels(datum["words"], datum["seq_lengths"], pack=True)
+    labels = processor.get_sequence_labels(datum["words"], datum["seq_lengths"])
 
+    # Unpacked mode: each token predicts only the next token, respecting sequence boundaries
     assert labels == [
-        'a b', 'b', '',
-        'c d', 'd', ''
+        'a ', 'b', '',
+        'c ', 'd', ''
     ]
 
 
@@ -317,49 +275,27 @@ def test_processor_save_and_load_works_without_image_processor(renderer):
         assert isinstance(new_processor.image_processor, NoopImageProcessor)
 
 
-def test_labels_masked_in_shift_blocks_packed(processor):
+def test_labels_masked_in_shift_blocks(processor):
     """Test that labels are empty for tokens inside shift blocks (except ShiftIn itself)."""
     # Use f-string template and let processor segment into words
     text = f"<en>{ControlTokens.ShiftOut}hello{ControlTokens.ShiftIn}<he> שלום"
     words = processor.pretokenize(text)
 
-    labels = processor.get_sequence_labels(words, pack=False)
+    labels = processor.get_sequence_labels(words)
 
-    # Expected: BOS, "<en>", SO, "hello", SI, "<he> ", "שלום "
+    # Expected words: BOS, "<en>", SO, "hello", SI, "<he> ", "שלום"
+    # In unpacked mode, each token predicts the next token
     # Labels should be empty for tokens inside shift blocks (SO and "hello")
     # ShiftIn keeps its label to predict next word
 
     # Check exact label content
     assert labels[0] == "<en>"  # BOS -> "<en>"
-    assert labels[1] == ControlTokens.ShiftOut  # "<en>" -> SO
+    assert labels[1] == ControlTokens.ShiftOut  # "<en>" -> SO (not inside block yet)
     assert labels[2] == ""  # SO -> "hello" (inside block, masked)
     assert labels[3] == ""  # "hello" -> SI (inside block, masked)
     assert labels[4] == "<he> "  # SI -> "<he> " (exits block, has label)
-    assert labels[5] == "שלום"  # "<he> " -> "שלום " (rstripped)
-    assert labels[6] == ""  # Last token always empty
-
-
-def test_labels_masked_in_shift_blocks_unpacked(processor):
-    """Test that labels are empty for tokens inside shift blocks in unpacked mode."""
-    words = [
-        ControlTokens.StartOfText,
-        "<en>", ControlTokens.ShiftOut, "hello", ControlTokens.ShiftIn,
-        "<he>", "שלום"
-    ]
-
-    labels = processor.get_sequence_labels(words, pack=False)
-
-    # Expected behavior (unpacked mode):
-    # - Each token predicts the next token
-    # - Inside shift blocks, labels should be empty except for ShiftIn
-
-    assert labels[0]  # BOS -> "<en>"
-    assert labels[1]  # "<en>" -> ShiftOut
-    assert labels[2] == ""  # ShiftOut -> "hello" (inside block, no label)
-    assert labels[3] == ""  # "hello" -> ShiftIn (inside block, no label)
-    assert labels[4]  # ShiftIn -> "<he>" (exits block, should have label)
-    assert labels[5]  # "<he>" -> "שלום"
-    assert labels[6] == ""  # "שלום" -> (second-to-last, rstripped)
+    assert labels[5] == "שלום"  # "<he> " -> "שלום"
+    assert labels[6] == ""  # "שלום" -> (last token, no label)
 
 
 def test_multiple_shift_blocks(processor):
@@ -372,7 +308,7 @@ def test_multiple_shift_blocks(processor):
         "end"
     ]
 
-    labels = processor.get_sequence_labels(words, pack=True)
+    labels = processor.get_sequence_labels(words)
 
     # ShiftOut and content inside blocks should have empty labels
     # ShiftIn tokens should have labels (to predict next word)
