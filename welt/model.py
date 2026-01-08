@@ -383,15 +383,18 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
                        Complete words get [BOS, PAD, ...], incomplete get their tokens (without EOS).
         """
         batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
+
         last_word_ids = input_ids[batch_indices, initial_num_words - 1]
         last_word_mask = input_attention_mask[batch_indices, initial_num_words - 1]
 
         last_words = [tokenizer.decode(ids[mask.bool()].tolist(), skip_special_tokens=True)
                       for ids, mask in zip(last_word_ids, last_word_mask, strict=True)]
 
-        print("last_words", last_words, last_word_ids)
         if all(is_word_complete(w) for w in last_words):
             return None
+
+        print("Found partial words:", last_words, last_word_ids)
+        print("input_ids", input_ids)
 
         prefix_ids = last_word_ids.clone()
         prefix_ids[prefix_ids == tokenizer.eos_token_id] = tokenizer.pad_token_id
