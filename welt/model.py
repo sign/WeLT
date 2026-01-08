@@ -326,10 +326,8 @@ class WordLatentTransformer(PreTrainedModel):
         # Each sequence gets only its corresponding latent vector prepended
         combined_embeds = torch.cat([latent_vectors_flat, target_embeds], dim=1)  # [B*L, 1+T, embed_dim]
 
-        # Step 5: Create attention mask
-        # Each decoder only sees its single latent vector, so mask is all ones for the single latent position
-        latent_mask = torch.ones(B * L, 1, device=latent_vectors.device)  # [B*L, 1]
-        combined_mask = torch.cat([latent_mask, target_mask_flat], dim=1)  # [B*L, 1+T]
+        # Step 5: Create attention mask by padding target_mask with 1 on the left
+        combined_mask = torch.nn.functional.pad(target_mask_flat, (1, 0), value=1)  # [B*L, 1+T]
 
         # Step 6: Pass through bytes decoder
         outputs = self.bytes_decoder(
