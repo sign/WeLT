@@ -132,8 +132,11 @@ def setup_model(
     print_model_summary("Final Model", model)
 
     max_seq_length = getattr(model.latent_transformer.config, "max_position_embeddings", 1024)
+
     if max_word_length is None:
-        max_word_length = getattr(model.bytes_decoder.config, "max_position_embeddings", 128)
+        decoder_max = getattr(model.bytes_decoder.config, "max_position_embeddings", 128)
+        encoder_max = getattr(model.bytes_encoder.config, "max_position_embeddings", float('inf')) if model.bytes_encoder else float('inf')
+        max_word_length = min(decoder_max, encoder_max)
 
     max_bytes = max_word_length - 2  # Reserve space for BOS and EOS tokens
     if pretokenizer_name is not None:
