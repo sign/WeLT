@@ -135,7 +135,10 @@ def setup_model(
 
     if max_word_length is None:
         decoder_max = getattr(model.bytes_decoder.config, "max_position_embeddings", 128)
-        encoder_max = getattr(model.bytes_encoder.config, "max_position_embeddings", float('inf')) if model.bytes_encoder else float('inf')
+        if model.bytes_encoder:
+            encoder_max = getattr(model.bytes_encoder.config, "max_position_embeddings", float('inf'))
+        else:
+            encoder_max = float('inf')
         max_word_length = min(decoder_max, encoder_max)
 
     max_bytes = max_word_length - 2  # Reserve space for BOS and EOS tokens

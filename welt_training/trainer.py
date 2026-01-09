@@ -124,6 +124,31 @@ class WeLTTrainer(Trainer):
         self._eval_logits = []
         self._eval_labels_for_accuracy = []
 
+    def get_eval_dataloader(self, eval_dataset=None):
+        """
+        Override to handle streaming eval datasets without accelerate's batch dispatch.
+
+        Streaming datasets (IterableDataset) with string fields like 'prefix' and 'completion'
+        fail when accelerate tries to concatenate batches. We create a dataloader without
+        accelerate's prepare() to avoid this issue.
+        """
+        from torch.utils.data import DataLoader, IterableDataset
+
+        eval_dataset = eval_dataset or self.eval_dataset
+
+        # For IterableDataset, create dataloader without accelerate's prepare
+        # to avoid string field concatenation errors
+        if isinstance(eval_dataset, IterableDataset):
+            return DataLoader(
+                eval_dataset,
+                batch_size=self.args.per_device_eval_batch_size,
+                collate_fn=self.data_collator,
+                num_workers=self.args.dataloader_num_workers,
+                pin_memory=self.args.dataloader_pin_memory,
+            )
+
+        return super().get_eval_dataloader(eval_dataset)
+
     def create_optimizer(self):
         """
         Create optimizer with component-specific parameter groups.
@@ -397,8 +422,12 @@ class WeLTTrainer(Trainer):
         if eval_dataset is None:
             raise ValueError("No evaluation dataset provided")
 
+        # Only check for 'prefix' column if generation metrics are enabled
+        if not self.loaded_metrics:
+            return
+
         # Check for 'prefix' column based on dataset type
-        if hasattr(eval_dataset, "features"):
+        if hasattr(eval_dataset, "features") and eval_dataset.features is not None:
             # Standard Dataset with features
             if "prefix" not in eval_dataset.features:
                 raise ValueError(

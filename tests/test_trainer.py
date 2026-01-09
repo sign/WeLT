@@ -147,7 +147,7 @@ def test_evaluation_with_generate(trainer_setup):
     )
 
     # Set smaller max_word_length for faster testing
-    
+
 
     # Run evaluation
     metrics = trainer.evaluate(eval_dataset)
@@ -237,7 +237,7 @@ def test_evaluate_simple(trainer_setup):
         max_generated_words=2,
     )
 
-    
+
 
     # Run evaluation
     metrics = trainer.evaluate(eval_dataset)
@@ -307,7 +307,7 @@ def test_evaluate_without_completions(trainer_setup):
         max_generated_words=3,
     )
 
-    
+
 
     # Should generate predictions but skip generation metric computation
     metrics = trainer.evaluate(eval_dataset)
@@ -484,7 +484,7 @@ def test_deterministic_evaluation(trainer_setup):
         max_generated_words=3,
     )
 
-    
+
 
     # Run evaluation twice with same seed
     import transformers
@@ -521,7 +521,7 @@ def test_batch_size_edge_cases(trainer_setup):
         max_generated_words=3,
     )
 
-    
+
 
     # Test with single example
     single_dataset = make_generation_dataset(
@@ -572,7 +572,7 @@ def test_transform_idempotency(trainer_setup):
         max_generated_words=3,
     )
 
-    
+
 
     # Should handle pre-transformed dataset gracefully
     metrics = trainer.evaluate(eval_dataset)
@@ -607,7 +607,7 @@ def test_perplexity_computation(trainer_setup):
         max_generated_words=3,
     )
 
-    
+
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -651,7 +651,7 @@ def test_eval_samples_count(trainer_setup):
         eval_metrics=None,
     )
 
-    
+
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -687,7 +687,7 @@ def test_multi_evaluation_stability(trainer_setup):
         max_generated_words=3,
     )
 
-    
+
 
     # Run evaluation 3 times in a row
     metrics1 = trainer.evaluate(eval_dataset)
@@ -734,7 +734,7 @@ def test_generation_with_varying_lengths(trainer_setup):
         max_generated_words=5,
     )
 
-    
+
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -772,7 +772,7 @@ def test_generation_max_words_limit(trainer_setup):
         max_generated_words=1,  # Very small limit
     )
 
-    
+
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -808,7 +808,7 @@ def test_no_metrics_evaluation(trainer_setup):
         eval_metrics=None,  # No generation metrics
     )
 
-    
+
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -850,7 +850,7 @@ def test_sacrebleu_metric(trainer_setup):
         eval_metrics=["sacrebleu"],
     )
 
-    
+
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -888,7 +888,7 @@ def test_chrf_metric(trainer_setup):
         eval_metrics=["chrf"],
     )
 
-    
+
 
     metrics = trainer.evaluate(eval_dataset)
 
@@ -998,7 +998,7 @@ def test_dataloader_reuse(trainer_setup):
         max_generated_words=2,
     )
 
-    
+
 
     # Run evaluation twice on same dataset
     # This tests if pop() operations corrupt the dataset

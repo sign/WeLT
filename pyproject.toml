@@ -16,11 +16,9 @@ dependencies = [
     "cachetools", # For LRU cache in processor
     "vit-pytorch", # For NaViT model implementation
     # Our packages
-    "words-segmentation", # For pre-tokenization into words
-    "utf8-tokenizer[fast]", # For tokenization of bytes
+    "words-segmentation>=0.0.5", # For pre-tokenization into words
+    "utf8-tokenizer[fast]>=0.5.0", # For tokenization of bytes
     "pixel-renderer[pangocairo]", # For text rendering into images (thread safe)
-    # Model optimizations
-    "kernels", # For optimized RMSNorm and possibly other kernels
 ]
 
 [project.optional-dependencies]

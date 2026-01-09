@@ -1,5 +1,6 @@
 from collections import defaultdict
 
+import datasets
 import torch
 from cachetools import LRUCache
 from datasets import Dataset
@@ -90,17 +91,23 @@ class TextImageProcessor(ProcessorMixin):
         # Add BOS token at the start
         return self.pretokenizer.tokenize(self.tokenizer.bos_token + text)
 
-    def pretokenize_dataset(self, dataset: Dataset) -> Dataset:
+    def pretokenize_dataset(self, dataset: Dataset, num_proc=4) -> Dataset:
         """Pretokenize a dataset in place, adding a 'words' column."""
 
         def tokenize_example(example):
             example["words"] = self.pretokenize(example["text"])
             return example
 
+        map_kwargs = {}
+        if isinstance(dataset, datasets.Dataset):
+            # these args are not available for IterableDataset
+            map_kwargs["num_proc"] = num_proc
+            map_kwargs["desc"] = "Pretokenizing texts into 'words'"
+
         return dataset.map(tokenize_example,
                            batched=False,
                            remove_columns=["text"],
-                           desc="Pretokenizing texts into 'words'")
+                           **map_kwargs)
 
     def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None) -> list[str]:
         """

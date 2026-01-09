@@ -24,6 +24,7 @@ from welt_training.args_trainer import WeLTTrainingArguments
 from welt_training.extendable_yaml import resolve_yaml_file
 from welt_training.flops_callback import FlopsCallback
 from welt_training.freeze_callback import FreezeWarmupCallback
+from welt_training.streaming import CustomIterableDataset
 from welt_training.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ def split_streaming_dataset(
             two IterableDataset objects: (train_stream, validation_stream).
     """
     if not (0 < validation_percentage < 100):
-        raise ValueError(  
+        raise ValueError(
             f"validation_percentage must be between 0 and 100 (exclusive). Passed: {validation_percentage}"
         )
 
@@ -289,18 +290,25 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
             map_args = {
                 "num_proc": data_args.preprocessing_num_workers,
                 "load_from_cache_file": not data_args.overwrite_cache,
+                "desc": f"Formatting {split_name} split",
             }
 
         dataset = dataset.map(
             mapping_fn,
             remove_columns=column_names,
-            desc=f"Formatting {split_name} split",
             **map_args
         )
+
+        filter_args = {}
+        if not data_args.streaming:
+            filter_args = {
+                "num_proc": data_args.preprocessing_num_workers,
+                "load_from_cache_file": not data_args.overwrite_cache,
+                "desc": f"Filtering empty examples from {split_name}",
+            }
         dataset = dataset.filter(
             lambda x: len(x["text"]) > 0,
-            desc=f"Filtering empty examples from {split_name}",
-            **map_args
+            **filter_args
         )
         return dataset
 
@@ -317,6 +325,10 @@ def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool 
     return dataset
 
 
+def wrap_streaming_dataset(dataset, streaming: bool):
+    if streaming and isinstance(dataset, IterableDataset):
+        return CustomIterableDataset(dataset)
+    return dataset
 
 
 def train(args: list[str] | None | str = None):  # noqa: C901
@@ -347,7 +359,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     train_dataset = None
     if training_args.do_train:
         if "train" not in text_datasets:
-            raise ValueError("--do_train requires a train dataset")  
+            raise ValueError("--do_train requires a train dataset")
         train_dataset = limit_dataset_size(text_datasets["train"],
                                            max_samples=data_args.max_train_samples,
                                            streaming=data_args.streaming)
@@ -355,7 +367,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     eval_dataset = None
     if training_args.do_eval:
         if "validation" not in text_datasets:
-            raise ValueError("--do_eval requires a validation dataset")  
+            raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = limit_dataset_size(text_datasets["validation"],
                                           max_samples=data_args.max_eval_samples,
                                           streaming=data_args.streaming)
@@ -363,8 +375,14 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     # Sequence packing
     if train_dataset:
         block_size = min(data_args.block_size or math.inf, processor.max_seq_length)
-        train_dataset = processor.pretokenize_dataset(train_dataset)
+        train_dataset = processor.pretokenize_dataset(train_dataset, num_proc=data_args.preprocessing_num_workers)
         train_dataset = pack_dataset(train_dataset, seq_length=block_size)
+
+    # Wrap streaming datasets with CustomIterableDataset to support with_transform
+    if train_dataset:
+        train_dataset = wrap_streaming_dataset(train_dataset, data_args.streaming)
+    if eval_dataset:
+        eval_dataset = wrap_streaming_dataset(eval_dataset, data_args.streaming)
 
     # Transform the datasets to the format expected by the model
     if train_dataset:

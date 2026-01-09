@@ -16,7 +16,7 @@ from transformers import (
 )
 from transformers.modeling_outputs import CausalLMOutput
 from transformers.models.auto.auto_factory import _get_model_class
-from utf8_tokenizer.embeddings import patch_embedding_layers
+from utf8_tokenizer.byte_embeddings import patch_embedding_layers
 from utf8_tokenizer.logits_processor import UTF8ValidationLogitsProcessor
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.pretokenizer import WordStoppingCriteria, is_word_complete
@@ -133,12 +133,13 @@ class WordLatentTransformer(PreTrainedModel):
         encoder_dim = self.bytes_encoder_dim + self.image_encoder_dim
         self.encoder_mapping = nn.Linear(encoder_dim, model_dim, dtype=self.latent_transformer.dtype)
 
+        # Post init (must be called before setting output embeddings, as tie_weights resets lm_head)
+        self.post_init()
+
         # Set decoder_mapping as the LM head so we can use .logits directly
+        # This must be done AFTER post_init() because tie_weights() resets lm_head
         decoder_mapping = nn.Linear(model_dim, bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
         self.latent_transformer.set_output_embeddings(decoder_mapping)
-
-        # Post init
-        self.post_init()
 
     def _should_drop_modality(self):
         if not self.training or self.config.modality_dropout == 0:
@@ -393,7 +394,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         if all(is_word_complete(w) for w in last_words):
             return None
 
-        print("Found partial words:", last_words, last_word_ids)
+        print("Found partial words:", last_words)
         print("input_ids", input_ids)
 
         prefix_ids = last_word_ids.clone()

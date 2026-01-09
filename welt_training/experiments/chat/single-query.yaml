@@ -10,14 +10,15 @@ warmup_freeze_steps: 1000
 
 # Dataset setup
 dataset_name: PleIAs/SYNTH
+streaming: true # dataset is large
 dataset_text_template: # Following the chat format from the "Back to bytes" paper
-  - "\x01user\n\x0E{query}\x0F\x17\n"
-  - "\x01assistant\n\x05{synthetic_reasoning}\x06\n{synthetic_answer}\x17"
-max_sequence_length: 512
+  - "\x01user\x0E{query}\x0F\x17"
+  - "\x01assistant\x05{synthetic_reasoning}\x06{synthetic_answer}\x17"
+max_sequence_length: 1024
 max_word_length: 16 # 14 bytes + BOS + EOS
 
 # Data Loader
-dataloader_num_workers: 8
+dataloader_num_workers: 1 # streaming datasets work with maximum num shards of workers
 dataloader_prefetch_factor: 4
 dataloader_pin_memory: true
 dataloader_persistent_workers: true
@@ -47,6 +48,7 @@ metric_for_best_model: chrf  # Using generation-based metric
 eval_metrics: [sacrebleu, chrf]  # Generation-based evaluation metrics
 predict_with_generate: true
 generation_max_length: 50  # Max tokens/words to generate during evaluation
+max_eval_samples: 8
 log_samples: 5  # Number of sample predictions to log
 
 # Logging
@@ -56,11 +58,11 @@ include_tokens_per_second: true
 include_num_input_tokens_seen: true
 report_to: wandb
 
-# FLOPS profiling
-profile_flops: true
-flops_profile_steps: 500
-flops_warmup_steps: 10
-flops_active_steps: 10
+## FLOPS profiling
+#profile_flops: true
+#flops_profile_steps: 500
+#flops_warmup_steps: 10
+#flops_active_steps: 10
 
 # Dtype
 bf16: true

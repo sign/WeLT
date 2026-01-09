@@ -221,6 +221,55 @@ def test_training_with_sacrebleu(temp_output_dir):
     assert "perplexity" in eval_metrics
 
 
+def test_training_with_streaming(temp_output_dir):
+    """Test that training works with streaming=True."""
+    base_config_path = Path(__file__).parent.parent / "welt_training/experiments/easy-tasks/string-repetition.yaml"
+    with open(base_config_path) as f:
+        config = yaml.safe_load(f)
+
+    config.update({
+        "output_dir": temp_output_dir,
+        "max_steps": 5,
+        "max_train_samples": 10,
+        "max_eval_samples": 5,
+        "report_to": [],
+        "save_strategy": "no",
+        "eval_on_start": False,
+        "eval_steps": 5,
+        "do_eval": True,
+        "predict_with_generate": True,
+        "metric_for_best_model": "chrf",
+        "eval_metrics": ["sacrebleu", "chrf"],
+        "dataloader_num_workers": 0,
+        "dataloader_prefetch_factor": None,
+        "dataloader_pin_memory": False,
+        "dataloader_persistent_workers": False,
+        "logging_steps": 5,
+        "log_samples": 1,
+        "bf16": False,
+        "streaming": True,
+    })
+
+    config_path = Path(temp_output_dir) / "test_config_streaming.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config, f)
+
+    train(args=str(config_path))
+
+    output_dir = Path(temp_output_dir)
+    eval_results_path = output_dir / "eval_results.json"
+    assert eval_results_path.exists()
+
+    import json
+    with open(eval_results_path) as f:
+        eval_metrics = json.load(f)
+
+    assert "eval_chrf" in eval_metrics
+    assert "eval_loss" in eval_metrics
+    assert "perplexity" in eval_metrics
+
+
+
 def test_training_determinism(temp_output_dir):
     """Test that training with same seed produces similar results."""
     base_config_path = Path(__file__).parent.parent / "welt_training/experiments/easy-tasks/string-repetition.yaml"
