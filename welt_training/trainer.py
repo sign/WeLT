@@ -14,7 +14,6 @@ import math
 
 import evaluate
 import torch
-from torch.optim import AdamW
 from transformers import GenerationConfig, Trainer
 
 from welt.processor import TextImageProcessor
@@ -52,13 +51,13 @@ class WeLTTrainer(Trainer):
     """
 
     def __init__(
-        self,
-        processor: TextImageProcessor,
-        eval_metrics: list[str] | None = None,
-        max_generated_words: int = 50,
-        bytes_generation_config: GenerationConfig | None = None,
-        log_samples: int = 3,
-        **kwargs
+            self,
+            processor: TextImageProcessor,
+            eval_metrics: list[str] | None = None,
+            max_generated_words: int = 50,
+            bytes_generation_config: GenerationConfig | None = None,
+            log_samples: int = 3,
+            **kwargs
     ):
         """
         Initialize WeLTTrainer.
@@ -151,78 +150,118 @@ class WeLTTrainer(Trainer):
 
     def create_optimizer(self):
         """
-        Create optimizer with component-specific parameter groups.
+        Create optimizer based on args.optim setting.
 
-        This improves optimization dynamics by isolating Adam state per component,
-        resulting in ~3x better loss compared to the default optimizer.
-
-        Hypothesis why does this work?
-        With separate param groups, Adam's momentum (m) and variance (v) estimates are computed per-group.
-        The model has distinct components with different sample exposure rates:
-        - **bytes_encoder/decoder**: See ~4096 samples/batch (32 batch * 128 words)
-        - **latent_transformer**: Sees only 32 samples/batch
-        - **image_encoder**: Processes visual features
-        - **encoder/decoder_mapping**: Bridge layers
-
-        The encoder/decoder process 128x more samples per optimizer step than the transformer.
-        In a single param group, their gradient statistics may dominate Adam's m/v estimates,
-        causing the transformer to receive suboptimal updates.
+        Supported optimizers:
+        - adamw_torch_fused: Uses base Trainer's AdamW implementation
+        - dion2: Uses Dion2 optimizer with proper parameter grouping
         """
         if self.optimizer is not None:
             return self.optimizer
 
-        args = self.args
+        optim_name = self.args.optim.lower()
 
-        # Validate optimizer type
-        if "adamw" not in args.optim.lower():
-            raise ValueError(
-                f"WeLTTrainer only supports AdamW optimizer variants. "
-                f"Got optim='{args.optim}'. Use 'adamw_torch' or 'adamw_torch_fused'."
-            )
+        if "adamw" in optim_name:
+            return super().create_optimizer()
 
-        # Build parameter groups by component
+        if "dion" in optim_name:
+            return self._create_dion2_optimizer()
+
+        raise ValueError(
+            f"WeLTTrainer only supports 'adamw_torch_fused' or 'dion2' optimizers. "
+            f"Got optim='{self.args.optim}'."
+        )
+
+    def _create_dion2_optimizer(self):
+        """
+        Create Dion2 optimizer with proper parameter grouping.
+
+        Parameter groups:
+        - Matrix params (2D, non-embedding): algorithm="dion2" (default)
+        - Embedding params: algorithm="adamw" (with weight_decay)
+        - Vector params, norms: algorithm="adamw", weight_decay=0
+        - LM head: algorithm="adamw", lr=lr/sqrt(model_dim)
+        """
+        import torch._dynamo
+        from dion import Dion2
+        from torch import nn
+        # Configure torch.compile to handle dynamic shapes in Dion optimizer
+        torch._dynamo.config.cache_size_limit = 64
+        torch._dynamo.config.force_parameter_static_shapes = False
+
         model = self.model
-        param_groups = []
+        args = self.args
+        lr = args.learning_rate
 
-        # Create parameter groups for each component
-        component_names = [
-            'bytes_encoder',
-            'image_encoder',
-            'encoder_mapping',
-            'latent_transformer',
-            'bytes_decoder',
+        # Get non-decay parameter names (bias, norms)
+        decay_parameter_names = set(self.get_decay_parameter_names(model))
+
+        # Collect embedding parameters (nn.Embedding layers)
+        embed_params = set()
+        for module in model.modules():
+            if isinstance(module, nn.Embedding):
+                embed_params.update(module.parameters())
+
+        # Collect LM head parameters
+        lm_head = model.bytes_decoder.get_output_embeddings()
+        lm_head_params = set(lm_head.parameters()) if lm_head is not None else set()
+        model_dim = model.bytes_decoder.config.hidden_size
+
+        # Separate parameters into groups
+        matrix_params = []
+        embedding_params = []
+        vector_params = []
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if param in lm_head_params:
+                continue
+            if param in embed_params:
+                embedding_params.append(param)
+                continue
+
+            is_matrix = param.ndim == 2
+            is_decay = name in decay_parameter_names
+
+            if is_matrix and is_decay:
+                matrix_params.append(param)
+            else:
+                vector_params.append(param)
+
+        param_groups = [
+            {'params': matrix_params, 'algorithm': 'dion2', 'name': 'matrix'},
+            {'params': embedding_params, 'algorithm': 'lion', 'name': 'embedding'},
+            {'params': vector_params, 'algorithm': 'lion', 'weight_decay': 0.0, 'name': 'vector'},
         ]
 
-        for component_name in component_names:
-            if hasattr(model, component_name):
-                component = getattr(model, component_name)
-                if component is not None:
-                    params = [p for p in component.parameters() if p.requires_grad]
-                    if params:
-                        param_groups.append({
-                            'params': params,
-                            'lr': args.learning_rate,
-                            'name': component_name
-                        })
+        if lm_head_params:
+            param_groups.append({
+                'params': list(lm_head_params),
+                'algorithm': 'lion',
+                'lr': lr / math.sqrt(model_dim),
+                'weight_decay': 0.0,
+                'name': 'lm_head'
+            })
 
         # Log the configuration
         print(f"\n{'=' * 60}")
-        print("Component-specific parameter groups:")
+        print("Dion2 parameter groups:")
         for group in param_groups:
             num_params = sum(p.numel() for p in group['params'])
-            print(f"  {group['name']}: lr={group['lr']:.2e}, params={num_params:,}")
+            algo = group.get('algorithm', 'dion2')
+            group_lr = group.get('lr', lr)
+            wd = group.get('weight_decay', args.weight_decay)
+            print(f"  {group['name']}: algo={algo}, lr={group_lr:.2e}, wd={wd:.2e}, params={num_params:,}")
         print(f"{'=' * 60}\n")
 
-        # Create optimizer
-        optimizer_kwargs = {
-            'betas': (args.adam_beta1, args.adam_beta2),
-            'eps': args.adam_epsilon,
-            'weight_decay': args.weight_decay,
-        }
-        if "fused" in args.optim and torch.cuda.is_available():
-            optimizer_kwargs['fused'] = True
-
-        self.optimizer = AdamW(param_groups, **optimizer_kwargs)
+        self.optimizer = Dion2(
+            param_groups,
+            lr=lr,
+            weight_decay=args.weight_decay,
+            betas=(args.adam_beta1, args.adam_beta2),
+            epsilon=args.adam_epsilon,
+        )
         return self.optimizer
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -281,9 +320,9 @@ class WeLTTrainer(Trainer):
         # (3) and either we have metrics or prediction_loss_only is False
         predictions_text = []
         should_generate = (
-            self.args.predict_with_generate
-            and prefixes is not None
-            and (self.loaded_metrics or not prediction_loss_only)
+                self.args.predict_with_generate
+                and prefixes is not None
+                and (self.loaded_metrics or not prediction_loss_only)
         )
 
         if should_generate:
@@ -407,9 +446,9 @@ class WeLTTrainer(Trainer):
 
     def _log_samples(self, predictions, prefixes, completions):
         """Log sample predictions."""
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("Sample predictions:")
-        print("="*60)
+        print("=" * 60)
         for i in range(min(self.log_samples, len(predictions))):
             print(f"  Input: {prefixes[i] if prefixes else 'N/A'}")
             print(f"  Generated: {predictions[i]}")
@@ -459,9 +498,9 @@ class WeLTTrainer(Trainer):
                 )
 
     def _compute_generation_metrics(
-        self,
-        predictions: list[str],
-        references: list[str]
+            self,
+            predictions: list[str],
+            references: list[str]
     ) -> dict[str, float]:
         """Compute generation-based metrics."""
         metrics = {}
@@ -493,9 +532,9 @@ class WeLTTrainer(Trainer):
         return metrics
 
     def _compute_accuracy(
-        self,
-        pred_token_ids: list[torch.Tensor],
-        labels: list[torch.Tensor]
+            self,
+            pred_token_ids: list[torch.Tensor],
+            labels: list[torch.Tensor]
     ) -> dict[str, float]:
         """
         Compute byte-level and word-level accuracy from predictions and labels.

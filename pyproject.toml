@@ -36,6 +36,7 @@ train = [
     "scikit-learn", # For "accuracy" metric in evaluate
     "sacrebleu", # For usual bleu/chrF metrics
     "wandb", # For experiment tracking
+    "dion @ git+https://github.com/microsoft/dion.git", # For Dion2 optimizer
 ]
 
 [tool.setuptools]

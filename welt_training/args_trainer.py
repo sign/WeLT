@@ -6,6 +6,10 @@ Extends Seq2SeqTrainingArguments with additional parameters for generation-based
 from dataclasses import dataclass, field
 
 from transformers import Seq2SeqTrainingArguments
+from transformers.training_args import OptimizerNames
+
+# Monkey-patch OptimizerNames to accept "dion"
+OptimizerNames._value2member_map_["dion"] = "dion"  # type: ignore[attr-defined]
 
 
 @dataclass
