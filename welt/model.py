@@ -121,6 +121,8 @@ class WordLatentTransformer(PreTrainedModel):
                                                     config.dtype, load_pretrained, None)
         self.latent_transformer.resize_token_embeddings(0, pad_to_multiple_of=1)
         model_dim = self.latent_transformer.config.hidden_size
+        # Disable weight tying - we use a separate decoder_mapping instead of tied lm_head
+        self.latent_transformer.config.tie_word_embeddings = False
 
         # Small Language Model
         self.bytes_decoder = model_from_config(config.bytes_decoder, AutoModelForCausalLM,
@@ -132,14 +134,15 @@ class WordLatentTransformer(PreTrainedModel):
         # Mapping layers
         encoder_dim = self.bytes_encoder_dim + self.image_encoder_dim
         self.encoder_mapping = nn.Linear(encoder_dim, model_dim, dtype=self.latent_transformer.dtype)
-
-        # Post init (must be called before setting output embeddings, as tie_weights resets lm_head)
-        self.post_init()
+        self.encoder_norm = nn.RMSNorm(model_dim, dtype=self.latent_transformer.dtype)
 
         # Set decoder_mapping as the LM head so we can use .logits directly
         # This must be done AFTER post_init() because tie_weights() resets lm_head
         decoder_mapping = nn.Linear(model_dim, bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
         self.latent_transformer.set_output_embeddings(decoder_mapping)
+        self.decoder_norm = nn.RMSNorm(bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
+
+        self.post_init()
 
     def _should_drop_modality(self):
         if not self.training or self.config.modality_dropout == 0:
@@ -226,7 +229,7 @@ class WordLatentTransformer(PreTrainedModel):
         #     scale_factor = 1.0 / (1.0 - percent_zeros)
         #     concatenated_embeds *= scale_factor.clamp(min=1).unsqueeze(-1)
 
-        return self.encoder_mapping(concatenated_embeds)
+        return self.encoder_norm(self.encoder_mapping(concatenated_embeds))
 
     def _num_words_per_datum(self, attention_mask: torch.Tensor) -> torch.Tensor:
         return attention_mask.sum(dim=-1).gt(0).sum(dim=-1)
@@ -263,7 +266,7 @@ class WordLatentTransformer(PreTrainedModel):
             attention_mask=attention_mask,
         )
         # they aren't really "logits", since we replace the lm_head with decoder_mapping
-        mapped_embeds = latent_outputs.logits
+        mapped_embeds = self.decoder_norm(latent_outputs.logits)
 
         # Decode the latent vectors to bytes using parallel causal decoding
         logits = self.parallel_causal_decode(mapped_embeds, labels_input, labels_attention_mask)
@@ -352,8 +355,10 @@ class WordLatentTransformer(PreTrainedModel):
         set_module_trainable(self.bytes_decoder.get_output_embeddings())
 
         set_module_trainable(self.encoder_mapping)
+        set_module_trainable(self.encoder_norm)
         # decoder_mapping
         set_module_trainable(self.latent_transformer.get_output_embeddings())
+        set_module_trainable(self.decoder_norm)
 
     def unfreeze(self):
         """Unfreeze everything."""
@@ -500,7 +505,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         )
 
         # LM head (decoder_mapping) is applied internally, output via .logits
-        logits = latent_output.logits  # (B, L, bytes_decoder_dim)
+        logits = self.decoder_norm(latent_output.logits)  # (B, L, bytes_decoder_dim)
         batch_indices = torch.arange(logits.size(0), device=logits.device)
         mapped_latent = logits[batch_indices, num_words - 1].unsqueeze(1)  # (B, 1, bytes_decoder_dim)
 
@@ -529,7 +534,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             use_cache=True,
         )
 
-        return latent_output.past_key_values, latent_output.logits
+        return latent_output.past_key_values, self.decoder_norm(latent_output.logits)
 
     def _generate_word_bytes(
             self,

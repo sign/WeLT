@@ -222,7 +222,7 @@ def test_freeze_unfreeze_model_works():
             continue
         assert not param.requires_grad, f"Parameter {name} should be frozen but is unfrozen."
 
-    for layer in [model.encoder_mapping, decoder_mapping]:
+    for layer in [model.encoder_mapping, model.encoder_norm, decoder_mapping, model.decoder_norm]:
         for name, param in layer.named_parameters():
             assert param.requires_grad, f"Parameter {name} should be unfrozen but is frozen."
 
