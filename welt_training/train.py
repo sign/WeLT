@@ -29,7 +29,6 @@ from welt_training.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)
 
-
 def split_streaming_dataset(
         full_streaming_dataset,
         validation_percentage: int = 5,
@@ -428,9 +427,13 @@ def train(args: list[str] | None | str = None):  # noqa: C901
 
         metrics = train_result.metrics
 
-        max_train_samples = (
-            data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
-        )
+        if data_args.max_train_samples is not None:
+            max_train_samples = data_args.max_train_samples
+        elif data_args.streaming:
+            max_train_samples = 0 # TODO: figure out a better way to get the length of streaming dataset
+        else:
+            max_train_samples = len(train_dataset)
+
         if data_args.streaming:
             metrics["train_samples"] = max_train_samples
         else:

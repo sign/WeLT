@@ -91,6 +91,7 @@ def setup_model(
         seed=42,
         load_pretrained=True,
         max_word_length=None,
+        quiet=False,
 ):
     set_seed(seed, deterministic=True)
     enable_full_determinism(seed=seed, warn_only=True)
@@ -125,11 +126,12 @@ def setup_model(
     model = WordLatentTransformerForCausalLM(config,
                                              load_pretrained=load_pretrained,
                                              attn_implementation=get_attn_implementation())
-    print_model_summary("Image Encoder", model.image_encoder)
-    print_model_summary("Bytes Encoder", model.bytes_encoder)
-    print_model_summary("Latent Transformer", model.latent_transformer)
-    print_model_summary("Bytes Decoder", model.bytes_decoder)
-    print_model_summary("Final Model", model)
+    if not quiet:
+        print_model_summary("Image Encoder", model.image_encoder)
+        print_model_summary("Bytes Encoder", model.bytes_encoder)
+        print_model_summary("Latent Transformer", model.latent_transformer)
+        print_model_summary("Bytes Decoder", model.bytes_decoder)
+        print_model_summary("Final Model", model)
 
     max_seq_length = getattr(model.latent_transformer.config, "max_position_embeddings", 1024)
 
