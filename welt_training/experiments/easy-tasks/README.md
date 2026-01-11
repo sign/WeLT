@@ -21,9 +21,9 @@ docker run -it --rm --gpus all \
   -v /shared/.cache:/root/.cache \
   -v ~/.netrc:/root/.netrc:ro \
   -e WANDB_PROJECT="string-repetition" \
-  -e WANDB_NAME="full-run" \
+  -e WANDB_NAME="full-run-dion-lr" \
   -e CONFIG="welt_training/experiments/easy-tasks/string-repetition.yaml" \
-  welt 
+  welt
 ```
 
 ### OCR

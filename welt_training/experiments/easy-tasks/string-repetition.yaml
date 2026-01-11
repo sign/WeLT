@@ -27,12 +27,12 @@ remove_unused_columns: false # Necessary
 per_device_train_batch_size: 32
 per_device_eval_batch_size: 32
 auto_find_batch_size: true
-output_dir: ./output/string-repetition-tiny
+output_dir: ./output/string-repetition-tiny-dion-lr
 overwrite_output_dir: true
 do_train: true
 
 # Optimizer setup
-optim: adamw_torch_fused
+optim: dion
 weight_decay: 0.001
 max_steps: 10000
 warmup_ratio: 0.05

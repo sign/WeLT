@@ -6,7 +6,7 @@ bytes_decoder_model_name_or_path: sign/utf8-lm-tiny
 
 # pretrained weights
 load_pretrained: true
-warmup_freeze_steps: 1000
+warmup_freeze_steps: 10 # Freeze for a handful of steps to stabilize training
 
 # Dataset setup
 dataset_name: PleIAs/SYNTH
@@ -28,16 +28,17 @@ remove_unused_columns: false # Necessary
 per_device_train_batch_size: 32
 per_device_eval_batch_size: 32
 auto_find_batch_size: true
-output_dir: ./output/monad-chat
+output_dir: ./output/monad-chat-dion-lr3
 overwrite_output_dir: true
 do_train: true
 
 # Optimizer setup
-optim: adamw_torch_fused
-weight_decay: 0.001
+optim: dion
+weight_decay: 0.01
 max_steps: 10000
-warmup_ratio: 0.05
-learning_rate: 6.0e-4
+#warmup_ratio: 0.05
+learning_rate: 0.005
+lr_scheduler_type: constant
 
 # Evaluation
 do_eval: true
