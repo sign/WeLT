@@ -125,6 +125,7 @@ def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, see
         bytes_encoder_name=model_args.bytes_encoder_model_name_or_path,
         latent_transformer_name=model_args.latent_transformer_model_name_or_path,
         bytes_decoder_name=model_args.bytes_decoder_model_name_or_path,
+        encoding=model_args.encoding,
         trust_remote_code=model_args.trust_remote_code,
         dtype=model_args.dtype,
         seed=seed,

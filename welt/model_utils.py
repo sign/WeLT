@@ -13,11 +13,11 @@ from transformers import (
     enable_full_determinism,
     set_seed,
 )
-from utf8_tokenizer.tokenizer import UTF8Tokenizer
+from utf8_tokenizer.tokenizer import UTF8Tokenizer, UTF16Tokenizer, UTF32Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.collator import collate_fn
-from welt.config import WordLatentTransformerConfig
+from welt.config import Encoding, WordLatentTransformerConfig
 from welt.model import WordLatentTransformerForCausalLM, logger
 from welt.noop import NoopConfig, NoopImageProcessor
 from welt.processor import TextImageProcessor
@@ -85,6 +85,7 @@ def setup_model(
         latent_transformer_name="EleutherAI/pythia-70m",
         bytes_decoder_name="sign/utf8-lm-tiny",
         pretokenizer_name: str | None = None,
+        encoding: Encoding = "UTF-8",
         trust_remote_code=False,
         modality_dropout=0.15,
         dtype=torch.float32,
@@ -102,7 +103,12 @@ def setup_model(
     else:
         image_processor = NoopImageProcessor()
 
-    tokenizer = UTF8Tokenizer()
+    tokenizer_classes = {
+        "UTF-8": UTF8Tokenizer,
+        "UTF-16": UTF16Tokenizer,
+        "UTF-32": UTF32Tokenizer,
+    }
+    tokenizer = tokenizer_classes[encoding]()
 
     config = WordLatentTransformerConfig(
         # All sub-configs are loaded from the respective model names
@@ -114,6 +120,7 @@ def setup_model(
         modality_dropout=modality_dropout,
         tokenizer_class=tokenizer.__class__.__name__,
         num_tokens=len(tokenizer),
+        encoding=encoding,
         bos_token_id=tokenizer.bos_token_id,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
@@ -143,15 +150,19 @@ def setup_model(
             encoder_max = float('inf')
         max_word_length = min(decoder_max, encoder_max)
 
-    max_bytes = max_word_length - 2  # Reserve space for BOS and EOS tokens
+    modified_max_length = max_word_length - 2  # Reserve space for BOS and EOS tokens
     if pretokenizer_name is not None:
         print(f"Using pretokenizer: {pretokenizer_name}")
         pretokenizer = AutoTokenizer.from_pretrained(pretokenizer_name,
                                                      use_fast=True,
                                                      trust_remote_code=trust_remote_code)
     else:
-        print(f"Using pretokenizer: WordsSegmentationTokenizer(max_bytes={max_bytes})")
-        pretokenizer = WordsSegmentationTokenizer(max_bytes=max_bytes)
+        if encoding == "UTF-32":
+            print(f"Using pretokenizer: WordsSegmentationTokenizer(max_characters={modified_max_length})")
+            pretokenizer = WordsSegmentationTokenizer(max_characters=modified_max_length)
+        else:
+            print(f"Using pretokenizer: WordsSegmentationTokenizer(max_bytes={modified_max_length})")
+            pretokenizer = WordsSegmentationTokenizer(max_bytes=modified_max_length)
 
     font_config = FontConfig(sources=FONTS_NOTO_SANS)
     renderer = PixelRendererProcessor(font=font_config)

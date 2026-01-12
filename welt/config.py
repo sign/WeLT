@@ -1,7 +1,10 @@
+from typing import Literal
 
 from transformers import CONFIG_MAPPING, AutoConfig, PretrainedConfig
 
 from welt.noop import NoopConfig
+
+Encoding = Literal["UTF-8", "UTF-16", "UTF-32"]
 
 
 class WordLatentTransformerConfig(PretrainedConfig):
@@ -21,6 +24,7 @@ class WordLatentTransformerConfig(PretrainedConfig):
                  bytes_decoder: AutoConfig | dict = None,
                  modality_dropout: float = 0.15,
                  num_tokens: int = 256,
+                 encoding: Encoding = "UTF-8",
                  **kwargs):
         # Configuration defaults
         kwargs["is_decoder"] = kwargs.get("is_decoder", True)
@@ -36,6 +40,7 @@ class WordLatentTransformerConfig(PretrainedConfig):
 
         self.modality_dropout = modality_dropout
         self.num_tokens = num_tokens
+        self.encoding = encoding
 
     def init_sub_config(self, name: str):
         config = getattr(self, name, None)

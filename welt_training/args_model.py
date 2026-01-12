@@ -9,6 +9,8 @@ from transformers.models.auto.modeling_auto import (
     MODEL_FOR_MASKED_LM_MAPPING_NAMES,
 )
 
+from welt.config import Encoding
+
 
 def listed_model(model_names):
     models_list = ", ".join(model_names.keys())
@@ -44,6 +46,10 @@ class ModelArguments:
 
     pretokenizer_name: str | None = field(default=None, metadata={
         "help": "Pretokenizer to use, defaults to https://github.com/sign/words-segmentation."
+    })
+
+    encoding: Encoding = field(default="UTF-8", metadata={
+        "help": "Character encoding for the tokenizer. UTF-16/UTF-32 use multi-byte predictions."
     })
 
     trust_remote_code: bool = field(

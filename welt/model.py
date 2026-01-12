@@ -16,6 +16,7 @@ from transformers import (
 )
 from transformers.modeling_outputs import CausalLMOutput
 from transformers.models.auto.auto_factory import _get_model_class
+from utf8_tokenizer import CharacterCausalLMConfig, CharacterCausalLMWrapper, CharacterEmbedding
 from utf8_tokenizer.byte_embeddings import patch_embedding_layers
 from utf8_tokenizer.logits_processor import UTF8ValidationLogitsProcessor
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
@@ -62,6 +63,7 @@ def set_module_trainable(module, trainable: bool = True):
         p.requires_grad = trainable
 
 
+
 class WordLatentTransformer(PreTrainedModel):
     config_class = WordLatentTransformerConfig
 
@@ -105,11 +107,7 @@ class WordLatentTransformer(PreTrainedModel):
         if is_bytes_encoder:
             self.bytes_encoder = model_from_config(config.bytes_encoder, AutoModelForMaskedLM,
                                                    config.dtype, load_pretrained, attn_implementation)
-            self.bytes_encoder.resize_token_embeddings(config.num_tokens, pad_to_multiple_of=8)
-            self.bytes_encoder.cls = self.bytes_encoder.decoder = torch.nn.Identity()  # delete the decoder head
-            self.bytes_encoder.get_output_embeddings = lambda: None  # bytes encoder no longer has output embeddings
-            self.bytes_encoder_dim = self.bytes_encoder.config.hidden_size
-            patch_embedding_layers(self.bytes_encoder)
+            self._prepare_bytes_encoder()
         else:
             self.bytes_encoder = None
             self.bytes_encoder_dim = 0
@@ -127,9 +125,8 @@ class WordLatentTransformer(PreTrainedModel):
         # Small Language Model
         self.bytes_decoder = model_from_config(config.bytes_decoder, AutoModelForCausalLM,
                                                config.dtype, load_pretrained, attn_implementation)
-        self.bytes_decoder.resize_token_embeddings(config.num_tokens, pad_to_multiple_of=8)
-        patch_embedding_layers(self.bytes_decoder)
-        bytes_decoder_dim = self.bytes_decoder.config.hidden_size
+        self.bytes_encoder_dim = self.bytes_encoder.config.hidden_size
+        bytes_decoder_dim = self._prepare_bytes_decoder()
 
         # Mapping layers
         encoder_dim = self.bytes_encoder_dim + self.image_encoder_dim
@@ -137,12 +134,60 @@ class WordLatentTransformer(PreTrainedModel):
         self.encoder_norm = nn.RMSNorm(model_dim, dtype=self.latent_transformer.dtype)
 
         # Set decoder_mapping as the LM head so we can use .logits directly
-        # This must be done AFTER post_init() because tie_weights() resets lm_head
         decoder_mapping = nn.Linear(model_dim, bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
         self.latent_transformer.set_output_embeddings(decoder_mapping)
         self.decoder_norm = nn.RMSNorm(bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
 
         self.post_init()
+
+    def _prepare_bytes_decoder(self):
+        """Wrap bytes_decoder for multi-byte encodings (UTF-16/UTF-32).
+
+        UTF-8 uses variable-length byte sequences (1-4 bytes per character).
+        UTF-16/UTF-32 use fixed-width units (2/4 bytes), requiring the decoder
+        to predict multiple bytes per step via CharacterCausalLMWrapper.
+        """
+
+        if self.config.encoding == "UTF-8":
+            self.bytes_decoder.resize_token_embeddings(self.config.num_tokens, pad_to_multiple_of=8)
+            patch_embedding_layers(self.bytes_decoder)
+            return self.bytes_decoder.config.hidden_size
+
+        num_bytes = 2 if self.config.encoding == "UTF-16" else 4
+
+        if isinstance(self.bytes_decoder, CharacterCausalLMWrapper):
+            assert num_bytes == self.bytes_decoder.config.num_bytes
+        else:
+            char_config = CharacterCausalLMConfig(num_bytes=num_bytes)
+            self.bytes_decoder = CharacterCausalLMWrapper(config=char_config, model=self.bytes_decoder)
+
+        return self.bytes_decoder.model.config.hidden_size
+
+    def _prepare_bytes_encoder(self):
+        """Prepare bytes_encoder for multi-byte encodings (UTF-16/UTF-32).
+
+        UTF-8 uses variable-length byte sequences (1-4 bytes per character).
+        UTF-16/UTF-32 use fixed-width units (2/4 bytes), requiring the encoder
+        to use CharacterEmbedding to handle multi-byte input.
+        """
+        self.bytes_encoder.cls = self.bytes_encoder.decoder = torch.nn.Identity()
+        self.bytes_encoder.get_output_embeddings = lambda: None
+
+        if self.config.encoding == "UTF-8":
+            self.bytes_encoder.resize_token_embeddings(self.config.num_tokens, pad_to_multiple_of=8)
+            patch_embedding_layers(self.bytes_encoder)
+            return
+
+        num_bytes = 2 if self.config.encoding == "UTF-16" else 4
+        input_embeddings = self.bytes_encoder.get_input_embeddings()
+
+        if isinstance(input_embeddings, CharacterEmbedding):
+            assert num_bytes == input_embeddings.num_bytes
+            return
+
+        embedding_dim = input_embeddings.embedding_dim
+        char_embedding = CharacterEmbedding(embedding_dim, num_bytes=num_bytes)
+        self.bytes_encoder.set_input_embeddings(char_embedding)
 
     def _should_drop_modality(self):
         if not self.training or self.config.modality_dropout == 0:
@@ -279,8 +324,13 @@ class WordLatentTransformer(PreTrainedModel):
             flat_logits = logits.reshape(-1, logits.size(-1))
             flat_labels = labels_output.reshape(-1)
 
-            # Compute cross entropy loss
-            loss = torch.nn.functional.cross_entropy(flat_logits, flat_labels, ignore_index=self.config.pad_token_id)
+            if self.config.encoding == "UTF-8":
+                # UTF-8: standard cross entropy over byte predictions
+                loss = torch.nn.functional.cross_entropy(flat_logits, flat_labels,
+                                                         ignore_index=self.config.pad_token_id)
+            else:
+                # UTF-16/UTF-32: wrapper handles multi-byte loss (predicts num_bytes simultaneously)
+                loss = self.bytes_decoder.compute_loss(flat_logits, flat_labels)
 
         return CausalLMOutput(
             loss=loss,
@@ -339,7 +389,7 @@ class WordLatentTransformer(PreTrainedModel):
         char_logits = all_logits[:, 1:]  # [B*L, T, vocab_size]
 
         # Step 8: Reshape back to [B, L, T, vocab_size]
-        logits = char_logits.view(B, L, T, -1)
+        logits = char_logits.view(B, L, *char_logits.shape[1:])
 
         return logits
 

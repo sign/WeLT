@@ -5,6 +5,7 @@ import torch
 from datasets import Dataset
 from safetensors.torch import load_model, save_model
 from transformers.modeling_outputs import CausalLMOutput
+from utf8_tokenizer import CharacterCausalLMWrapper, CharacterEmbedding
 
 from welt.model import WordLatentTransformer
 from welt.model_utils import setup_model
@@ -288,6 +289,61 @@ def test_model_from_pretrained_works_without_bytes_encoder():
                 f"Logits mismatch for '{text}': max difference {max_diff}"
 
         print("✓ Model outputs are identical after save/load")
+
+
+def test_utf32_encoding_wraps_utf8_decoder():
+    """Test that UTF-32 encoding wraps a UTF-8 decoder with CharacterCausalLMWrapper."""
+    model, processor, collator = setup_tiny_model(
+        encoding="UTF-32",
+        bytes_decoder_name="sign/utf8-lm-tiny",
+    )
+
+    # Check decoder is wrapped
+    assert isinstance(model.bytes_decoder, CharacterCausalLMWrapper), \
+        "UTF-32 encoding should wrap UTF-8 decoder with CharacterCausalLMWrapper"
+    assert model.bytes_decoder.config.num_bytes == 4, \
+        "UTF-32 wrapper should have num_bytes=4"
+
+    # Check encoder has CharacterEmbedding
+    encoder_embeddings = model.bytes_encoder.get_input_embeddings()
+    assert isinstance(encoder_embeddings, CharacterEmbedding), \
+        "UTF-32 encoding should use CharacterEmbedding for encoder"
+    assert encoder_embeddings.num_bytes == 4, \
+        "Encoder CharacterEmbedding should have num_bytes=4"
+
+    # Test forward pass without labels
+    model.eval()
+    texts = ["hello world"]
+    dataset = make_dataset(texts)
+    batch = dataset_to_batch(model, processor, collator, dataset)
+    # batch.pop("labels_output", None)
+
+    with torch.no_grad():
+        outputs = model(**batch)
+
+    assert outputs.logits is not None, "Forward pass should produce logits"
+    assert not torch.isnan(outputs.logits).any(), "Logits should not contain NaN"
+
+    # Test generation
+    batch = processor(["hello "], collated=True)
+    generated = model.generate(**batch, processor=processor, max_generated_words=2)
+    assert len(generated) == 1, "Should generate one output"
+    assert isinstance(generated[0], str), "Generated output should be a string"
+
+
+def test_utf32_encoding_with_utf32_decoder():
+    """Test that UTF-32 encoding with already-wrapped decoder doesn't double-wrap."""
+    model, processor, collator = setup_tiny_model(
+        encoding="UTF-32",
+        bytes_decoder_name="sign/utf32-lm-tiny",
+    )
+
+    assert isinstance(model.bytes_decoder, CharacterCausalLMWrapper), \
+        "UTF-32 decoder should be a CharacterCausalLMWrapper"
+    assert model.bytes_decoder.config.num_bytes == 4, \
+        "UTF-32 wrapper should have num_bytes=4"
+    assert not isinstance(model.bytes_decoder.model, CharacterCausalLMWrapper), \
+        "Should not double-wrap the decoder"
 
 
 if __name__ == "__main__":
