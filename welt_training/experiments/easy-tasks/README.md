@@ -32,3 +32,10 @@ docker run -it --rm --gpus all \
 export WANDB_PROJECT="ocr"
 welt-train welt_training/experiments/easy-tasks/ocr.yaml
 ```
+
+### Letter Count
+
+```bash
+export WANDB_PROJECT="letter-count"
+welt-train welt_training/experiments/easy-tasks/letter-count.yaml
+```
