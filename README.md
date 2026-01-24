@@ -51,7 +51,7 @@ docker run -it --rm --gpus all \
   --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
   -v "$(pwd)/welt:/app/welt" \
   -v "$(pwd)/welt_training:/app/welt_training" \
-  -v /shared/.cache/huggingface:/root/.cache/huggingface \
+  -v /shared/.cache:/root/.cache \
   -v ~/.netrc:/root/.netrc:ro \
   -e WANDB_PROJECT="ocr" \
   -e CONFIG="welt_training/experiments/easy-tasks/ocr.yaml" \

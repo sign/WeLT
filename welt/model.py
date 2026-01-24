@@ -149,6 +149,9 @@ class WordLatentTransformer(PreTrainedModel):
         """
 
         if self.config.encoding == "UTF-8":
+            assert not isinstance(self.bytes_decoder, CharacterCausalLMWrapper), \
+                "UTF-8 encoding should not use CharacterCausalLMWrapper"
+
             self.bytes_decoder.resize_token_embeddings(self.config.num_tokens, pad_to_multiple_of=8)
             patch_embedding_layers(self.bytes_decoder)
             return self.bytes_decoder.config.hidden_size
