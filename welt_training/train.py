@@ -378,6 +378,19 @@ def train(args: list[str] | None | str = None):  # noqa: C901
         train_dataset = processor.pretokenize_dataset(train_dataset, num_proc=data_args.preprocessing_num_workers)
         train_dataset = pack_dataset(train_dataset, seq_length=block_size)
 
+        # Pad to fixed length for CUDA kernel caching (consistent tensor shapes)
+        def pad_to_fixed_length(example):
+            words = example["words"]
+            seq_lengths = example["seq_lengths"]
+            current_length = len(words)
+            if current_length < block_size:
+                pad_count = block_size - current_length
+                example["words"] = words + ["\x00"] * pad_count  # Null strings as padding
+                example["seq_lengths"] = seq_lengths + [1] * pad_count  # Each padding is a separate "sequence"
+            return example
+
+        train_dataset = train_dataset.map(pad_to_fixed_length, batched=False)
+
     # Wrap streaming datasets with CustomIterableDataset to support with_transform
     if train_dataset:
         train_dataset = wrap_streaming_dataset(train_dataset, data_args.streaming)
