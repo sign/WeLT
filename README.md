@@ -26,10 +26,10 @@ git clone https://github.com/sign/WeLT.git
 cd WeLT
 ```
 
-Install dependencies:
+Build the environment using conda:
 
 ```shell
-conda create -n welt python=3.12 -y
+conda env create -f environment.yml -y
 conda activate welt
 pip install ".[dev]"
 ```
