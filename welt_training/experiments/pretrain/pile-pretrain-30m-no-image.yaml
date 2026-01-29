@@ -1,0 +1,67 @@
+# Model Architecture                                 
+  model_name_or_path: null                                      
+  load_pretrained: false                                
+                                                                                                         
+  # Component models                                     
+  image_encoder_model_name_or_path: null  # No image encoder for text-only                               
+  bytes_encoder_config: welt_training/experiments/pretrain/bert-tiny.json                        
+  latent_transformer_model_name_or_path: EleutherAI/pythia-70m  # Main LM backbone                      
+  bytes_decoder_model_name_or_path: sbintuitions/tiny-lm                                                 
+                                                                                                         
+  # Optional: freeze pretrained components during warmup                                                 
+  warmup_freeze_steps: 0  # Set >0 if using load_pretrained: true                                        
+                                                                                                         
+  # Dataset - The Pile (streaming for large dataset)                                                     
+  dataset_name: monology/pile-uncopyrighted
+  streaming: true                                                                                        
+  max_sequence_length: 2048 #P                                                                               
+  max_word_length: 128                                                                                   
+  block_size: 512                                                                                        
+                                                                                                         
+  # Data Loader                                                                                          
+  dataloader_num_workers: 8                                                                              
+  dataloader_prefetch_factor: 4                                                                          
+  dataloader_pin_memory: true                                                                            
+  dataloader_persistent_workers: true                                                                    
+                                                                                                         
+  # Training
+  remove_unused_columns: false  # Required for WeLT
+  per_device_train_batch_size: 32  #P
+  per_device_eval_batch_size: 32
+  gradient_accumulation_steps: 1  #P
+  output_dir: ./output/welt-pile-pretrain
+  do_train: true
+  max_steps: 143000  #P
+  learning_rate: 1.0e-3  #P
+  lr_scheduler_type: cosine  #P
+  warmup_ratio: 0.01  #P
+  weight_decay: 0.1  #P
+  max_grad_norm: 1.0  #P
+  adam_beta1: 0.9  #P
+  adam_beta2: 0.95  #P
+  adam_epsilon: 1.0e-8  #P
+  optim: adamw_torch_fused
+  seed: 42   
+                                                                                              
+                                                                                                         
+  # Checkpointing                                                                                        
+  save_strategy: steps                                                                                   
+  save_steps: 1000                                                                                       
+  save_total_limit: 3                                                                                    
+                                                                                                         
+  # Evaluation
+  do_eval: true
+  eval_strategy: steps
+  eval_steps: 100000  #P
+  max_eval_samples: 500  
+                                                                         
+                                                                                                         
+  # Logging
+  logging_steps: 10  #P
+  include_tokens_per_second: true
+  include_num_input_tokens_seen: true
+  report_to: wandb                                                           
+                                                                                                         
+  # Precision                                                                                            
+  bf16: true                                                                                             
+  dtype: bfloat16  
