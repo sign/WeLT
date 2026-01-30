@@ -275,31 +275,44 @@ def test_processor_save_and_load_works_without_image_processor(renderer):
         assert isinstance(new_processor.image_processor, NoopImageProcessor)
 
 
-def test_labels_masked_in_shift_blocks(processor):
-    """Test that labels are empty for tokens inside shift blocks (except ShiftIn itself)."""
+def test_labels_masked_in_shift_blocks(renderer):
+    """Test that labels are zeroed for tokens inside shift blocks (except ShiftIn itself)."""
+    processor = TextImageProcessor(
+        pretokenizer=WordsSegmentationTokenizer(),
+        tokenizer=UTF8Tokenizer(),
+        renderer=renderer,
+        image_processor=NoopImageProcessor())
+
     # Use f-string template and let processor segment into words
     text = f"<en>{ControlTokens.ShiftOut}hello{ControlTokens.ShiftIn}<he> שלום"
     words = processor.pretokenize(text)
 
-    labels = processor.get_sequence_labels(words)
-
     # Expected words: BOS, "<en>", SO, "hello", SI, "<he> ", "שלום"
-    # In unpacked mode, each token predicts the next token
-    # Labels should be empty for tokens inside shift blocks (SO and "hello")
+    # Labels inside shift blocks (SO and "hello") should be zeroed in process_single_example
     # ShiftIn keeps its label to predict next word
 
-    # Check exact label content
-    assert labels[0] == "<en>"  # BOS -> "<en>"
-    assert labels[1] == ControlTokens.ShiftOut  # "<en>" -> SO (not inside block yet)
-    assert labels[2] == ""  # SO -> "hello" (inside block, masked)
-    assert labels[3] == ""  # "hello" -> SI (inside block, masked)
-    assert labels[4] == "<he> "  # SI -> "<he> " (exits block, has label)
-    assert labels[5] == "שלום"  # "<he> " -> "שלום"
-    assert labels[6] == ""  # "שלום" -> (last token, no label)
+    result = processor.process_single_example(words, [len(words)])
+
+    # Masked positions (inside shift block): indices 2, 3 (SO and "hello")
+    # These should have zero labels (PAD tokens)
+    for idx in [2, 3]:
+        assert result["labels_input"][idx].sum() == 0, f"labels_input at {idx} should be all zeros"
+        assert result["labels_attention_mask"][idx].sum() == 0, f"labels_attention_mask at {idx} should be all zeros"
+
+    # Non-masked positions should have non-zero labels
+    for idx in [0, 1, 4, 5]:
+        assert result["labels_input"][idx].sum() != 0
+        assert result["labels_attention_mask"][idx].sum() != 0
 
 
-def test_multiple_shift_blocks(processor):
+def test_multiple_shift_blocks(renderer):
     """Test handling of multiple shift blocks in a sequence."""
+    processor = TextImageProcessor(
+        pretokenizer=WordsSegmentationTokenizer(),
+        tokenizer=UTF8Tokenizer(),
+        renderer=renderer,
+        image_processor=NoopImageProcessor())
+
     words = [
         ControlTokens.StartOfText,
         ControlTokens.ShiftOut, "first", "block", ControlTokens.ShiftIn,
@@ -308,22 +321,21 @@ def test_multiple_shift_blocks(processor):
         "end"
     ]
 
-    labels = processor.get_sequence_labels(words)
+    result = processor.process_single_example(words, [len(words)])
 
-    # ShiftOut and content inside blocks should have empty labels
-    # ShiftIn tokens should have labels (to predict next word)
-    assert labels[0]  # BOS
-    assert labels[1] == ""  # ShiftOut (first block)
-    assert labels[2] == ""  # "first" (inside block)
-    assert labels[3] == ""  # "block" (inside block)
-    assert labels[4]  # ShiftIn (exits first block)
-    assert labels[5]  # "middle" (normal token)
-    assert labels[6]  # "token" (normal token)
-    assert labels[7] == ""  # ShiftOut (second block)
-    assert labels[8] == ""  # "second" (inside block)
-    assert labels[9] == ""  # "block" (inside block)
-    assert labels[10]  # ShiftIn (exits second block)
-    assert labels[11] == ""  # "end" (second-to-last, rstripped)
+    # ShiftOut and content inside blocks should have zeroed labels
+    # First block: indices 1, 2, 3 (ShiftOut, "first", "block")
+    # Second block: indices 7, 8, 9 (ShiftOut, "second", "block")
+    masked_indices = [1, 2, 3, 7, 8, 9]
+    for idx in masked_indices:
+        assert result["labels_input"][idx].sum() == 0, f"labels_input at {idx} should be all zeros"
+        assert result["labels_attention_mask"][idx].sum() == 0, f"labels_attention_mask at {idx} should be all zeros"
+
+    # Non-masked positions should have non-zero labels (except last position which has empty label)
+    non_masked_indices = [0, 4, 5, 6, 10]
+    for idx in non_masked_indices:
+        assert result["labels_input"][idx].sum() != 0
+        assert result["labels_attention_mask"][idx].sum() != 0
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
         "max_eval_samples": 5,
 
         # Disable reporting
-        "report_to": [],
+        "report_to": "none",
 
         # Disable checkpointing
         "save_strategy": "no",
@@ -132,7 +132,7 @@ def test_training_without_generation_metrics(temp_output_dir):
         "max_steps": 5,
         "max_train_samples": 10,
         "max_eval_samples": 5,
-        "report_to": [],
+        "report_to": "none",
         "save_strategy": "no",
         "eval_on_start": False,
         "eval_steps": 5,
@@ -183,7 +183,7 @@ def test_training_with_sacrebleu(temp_output_dir):
         "max_steps": 5,
         "max_train_samples": 10,
         "max_eval_samples": 5,
-        "report_to": [],
+        "report_to": "none",
         "save_strategy": "no",
         "eval_on_start": False,
         "eval_steps": 5,
@@ -232,7 +232,7 @@ def test_training_with_streaming(temp_output_dir):
         "max_steps": 5,
         "max_train_samples": 10,
         "max_eval_samples": 5,
-        "report_to": [],
+        "report_to": "none",
         "save_strategy": "no",
         "eval_on_start": False,
         "eval_steps": 5,
@@ -281,7 +281,7 @@ def test_training_determinism(temp_output_dir):
         "max_steps": 3,
         "max_train_samples": 5,
         "max_eval_samples": 3,
-        "report_to": [],
+        "report_to": "none",
         "save_strategy": "no",
         "eval_on_start": False,
         "eval_steps": 3,
