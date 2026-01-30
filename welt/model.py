@@ -108,6 +108,7 @@ class WordLatentTransformer(PreTrainedModel):
             self.bytes_encoder = model_from_config(config.bytes_encoder, AutoModelForMaskedLM,
                                                    config.dtype, load_pretrained, attn_implementation)
             self._prepare_bytes_encoder()
+            self.bytes_encoder_dim = self.bytes_encoder.config.hidden_size
         else:
             self.bytes_encoder = None
             self.bytes_encoder_dim = 0
@@ -125,7 +126,6 @@ class WordLatentTransformer(PreTrainedModel):
         # Small Language Model
         self.bytes_decoder = model_from_config(config.bytes_decoder, AutoModelForCausalLM,
                                                config.dtype, load_pretrained, attn_implementation)
-        self.bytes_encoder_dim = self.bytes_encoder.config.hidden_size
         bytes_decoder_dim = self._prepare_bytes_decoder()
 
         # Mapping layers
@@ -358,11 +358,12 @@ class WordLatentTransformer(PreTrainedModel):
             torch.Tensor: (B, L, T, vocab_size) - logits for each token in each word
         """
         B, L, hidden_dim = latent_vectors.shape  # noqa: N806
+        BL = B * L  # noqa: N806
         _, _, T = target_ids.shape  # noqa: N806
 
         # Step 1: Reshape target_ids from [B, L, T] to [B*L, T]
-        target_ids_flat = target_ids.view(B * L, T)  # [B*L, T]
-        target_mask_flat = target_mask.view(B * L, T)  # [B*L, T]
+        target_ids_flat = target_ids.view(BL, T)  # [B*L, T]
+        target_mask_flat = target_mask.view(BL, T)  # [B*L, T]
 
         # Step 2: Get embeddings for target tokens
         embed_layer = self.bytes_decoder.get_input_embeddings()
@@ -371,7 +372,7 @@ class WordLatentTransformer(PreTrainedModel):
         # Step 3: Each decoder uses only one latent vector (no history)
         # Decoder i uses latent_vectors[:, i]
         # Reshape from [B, L, hidden_dim] to [B*L, hidden_dim] then add sequence dimension
-        latent_vectors_flat = latent_vectors.view(B * L, hidden_dim).unsqueeze(1)  # [B*L, 1, hidden_dim]
+        latent_vectors_flat = latent_vectors.view(BL, 1, hidden_dim)  # [B*L, 1, hidden_dim]
 
         # Step 4: Concatenate single latent vector with character embeddings
         # Each sequence gets only its corresponding latent vector prepended
@@ -392,7 +393,7 @@ class WordLatentTransformer(PreTrainedModel):
         char_logits = all_logits[:, 1:]  # [B*L, T, vocab_size]
 
         # Step 8: Reshape back to [B, L, T, vocab_size]
-        logits = char_logits.view(B, L, *char_logits.shape[1:])
+        logits = char_logits.view(B, L, T, -1)
 
         return logits
 
@@ -471,6 +472,10 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         Call this before training or inference for best performance.
         """
         print("Enabling backend optimizations...")
+
+        # torch.compile related
+        torch._dynamo.config.capture_scalar_outputs = True
+        torch._dynamo.config.cache_size_limit = 128  # Allow more compilations
 
         torch.set_float32_matmul_precision('high')  # Use TF32 for faster matmul
 

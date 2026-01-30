@@ -138,11 +138,6 @@ class TextImageProcessor(ProcessorMixin):
 
             offset += length
 
-        # Mask labels inside shift blocks (except for ShiftIn token)
-        for start, end in get_shift_blocks(words):
-            for i in range(start, end):  # Excludes end (ShiftIn token)
-                labels[i] = ""
-
         return labels
 
     def tokenize_words(self, words: list[str], device=None):
@@ -163,6 +158,12 @@ class TextImageProcessor(ProcessorMixin):
         # Tokenize words with BOS and EOS tokens
         tokenized = self.tokenize_words(words)  # Tokenized inputs
         tokenized_labels = self.tokenize_words(labels)  # Tokenized outputs
+
+        # Mask labels inside shift blocks (except for ShiftIn token)
+        for start, end in get_shift_blocks(words):
+            # Excludes end (ShiftIn token)
+            tokenized_labels.input_ids[start:end] = 0 # PAD token id
+            tokenized_labels.attention_mask[start:end] = 0 # no attention for PAD tokens
 
         # Render images
         input_images, input_images_dimensions = self.render_texts(words)
