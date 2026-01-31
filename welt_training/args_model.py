@@ -32,9 +32,49 @@ class ModelArguments:
     )
 
     image_encoder_model_name_or_path: str | None = listed_model(MODEL_FOR_IMAGE_CLASSIFICATION_MAPPING_NAMES)
+    image_encoder_config: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a JSON config file for the image encoder model. If provided, the model "
+                "will be built from this config instead of loading from image_encoder_model_name_or_path. "
+                "The config file must include 'model_type' field (e.g., 'vit', 'swin')."
+            )
+        },
+    )
     bytes_encoder_model_name_or_path: str | None = listed_model(MODEL_FOR_MASKED_LM_MAPPING_NAMES)
+    bytes_encoder_config: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a JSON config file for the bytes encoder model. If provided, the model "
+                "will be built from this config instead of loading from bytes_encoder_model_name_or_path. "
+                "The config file must include 'model_type' field (e.g., 'bert', 'roberta')."
+            )
+        },
+    )
     latent_transformer_model_name_or_path: str | None = listed_model(MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+    latent_transformer_config: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a JSON config file for the latent transformer model. If provided, the model "
+                "will be built from this config instead of loading from latent_transformer_model_name_or_path. "
+                "The config file must include 'model_type' field (e.g., 'gpt_neox', 'llama', 'gpt2')."
+            )
+        },
+    )
     bytes_decoder_model_name_or_path: str | None = listed_model(MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
+    bytes_decoder_config: str | None = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a JSON config file for the bytes decoder model. If provided, the model "
+                "will be built from this config instead of loading from bytes_decoder_model_name_or_path. "
+                "The config file must include 'model_type' field (e.g., 'gpt2', 'llama')."
+            )
+        },
+    )
 
     load_pretrained: bool = field(default=False, metadata={
         "help": "Whether to load the pretrained weights of the models specified in *_model_name_or_path."

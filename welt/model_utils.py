@@ -70,7 +70,32 @@ CUSTOM_PROCESSORS_ALIAS: dict[str, str] = {
 }
 
 
-def get_model_config(model_name):
+def get_model_config(model_name, config_path: str | None = None):
+    """
+    Get a model configuration.
+
+    Args:
+        model_name: Name of a pretrained model or custom model.
+        config_path: Optional path to a JSON config file. Must include 'model_type'.
+                    If provided, model_name is ignored.
+
+    Returns:
+        A PretrainedConfig instance.
+    """
+    if config_path is not None:
+        import json
+        with open(config_path) as f:
+            config_dict = json.load(f)
+
+        model_type = config_dict.pop("model_type", None)
+        if model_type is None:
+            raise ValueError(
+                f"Config file {config_path} must include 'model_type' field "
+                "(e.g., 'bert', 'gpt2', 'llama')"
+            )
+        # Create config from the model type and provided parameters
+        return AutoConfig.for_model(model_type, **config_dict)
+
     if model_name is None:
         return NoopConfig()
 
@@ -81,9 +106,13 @@ def get_model_config(model_name):
 
 def setup_model(
         image_encoder_name="WinKawaks/vit-tiny-patch16-224",
+        image_encoder_config: str | None = None,
         bytes_encoder_name="prajjwal1/bert-tiny",
+        bytes_encoder_config: str | None = None,
         latent_transformer_name="EleutherAI/pythia-70m",
+        latent_transformer_config: str | None = None,
         bytes_decoder_name="sign/utf8-lm-tiny",
+        bytes_decoder_config: str | None = None,
         pretokenizer_name: str | None = None,
         encoding: Encoding = "UTF-8",
         trust_remote_code=False,
@@ -97,9 +126,13 @@ def setup_model(
     set_seed(seed, deterministic=True)
     enable_full_determinism(seed=seed, warn_only=True)
 
+    # Load image processor - need a pretrained name even when using config
     if image_encoder_name is not None:
         image_processor_name = CUSTOM_PROCESSORS_ALIAS.get(image_encoder_name, image_encoder_name)
         image_processor = AutoImageProcessor.from_pretrained(image_processor_name, use_fast=True)
+    elif image_encoder_config is not None:
+        # When using config file, default to a standard ViT processor
+        image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224", use_fast=True)
     else:
         image_processor = NoopImageProcessor()
 
@@ -111,11 +144,11 @@ def setup_model(
     tokenizer = tokenizer_classes[encoding]()
 
     config = WordLatentTransformerConfig(
-        # All sub-configs are loaded from the respective model names
-        image_encoder=get_model_config(image_encoder_name),
-        bytes_encoder=get_model_config(bytes_encoder_name),
-        latent_transformer=get_model_config(latent_transformer_name),
-        bytes_decoder=get_model_config(bytes_decoder_name),
+        # All sub-configs are loaded from the respective model names or config files
+        image_encoder=get_model_config(image_encoder_name, config_path=image_encoder_config),
+        bytes_encoder=get_model_config(bytes_encoder_name, config_path=bytes_encoder_config),
+        latent_transformer=get_model_config(latent_transformer_name, config_path=latent_transformer_config),
+        bytes_decoder=get_model_config(bytes_decoder_name, config_path=bytes_decoder_config),
         # Other configuration parameters
         modality_dropout=modality_dropout,
         tokenizer_class=tokenizer.__class__.__name__,

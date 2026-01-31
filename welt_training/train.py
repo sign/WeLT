@@ -122,9 +122,13 @@ def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, see
     # Initialize the model
     model, processor, collator = setup_model(
         image_encoder_name=model_args.image_encoder_model_name_or_path,
+        image_encoder_config=model_args.image_encoder_config,
         bytes_encoder_name=model_args.bytes_encoder_model_name_or_path,
+        bytes_encoder_config=model_args.bytes_encoder_config,
         latent_transformer_name=model_args.latent_transformer_model_name_or_path,
+        latent_transformer_config=model_args.latent_transformer_config,
         bytes_decoder_name=model_args.bytes_decoder_model_name_or_path,
+        bytes_decoder_config=model_args.bytes_decoder_config,
         encoding=model_args.encoding,
         trust_remote_code=model_args.trust_remote_code,
         dtype=model_args.dtype,
@@ -257,9 +261,17 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
                 )
 
     if do_train:
-        column_names = list(raw_datasets["train"].features)
+        features = raw_datasets["train"].features
     else:
-        column_names = list(raw_datasets["validation"].features)
+        features = raw_datasets["validation"].features
+
+    # For streaming datasets, features may be None - peek at first example
+    if features is None:
+        dataset = raw_datasets["train"] if do_train else raw_datasets["validation"]
+        first_example = next(iter(dataset))
+        column_names = list(first_example.keys())
+    else:
+        column_names = list(features)
     text_column_name = "text" if "text" in column_names else column_names[0]
 
     def process_split(dataset, split_name: str):
