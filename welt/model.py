@@ -173,6 +173,9 @@ class WordLatentTransformer(PreTrainedModel):
         UTF-16/UTF-32 use fixed-width units (2/4 bytes), requiring the encoder
         to use CharacterEmbedding to handle multi-byte input.
         """
+        self.bytes_encoder.config.tie_word_embeddings = False
+        self.bytes_encoder.all_tied_weights_keys = []
+
         self.bytes_encoder.cls = self.bytes_encoder.decoder = torch.nn.Identity()
         self.bytes_encoder.get_output_embeddings = lambda: None
 

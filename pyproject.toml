@@ -17,8 +17,8 @@ dependencies = [
     "vit-pytorch", # For NaViT model implementation
     # Our packages
     "words-segmentation>=0.0.5", # For pre-tokenization into words
-    "utf8-tokenizer[fast]>=0.6.4", # For tokenization of bytes
-    "pixel-renderer[pangocairo]", # For text rendering into images (thread safe)
+    "utf8-tokenizer[fast]>=0.7.1", # For tokenization of bytes
+    "pixel-renderer[pangocairo]>=0.1.1", # For text rendering into images (thread safe)
 ]
 
 [project.optional-dependencies]

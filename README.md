@@ -31,7 +31,7 @@ Build the environment using conda:
 ```shell
 conda env create -f environment.yml -y
 conda activate welt
-pip install ".[dev]"
+pip install ".[dev,train]"
 ```
 
 Or using docker:
