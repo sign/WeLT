@@ -79,7 +79,7 @@ def test_batch_interference(generation_model_setup):
     # From batch 3: ["a", "b", "a_long_word"] - "a" and "b" should differ
     all_outputs = set(chain.from_iterable(outputs))
     assert len(all_outputs) > 1, \
-        f"All different input produced identical outputs. Model may not be responding to input."
+        "All different input produced identical outputs. Model may not be responding to input."
 
     print("✅ Generation test passed - no batch interference detected")
 

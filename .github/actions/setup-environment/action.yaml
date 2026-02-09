@@ -6,10 +6,6 @@ inputs:
     description: 'Python version to use'
     required: false
     default: '3.12'
-  extra-dependencies:
-    description: 'Extra dependencies to install (e.g., "[dev]")'
-    required: false
-    default: '[dev]'
 
 runs:
   using: 'composite'
@@ -26,5 +22,5 @@ runs:
 
     - name: Install dependencies
       shell: bash
-      run: uv pip install ".${{ inputs.extra-dependencies }}"
+      run: uv pip install ".[dev,train]"
 
