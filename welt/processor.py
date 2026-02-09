@@ -1,3 +1,5 @@
+import json
+import os
 from collections import defaultdict
 
 import datasets
@@ -5,7 +7,7 @@ import torch
 from cachetools import LRUCache
 from datasets import Dataset
 from pixel_renderer import PixelRendererProcessor
-from transformers import ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
+from transformers import AutoImageProcessor, AutoTokenizer, ImageProcessingMixin, PreTrainedTokenizer, ProcessorMixin
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer  # noqa: F401 - for registering AutoTokenizer
 
@@ -16,6 +18,15 @@ from welt.attention import (
 )
 from welt.collator import collate_fn, stack_pad_tensors
 from welt.noop import NoopImageProcessor
+
+PROCESSOR_CONFIG_NAME = "processor_config.json"
+
+ATTRIBUTE_LOADERS = {
+    "pretokenizer": AutoTokenizer.from_pretrained,
+    "tokenizer": AutoTokenizer.from_pretrained,
+    "renderer": PixelRendererProcessor.from_pretrained,
+    "image_processor": AutoImageProcessor.from_pretrained,
+}
 
 
 class TextImageProcessor(ProcessorMixin):
@@ -40,10 +51,7 @@ class TextImageProcessor(ProcessorMixin):
                  max_seq_length: int = 128,
                  max_word_length: int = 32,
                  cache_size: int = 10000):
-        super().__init__(pretokenizer=pretokenizer,
-                         tokenizer=tokenizer,
-                         renderer=renderer,
-                         image_processor=image_processor)
+        self.chat_template = None
 
         assert tokenizer.bos_token_id is not None, "Tokenizer must have a BOS token"
         assert tokenizer.eos_token_id is not None, "Tokenizer must have an EOS token"
@@ -58,6 +66,38 @@ class TextImageProcessor(ProcessorMixin):
         self.cache_size = cache_size
 
         self.images_cache = LRUCache(maxsize=self.cache_size)
+
+    def save_pretrained(self, save_directory, push_to_hub=False, **kwargs):
+        os.makedirs(save_directory, exist_ok=True)
+
+        for attr_name in self.attributes:
+            attr = getattr(self, attr_name)
+            attr_dir = os.path.join(save_directory, attr_name)
+            os.makedirs(attr_dir, exist_ok=True)
+            if hasattr(attr, "_set_processor_class"):
+                attr._set_processor_class(self.__class__.__name__)
+            attr.save_pretrained(attr_dir)
+
+        output = {k: v for k, v in self.__dict__.items()
+                  if k not in self.attributes and isinstance(v, (int, float, str, bool))}
+        output["processor_class"] = self.__class__.__name__
+        config_file = os.path.join(save_directory, PROCESSOR_CONFIG_NAME)
+        with open(config_file, "w") as f:
+            json.dump(output, f, indent=2, sort_keys=True)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        config_file = os.path.join(pretrained_model_name_or_path, PROCESSOR_CONFIG_NAME)
+        with open(config_file) as f:
+            config = json.load(f)
+
+        attrs = {}
+        for attr_name, loader in ATTRIBUTE_LOADERS.items():
+            attr_dir = os.path.join(pretrained_model_name_or_path, attr_name)
+            attrs[attr_name] = loader(attr_dir)
+
+        init_kwargs = {k: v for k, v in config.items() if k != "processor_class"}
+        return cls(**attrs, **init_kwargs)
 
     def render_texts(self, texts: list[str], device=None) -> tuple[torch.Tensor, torch.Tensor]:
         if isinstance(self.image_processor, NoopImageProcessor):
@@ -78,8 +118,7 @@ class TextImageProcessor(ProcessorMixin):
         # Process each shape group and update cache
         for shape, renders in render_groups.items():
             processed = self.image_processor(renders, return_tensors="pt", do_center_crop=False, do_resize=False)
-            # TODO : make dtype configurable
-            pixel_values = processed.pixel_values.to(dtype=torch.bfloat16, **device_kwargs)
+            pixel_values = processed.pixel_values.to(**device_kwargs)
             for i, pixel_value in zip(index_groups[shape], pixel_values, strict=True):
                 self.images_cache[texts[i]] = pixel_value
                 images[i] = pixel_value

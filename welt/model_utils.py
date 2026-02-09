@@ -10,7 +10,6 @@ from transformers import (
     AutoImageProcessor,
     AutoTokenizer,
     PretrainedConfig,
-    enable_full_determinism,
     set_seed,
 )
 from utf8_tokenizer.tokenizer import UTF8Tokenizer, UTF16Tokenizer, UTF32Tokenizer
@@ -123,8 +122,7 @@ def setup_model(
         max_word_length=None,
         quiet=False,
 ):
-    set_seed(seed, deterministic=True)
-    enable_full_determinism(seed=seed, warn_only=True)
+    set_seed(seed)
 
     # Load image processor - need a pretrained name even when using config
     if image_encoder_name is not None:

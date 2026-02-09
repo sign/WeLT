@@ -10,10 +10,13 @@ on:
 
 jobs:
   test:
-    name: Test
+    name: Test (transformers ${{ matrix.transformers }})
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      matrix:
+        transformers: ["<5", ">=5"]
 
     steps:
       - uses: actions/checkout@v5
@@ -21,17 +24,20 @@ jobs:
       - name: Setup environment
         uses: ./.github/actions/setup-environment
 
+      - name: Install transformers version
+        run: uv pip install "transformers[torch]${{ matrix.transformers }}"
+
       - name: Test code
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run pytest -n auto --dist loadscope
 
       - name: Freeze working environment
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.transformers == '<5'
         run: uv pip freeze > working_environment.txt
 
       - name: Commit working environment
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.transformers == '<5'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

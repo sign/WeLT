@@ -274,11 +274,10 @@ class WordLatentTransformer(PreTrainedModel):
 
         concatenated_embeds = torch.cat(embeds, dim=-1)
 
-        # # For dropout, scale embedding by number of zeros in the concatenated embeddings
-        # if len(embeds) > 1 and self.training and self.config.modality_dropout > 0:
-        #     percent_zeros = (concatenated_embeds == 0).sum(dim=-1) / concatenated_embeds.numel()
-        #     scale_factor = 1.0 / (1.0 - percent_zeros)
-        #     concatenated_embeds *= scale_factor.clamp(min=1).unsqueeze(-1)
+        if len(embeds) > 1:
+            active = sum(1 for e in embeds if e.any())
+            if 0 < active < len(embeds):
+                concatenated_embeds = concatenated_embeds * (len(embeds) / active)
 
         return self.encoder_norm(self.encoder_mapping(concatenated_embeds))
 

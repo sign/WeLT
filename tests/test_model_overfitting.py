@@ -11,8 +11,9 @@ from tests.test_model import make_dataset, predict_dataset, setup_tiny_model
 def train_model(setup_function,
                 num_epochs=10,
                 train_texts=None,
-                packing=False):
-    model, processor, collator = setup_function()
+                packing=False,
+                **setup_kwargs):
+    model, processor, collator = setup_function(**setup_kwargs)
 
     if train_texts is None:
         train_texts = ["a b", "b a", "a cat", "a dog"]
@@ -37,8 +38,9 @@ def train_model(setup_function,
         dataloader_drop_last=False,
         warmup_steps=0,  # No warmup for immediate learning
         weight_decay=0.0,  # No regularization for overfitting
-        learning_rate=1e-4,
+        learning_rate=5e-4,
         lr_scheduler_type="constant",  # Keep learning rate constant
+        use_cpu=True,
     )
 
     # Initialize trainer
@@ -63,10 +65,11 @@ def train_model(setup_function,
 @pytest.fixture(scope="module")
 def trained_models():
     """Train the model once and reuse for all tests."""
-    num_epochs = 200
+    num_epochs = 300
+    kwargs = dict(image_encoder_name="NaViT-tiny", modality_dropout=0.15)
     return {
-        "packed": train_model(setup_tiny_model, num_epochs=num_epochs, packing=True),
-        "unpacked": train_model(setup_tiny_model, num_epochs=num_epochs, packing=False)
+        "packed": train_model(setup_tiny_model, num_epochs=num_epochs, packing=True, **kwargs),
+        "unpacked": train_model(setup_tiny_model, num_epochs=num_epochs, packing=False, **kwargs)
     }
 
 
@@ -111,11 +114,19 @@ MODEL_CONFIGURATIONS = [
     ("unpacked", "no_image_encoder"),
 ]
 
+# A tiny image encoder cannot distinguish single-character renders ("a" vs "b"),
+# but CAN distinguish multi-character words ("cat" vs "dat"). See word/byte tests.
+CHAR_LEVEL_CONFIGURATIONS = [c for c in MODEL_CONFIGURATIONS if c[1] != "no_bytes_encoder"]
+
 MODEL_IDs = [f"{config} / {model_type}" for config, model_type in MODEL_CONFIGURATIONS]
+CHAR_LEVEL_IDs = [f"{config} / {model_type}" for config, model_type in CHAR_LEVEL_CONFIGURATIONS]
+
 parameterization = pytest.mark.parametrize("model_configuration", MODEL_CONFIGURATIONS, indirect=True, ids=MODEL_IDs)
+char_level_parameterization = pytest.mark.parametrize(
+    "model_configuration", CHAR_LEVEL_CONFIGURATIONS, indirect=True, ids=CHAR_LEVEL_IDs)
 
 
-@parameterization
+@char_level_parameterization
 def test_character_level_conditioning(model_configuration):
     """Test 1: Character-level conditioning (a b vs a a, b a vs b b)"""
     model, processor, collator = model_configuration
