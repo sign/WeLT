@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import transformers
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -74,9 +75,9 @@ class WordLatentTransformer(PreTrainedModel):
         r"bytes_encoder\.decoder.*"
     ]
 
-    def _initialize_missing_keys(self, missing_keys, is_quantized):
-        """Override to prevent initialization of missing keys when loading from pretrained."""
-        pass
+    def _initialize_missing_keys(self, *args, **kwargs):
+        if int(transformers.__version__.split(".")[0]) >= 5:
+            super()._initialize_missing_keys(*args, **kwargs)
 
     def __init__(self, config: WordLatentTransformerConfig,
                  load_pretrained: bool = False,
@@ -427,8 +428,15 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         super().__init__(*args, **kwargs)
         self._original_decode = None
         self._compile_enabled = False
+        self._logits_processor = None
 
-        self.logits_processor = UTF8ValidationLogitsProcessor()
+    @property
+    def logits_processor(self):
+        # Lazy init: transformers 5 from_pretrained runs __init__ under a meta device context,
+        # which would create the processor's mask tensors on meta device (unusable).
+        if self._logits_processor is None:
+            self._logits_processor = UTF8ValidationLogitsProcessor()
+        return self._logits_processor
 
     def _get_partial_word_prefix(
             self,
@@ -532,7 +540,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         self.bytes_decoder.forward = torch.compile(self.bytes_decoder.forward, mode=compile_mode)
 
         print("  Compiling logits processor...")
-        self.logits_processor = torch.compile(self.logits_processor, mode=compile_mode)
+        self._logits_processor = torch.compile(self.logits_processor, mode=compile_mode)
 
         # Compile bytes_encoder forward (called in _encode_words per word)
         if self.bytes_encoder is not None:

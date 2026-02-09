@@ -8,7 +8,7 @@ authors = [
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "transformers[torch]",
+    "transformers[torch]<5",
     "trl", # For huggingface implementation of pack_dataset
     "datasets",
     "Pillow", # For AutoImageProcessor
@@ -17,7 +17,7 @@ dependencies = [
     "vit-pytorch", # For NaViT model implementation
     # Our packages
     "words-segmentation>=0.0.5", # For pre-tokenization into words
-    "utf8-tokenizer[fast]>=0.7.1", # For tokenization of bytes
+    "utf8-tokenizer[fast]>=0.8.0", # For tokenization of bytes
     "pixel-renderer[pangocairo]>=0.1.4", # For text rendering into images (thread safe)
 ]
 
