@@ -196,7 +196,7 @@ def main():
     num_examples = 0
 
     def open_shard(index: int):
-        path = output_path / f"{prefix}-{index:05d}.jsonl.gz"
+        path = output_path / f"{prefix}-{index:08d}.jsonl.gz"
         logger.info(f"Writing shard: {path.name}")
         return gzip.open(path, "wt")
 
@@ -233,7 +233,7 @@ def main():
     current_file.close()
 
     # Remove empty last shard
-    last_shard_path = output_path / f"{prefix}-{shard_index:05d}.jsonl.gz"
+    last_shard_path = output_path / f"{prefix}-{shard_index:08d}.jsonl.gz"
     if shard_units == 0 and shard_index > 0:
         last_shard_path.unlink()
         shard_index -= 1
