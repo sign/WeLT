@@ -43,7 +43,8 @@ def test_prepare_data_creates_shards(temp_output_dir, monkeypatch):
             "welt-prepare-data",
             "--dataset_name", "wikitext",
             "--dataset_config", "wikitext-2-raw-v1",
-            "--train_split_units", "500",
+            "--train_split_units", "400",
+            "--validation_split_units", "100",
             "--num_units_per_file", "200",
             "--seed", "42",
             "--output_path", temp_output_dir,
@@ -89,7 +90,8 @@ def test_prepare_data_with_language(temp_output_dir, monkeypatch):
             "welt-prepare-data",
             "--dataset_name", "wikitext",
             "--dataset_config", "wikitext-2-raw-v1",
-            "--train_split_units", "200",
+            "--train_split_units", "160",
+            "--validation_split_units", "40",
             "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,
@@ -118,7 +120,8 @@ def test_prepare_data_unit_type_chars(temp_output_dir, monkeypatch):
             "welt-prepare-data",
             "--dataset_name", "wikitext",
             "--dataset_config", "wikitext-2-raw-v1",
-            "--train_split_units", "500",
+            "--train_split_units", "400",
+            "--validation_split_units", "100",
             "--unit_type", "chars",
             "--seed", "42",
             "--output_path", temp_output_dir,
@@ -141,7 +144,8 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
             "welt-prepare-data",
             "--dataset_name", "wikitext",
             "--dataset_config", "wikitext-2-raw-v1",
-            "--train_split_units", "500",
+            "--train_split_units", "400",
+            "--validation_split_units", "100",
             "--max_seq_length", "32",
             "--seed", "42",
             "--output_path", temp_output_dir,
@@ -265,21 +269,7 @@ def test_load_prepared_data_split_aware(temp_output_dir, monkeypatch):
     assert len(result["train"]) + len(result["validation"]) == metadata["num_examples"]
 
 
-def test_load_prepared_data_requires_validation_shards(temp_output_dir, monkeypatch):
+def test_load_prepared_data_requires_validation_shards(temp_output_dir):
     """Test that load_prepared_data raises when validation shards are missing."""
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "welt-prepare-data",
-            "--dataset_name", "wikitext",
-            "--dataset_config", "wikitext-2-raw-v1",
-            "--train_split_units", "500",
-            "--seed", "42",
-            "--output_path", temp_output_dir,
-        ],
-    )
-    main()
-
-    # Without --validation_split_units, shards have no split marker → error
-    with pytest.raises(ValueError, match="validation"):
+    with pytest.raises(ValueError, match="train"):
         load_prepared_data(temp_output_dir)

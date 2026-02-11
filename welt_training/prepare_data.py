@@ -182,8 +182,8 @@ def main():
     parser.add_argument(
         "--train_split_units",
         type=int,
-        default=None,
-        help="Number of units for the train split. If not set, processes the entire dataset.",
+        required=True,
+        help="Number of units for the train split.",
     )
     parser.add_argument(
         "--num_units_per_file",
@@ -212,9 +212,9 @@ def main():
     parser.add_argument(
         "--validation_split_units",
         type=int,
-        default=None,
+        required=True,
         help="Number of units for the validation split. "
-             "Requires --train_split_units. Data is already shuffled before splitting.",
+             "Data is already shuffled before splitting.",
     )
     parser.add_argument(
         "--seed",
@@ -259,17 +259,10 @@ def main():
                 f"language={args.language}")
 
     # Create shard writers
-    if args.validation_split_units is not None:
-        if args.train_split_units is None:
-            parser.error("--train_split_units is required when using --validation_split_units")
-        max_total_units = args.train_split_units + args.validation_split_units
-        logger.info(f"  validation_split_units={args.validation_split_units}, max_total_units={max_total_units}")
-        train_writer = ShardWriter(output_path, prefix, "train", args.num_units_per_file)
-        val_writer = ShardWriter(output_path, prefix, "validation", args.num_units_per_file)
-    else:
-        max_total_units = args.train_split_units
-        train_writer = ShardWriter(output_path, prefix, None, args.num_units_per_file)
-        val_writer = None
+    max_total_units = args.train_split_units + args.validation_split_units
+    logger.info(f"  validation_split_units={args.validation_split_units}, max_total_units={max_total_units}")
+    train_writer = ShardWriter(output_path, prefix, "train", args.num_units_per_file)
+    val_writer = ShardWriter(output_path, prefix, "validation", args.num_units_per_file)
 
     total_units = 0
     total_examples = 0
@@ -278,7 +271,7 @@ def main():
         text_units = num_words if args.unit_type == "words" else len(text)
 
         # Check global limit
-        if max_total_units is not None and total_units + text_units > max_total_units:
+        if total_units + text_units > max_total_units:
             logger.info(f"Reached total units limit ({max_total_units})")
             break
 
@@ -287,7 +280,7 @@ def main():
             record["language"] = args.language
 
         # Fill validation first, then route to train
-        if val_writer is not None and val_writer.total_units < args.validation_split_units:
+        if val_writer.total_units < args.validation_split_units:
             val_writer.write(record, text_units)
         else:
             train_writer.write(record, text_units)
@@ -320,22 +313,21 @@ def main():
         "text_template": args.text_template,
     }
 
-    if val_writer is not None:
-        val_writer.close()
-        metadata["num_shards"] += val_writer.num_shards
-        metadata["validation_split_units"] = args.validation_split_units
-        metadata["splits"] = {
-            "train": {
-                "num_examples": train_writer.num_examples,
-                "total_units": train_writer.total_units,
-                "num_shards": train_writer.num_shards,
-            },
-            "validation": {
-                "num_examples": val_writer.num_examples,
-                "total_units": val_writer.total_units,
-                "num_shards": val_writer.num_shards,
-            },
-        }
+    val_writer.close()
+    metadata["num_shards"] += val_writer.num_shards
+    metadata["validation_split_units"] = args.validation_split_units
+    metadata["splits"] = {
+        "train": {
+            "num_examples": train_writer.num_examples,
+            "total_units": train_writer.total_units,
+            "num_shards": train_writer.num_shards,
+        },
+        "validation": {
+            "num_examples": val_writer.num_examples,
+            "total_units": val_writer.total_units,
+            "num_shards": val_writer.num_shards,
+        },
+    }
 
     metadata_path = output_path / f"{prefix}-metadata.json"
     logger.info(f"Saving metadata to {metadata_path}")
