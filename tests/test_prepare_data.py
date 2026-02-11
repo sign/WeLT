@@ -56,7 +56,8 @@ def test_prepare_data_creates_shards(temp_output_dir, monkeypatch):
     assert len(shard_files) >= 2, f"Expected at least 2 shards, got {len(shard_files)}"
 
     # Verify metadata
-    with open(f"{temp_output_dir}/metadata.json") as f:
+    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
+    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
         metadata = json.load(f)
     assert metadata["format"] == "welt-preprocessed-v1"
     assert metadata["total_units"] <= 500
@@ -103,7 +104,8 @@ def test_prepare_data_with_language(temp_output_dir, monkeypatch):
                 example = json.loads(line)
                 assert example["language"] == "eng_Latn"
 
-    with open(f"{temp_output_dir}/metadata.json") as f:
+    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
+    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
         metadata = json.load(f)
     assert metadata["language"] == "eng_Latn"
 
@@ -124,7 +126,8 @@ def test_prepare_data_unit_type_chars(temp_output_dir, monkeypatch):
     )
     main()
 
-    with open(f"{temp_output_dir}/metadata.json") as f:
+    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
+    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
         metadata = json.load(f)
     assert metadata["unit_type"] == "chars"
     assert metadata["total_units"] <= 500
@@ -146,7 +149,8 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
     )
     main()
 
-    with open(f"{temp_output_dir}/metadata.json") as f:
+    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
+    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
         metadata = json.load(f)
     assert metadata["max_seq_length"] == 32
     assert metadata["total_units"] <= 500

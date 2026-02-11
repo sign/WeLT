@@ -123,14 +123,15 @@ welt-prepare-data \
     --output_path /scratch/data/pretrain
 ```
 
-The output directory contains sharded `.jsonl.gz` files and a `metadata.json` per run:
+The output directory contains sharded `.jsonl.gz` files and a `{prefix}-metadata.json` per dataset:
 
 ```
 /scratch/data/pretrain/
-├── fineweb-sample-10BT-00000.jsonl.gz
-├── fineweb-sample-10BT-00001.jsonl.gz
-├── pile-uncopyrighted-00000.jsonl.gz
-└── metadata.json
+├── fineweb-sample-10BT-00000000.jsonl.gz
+├── fineweb-sample-10BT-00000001.jsonl.gz
+├── fineweb-sample-10BT-metadata.json
+├── pile-uncopyrighted-00000000.jsonl.gz
+└── pile-uncopyrighted-metadata.json
 ```
 
 Then train using the preprocessed data:
@@ -151,7 +152,6 @@ welt-train config.yaml --preprocessed_data_path /scratch/data/pretrain
 | `--max_total_units` | Max total units to sample (optional) |
 | `--num_units_per_file` | Max units per shard file (optional) |
 | `--max_seq_length` | Max words per example; splits long documents using word segmentation |
-| `--max_bytes_per_word` | Max bytes per word for word segmentation (default: 126) |
 | `--seed` | Random seed for shuffling |
 | `--drop_remainder` | Drop partial chunks at document boundaries |
 | `--output_path` | Output directory path (required) |

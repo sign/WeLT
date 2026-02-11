@@ -80,3 +80,4 @@ testpaths = [
 
 [project.scripts]
 welt-train = "welt_training.train:train"
+welt-prepare-data = "welt_training.prepare_data:main"
