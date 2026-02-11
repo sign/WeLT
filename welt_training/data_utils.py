@@ -7,6 +7,13 @@ from datasets import load_dataset
 logger = logging.getLogger(__name__)
 
 
+def extract_text(example: dict, text_column: str = "text", text_template: str | None = None) -> str:
+    """Extract text from a dataset example using a column name or format template."""
+    if text_template is not None:
+        return text_template.format(**example)
+    return example[text_column]
+
+
 def load_prepared_data(prepared_data_path: str):
     """Load preprocessed shards produced by prepare_data.py.
 

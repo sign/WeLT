@@ -21,7 +21,7 @@ from welt.model_utils import setup_model
 from welt_training.args_data import DataTrainingArguments
 from welt_training.args_model import ModelArguments
 from welt_training.args_trainer import WeLTTrainingArguments
-from welt_training.data_utils import load_prepared_data
+from welt_training.data_utils import extract_text, load_prepared_data
 from welt_training.extendable_yaml import resolve_yaml_file
 from welt_training.flops_callback import FlopsCallback
 from welt_training.freeze_callback import FreezeWarmupCallback
@@ -287,7 +287,7 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
         template = data_args.dataset_text_template
         if template is None:
             def mapping_fn(example):
-                return {"text": example[text_column_name]}
+                return {"text": extract_text(example, text_column=text_column_name)}
         else:
             is_single_text_template = isinstance(template, str)
             single_text_template = template \
@@ -295,7 +295,7 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
 
             def mapping_fn(example):
                 if is_single_text_template or split_name == "train":
-                    return {"text": single_text_template.format(**example)}
+                    return {"text": extract_text(example, text_template=single_text_template)}
 
                 prefix = template[0].format(**example)
                 completion = template[1].format(**example)

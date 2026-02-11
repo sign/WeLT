@@ -14,6 +14,8 @@ from pathlib import Path
 from datasets import load_dataset
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
+from welt_training.data_utils import extract_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,11 +98,7 @@ def stream_texts(args):
     stream = stream.shuffle(seed=args.seed, buffer_size=args.shuffle_buffer_size)
 
     for example in stream:
-        if args.text_template:
-            text = args.text_template.format(**example)
-        else:
-            text = example[args.text_column]
-
+        text = extract_text(example, text_column=args.text_column, text_template=args.text_template)
         if text:
             yield text
 
