@@ -25,6 +25,60 @@ def get_shard_prefix(dataset_name: str, dataset_config: str | None) -> str:
     return name
 
 
+class ShardWriter:
+    """Manages writing sharded .jsonl.gz files for a single data split."""
+
+    def __init__(self, output_path: Path, prefix: str, split_name: str | None, num_units_per_file: int | None):
+        self.output_path = output_path
+        self.prefix = prefix
+        self.split_name = split_name
+        self.num_units_per_file = num_units_per_file
+        self.shard_index = 0
+        self.shard_units = 0
+        self.total_units = 0
+        self.num_examples = 0
+        self._current_file = self._open_shard()
+
+    def _shard_path(self, index: int) -> Path:
+        if self.split_name:
+            return self.output_path / f"{self.prefix}-{self.split_name}-{index:08d}.jsonl.gz"
+        return self.output_path / f"{self.prefix}-{index:08d}.jsonl.gz"
+
+    def _open_shard(self):
+        path = self._shard_path(self.shard_index)
+        logger.info(f"Writing shard: {path.name}")
+        return gzip.open(path, "wt")
+
+    def write(self, record: dict, text_units: int):
+        self._current_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.shard_units += text_units
+        self.total_units += text_units
+        self.num_examples += 1
+
+        if self.num_units_per_file is not None and self.shard_units >= self.num_units_per_file:
+            self._current_file.close()
+            logger.info(f"Completed shard {self.shard_index} ({self.shard_units} units)")
+            self.shard_index += 1
+            self.shard_units = 0
+            self._current_file = self._open_shard()
+
+    def close(self):
+        self._current_file.close()
+        # Remove empty last shard
+        if self.shard_units == 0 and self.shard_index > 0:
+            self._shard_path(self.shard_index).unlink()
+            self.shard_index -= 1
+        # Remove shard file if no examples were written at all
+        if self.num_examples == 0:
+            self._shard_path(self.shard_index).unlink(missing_ok=True)
+
+    @property
+    def num_shards(self) -> int:
+        if self.num_examples == 0:
+            return 0
+        return self.shard_index + 1
+
+
 def stream_texts(args):
     """Stream raw text examples from a HuggingFace dataset."""
     load_kwargs = {
@@ -156,6 +210,14 @@ def main():
         help="Drop partial chunks when splitting documents by max_seq_length",
     )
     parser.add_argument(
+        "--validation_split_percentage",
+        type=int,
+        default=None,
+        help="Percentage of examples to assign to validation split (e.g., 5 for 5%%). "
+             "Requires --max_total_units. The first (100 - N)%% of units go to train, "
+             "the remaining N%% go to validation. Data is already shuffled before splitting.",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -197,17 +259,20 @@ def main():
                 f"num_units_per_file={args.num_units_per_file}, max_seq_length={args.max_seq_length}, "
                 f"language={args.language}")
 
-    shard_index = 0
-    shard_units = 0
+    # Create shard writers
+    if args.validation_split_percentage is not None:
+        if args.max_total_units is None:
+            parser.error("--max_total_units is required when using --validation_split_percentage")
+        train_budget = int(args.max_total_units * (100 - args.validation_split_percentage) / 100)
+        logger.info(f"  validation_split_percentage={args.validation_split_percentage}, train_budget={train_budget}")
+        train_writer = ShardWriter(output_path, prefix, "train", args.num_units_per_file)
+        val_writer = ShardWriter(output_path, prefix, "validation", args.num_units_per_file)
+    else:
+        train_writer = ShardWriter(output_path, prefix, None, args.num_units_per_file)
+        val_writer = None
+
     total_units = 0
-    num_examples = 0
-
-    def open_shard(index: int):
-        path = output_path / f"{prefix}-{index:08d}.jsonl.gz"
-        logger.info(f"Writing shard: {path.name}")
-        return gzip.open(path, "wt")
-
-    current_file = open_shard(shard_index)
+    total_examples = 0
 
     for text, num_words in stream_examples(args, pretokenizer):
         text_units = num_words if args.unit_type == "words" else len(text)
@@ -221,42 +286,30 @@ def main():
         if args.language:
             record["language"] = args.language
 
-        current_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-        shard_units += text_units
+        # Once the train budget is filled, route remaining examples to validation
+        if val_writer is not None and train_writer.total_units + text_units > train_budget:
+            val_writer.write(record, text_units)
+        else:
+            train_writer.write(record, text_units)
+
         total_units += text_units
-        num_examples += 1
+        total_examples += 1
 
-        if num_examples % 10000 == 0:
-            logger.info(f"Processed {num_examples} examples, {total_units} total {args.unit_type}")
+        if total_examples % 10000 == 0:
+            logger.info(f"Processed {total_examples} examples, {total_units} total {args.unit_type}")
 
-        # Check shard limit
-        if args.num_units_per_file is not None and shard_units >= args.num_units_per_file:
-            current_file.close()
-            logger.info(f"Completed shard {shard_index} ({shard_units} {args.unit_type})")
-            shard_index += 1
-            shard_units = 0
-            current_file = open_shard(shard_index)
+    train_writer.close()
 
-    current_file.close()
-
-    # Remove empty last shard
-    last_shard_path = output_path / f"{prefix}-{shard_index:08d}.jsonl.gz"
-    if shard_units == 0 and shard_index > 0:
-        last_shard_path.unlink()
-        shard_index -= 1
-
-    num_shards = shard_index + 1
-
-    if num_examples == 0:
+    if total_examples == 0:
         logger.warning("No examples were written. Check dataset and filter settings.")
 
     # Save metadata
     metadata = {
         "format": "welt-preprocessed-v1",
-        "num_examples": num_examples,
+        "num_examples": total_examples,
         "total_units": total_units,
         "unit_type": args.unit_type,
-        "num_shards": num_shards,
+        "num_shards": train_writer.num_shards,
         "source_dataset": args.dataset_name,
         "source_config": args.dataset_config,
         "source_split": args.dataset_split,
@@ -267,15 +320,32 @@ def main():
         "text_template": args.text_template,
     }
 
+    if val_writer is not None:
+        val_writer.close()
+        metadata["num_shards"] += val_writer.num_shards
+        metadata["validation_split_percentage"] = args.validation_split_percentage
+        metadata["splits"] = {
+            "train": {
+                "num_examples": train_writer.num_examples,
+                "total_units": train_writer.total_units,
+                "num_shards": train_writer.num_shards,
+            },
+            "validation": {
+                "num_examples": val_writer.num_examples,
+                "total_units": val_writer.total_units,
+                "num_shards": val_writer.num_shards,
+            },
+        }
+
     metadata_path = output_path / f"{prefix}-metadata.json"
     logger.info(f"Saving metadata to {metadata_path}")
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
     logger.info("Data preparation complete!")
-    logger.info(f"  - Examples: {num_examples}")
+    logger.info(f"  - Examples: {total_examples}")
     logger.info(f"  - Total {args.unit_type}: {total_units}")
-    logger.info(f"  - Shards: {num_shards}")
+    logger.info(f"  - Shards: {metadata['num_shards']}")
     logger.info(f"  - Output: {output_path}")
 
 

@@ -7,6 +7,7 @@ import tempfile
 import pytest
 from datasets import load_dataset
 
+from welt_training.data_utils import load_prepared_data
 from welt_training.prepare_data import get_shard_prefix, main
 
 # --- get_shard_prefix ---
@@ -165,3 +166,123 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
                 example = json.loads(line)
                 words = pretokenizer.tokenize(example["text"])
                 assert len(words) <= 32
+
+
+def test_prepare_data_with_validation_split(temp_output_dir, monkeypatch):
+    """Test that --validation_split_percentage creates split-aware shards."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "welt-prepare-data",
+            "--dataset_name", "wikitext",
+            "--dataset_config", "wikitext-2-raw-v1",
+            "--max_total_units", "1000",
+            "--validation_split_percentage", "20",
+            "--seed", "42",
+            "--output_path", temp_output_dir,
+        ],
+    )
+    main()
+
+    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
+
+    # Verify split-aware shard files were created
+    train_files = sorted(glob.glob(f"{temp_output_dir}/{prefix}-train-*.jsonl.gz"))
+    val_files = sorted(glob.glob(f"{temp_output_dir}/{prefix}-validation-*.jsonl.gz"))
+    assert len(train_files) >= 1, f"Expected at least 1 train shard, got {len(train_files)}"
+    assert len(val_files) >= 1, f"Expected at least 1 validation shard, got {len(val_files)}"
+
+    # No legacy (unsplit) shards should exist
+    all_shards = sorted(glob.glob(f"{temp_output_dir}/*.jsonl.gz"))
+    assert len(all_shards) == len(train_files) + len(val_files)
+
+    # Count examples per split
+    train_examples = 0
+    for path in train_files:
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                example = json.loads(line)
+                assert "text" in example
+                train_examples += 1
+
+    val_examples = 0
+    for path in val_files:
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                example = json.loads(line)
+                assert "text" in example
+                val_examples += 1
+
+    total_examples = train_examples + val_examples
+    assert total_examples > 0
+
+    # Verify validation fraction is roughly correct (20% +/- tolerance)
+    val_fraction = val_examples / total_examples
+    assert 0.05 < val_fraction < 0.45, f"Expected ~20% validation, got {val_fraction:.1%}"
+
+    # Verify metadata
+    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
+        metadata = json.load(f)
+    assert metadata["format"] == "welt-preprocessed-v1"
+    assert metadata["validation_split_percentage"] == 20
+    assert metadata["num_examples"] == total_examples
+    assert "splits" in metadata
+    assert metadata["splits"]["train"]["num_examples"] == train_examples
+    assert metadata["splits"]["validation"]["num_examples"] == val_examples
+    assert metadata["splits"]["train"]["num_shards"] == len(train_files)
+    assert metadata["splits"]["validation"]["num_shards"] == len(val_files)
+
+
+def test_load_prepared_data_split_aware(temp_output_dir, monkeypatch):
+    """Test that load_prepared_data detects and loads split-aware shards."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "welt-prepare-data",
+            "--dataset_name", "wikitext",
+            "--dataset_config", "wikitext-2-raw-v1",
+            "--max_total_units", "1000",
+            "--validation_split_percentage", "20",
+            "--seed", "42",
+            "--output_path", temp_output_dir,
+        ],
+    )
+    main()
+
+    # load_prepared_data should detect split-aware files and load them directly
+    result = load_prepared_data(temp_output_dir)
+    assert "train" in result
+    assert "validation" in result
+    assert len(result["train"]) > 0
+    assert len(result["validation"]) > 0
+    assert "text" in result["train"].features
+    assert "text" in result["validation"].features
+
+    # Total should match what was prepared
+    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
+    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
+        metadata = json.load(f)
+    assert len(result["train"]) + len(result["validation"]) == metadata["num_examples"]
+
+
+def test_load_prepared_data_legacy(temp_output_dir, monkeypatch):
+    """Test that load_prepared_data falls back to legacy mode for unsplit shards."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "welt-prepare-data",
+            "--dataset_name", "wikitext",
+            "--dataset_config", "wikitext-2-raw-v1",
+            "--max_total_units", "500",
+            "--seed", "42",
+            "--output_path", temp_output_dir,
+        ],
+    )
+    main()
+
+    # Without --validation_split_percentage, shards have no split marker
+    result = load_prepared_data(temp_output_dir, validation_split_percentage=10, seed=42)
+    assert "train" in result
+    assert "validation" in result
+    assert len(result["train"]) > 0
+    assert len(result["validation"]) > 0
