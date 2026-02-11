@@ -105,7 +105,7 @@ It streams a HuggingFace dataset, samples raw text with unit-based limits, and w
 welt-prepare-data \
     --dataset_name HuggingFaceFW/fineweb \
     --dataset_config sample-10BT \
-    --max_total_units 3200000000 \
+    --train_split_units 3200000000 \
     --num_units_per_file 100000000 \
     --max_seq_length 512 \
     --seed 42 \
@@ -117,7 +117,7 @@ Multiple datasets can be prepared into the same output directory:
 ```shell
 welt-prepare-data \
     --dataset_name monology/pile-uncopyrighted \
-    --max_total_units 1000000000 \
+    --train_split_units 1000000000 \
     --num_units_per_file 100000000 \
     --max_seq_length 512 \
     --output_path /scratch/data/pretrain
@@ -149,7 +149,8 @@ welt-train config.yaml --prepared_data_path /scratch/data/pretrain
 | `--text_template` | Python format string template (optional) |
 | `--language` | Language tag to store with each example (e.g., "eng_Latn") |
 | `--unit_type` | Unit type for counting: "words" or "chars" (default: "words") |
-| `--max_total_units` | Max total units to sample (optional) |
+| `--train_split_units` | Number of units for the train split (optional) |
+| `--validation_split_units` | Number of units for the validation split (optional; requires `--train_split_units`) |
 | `--num_units_per_file` | Max units per shard file (optional) |
 | `--max_seq_length` | Max words per example; splits long documents using word segmentation |
 | `--max_bytes_per_word` | Max UTF-8 bytes per word; should match training config `max_word_length - 2` (default: 126) |

@@ -178,11 +178,9 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
 
     # Load preprocessed data if path provided
     if data_args.prepared_data_path is not None:
-        return load_prepared_data(
-            data_args.prepared_data_path,
-            validation_split_percentage=data_args.validation_split_percentage,
-            seed=seed,
-        )
+        if data_args.validation_split_percentage is not None:
+            logger.warning("Ignoring validation_split_percentage because prepared_data_path is set.")
+        return load_prepared_data(data_args.prepared_data_path)
 
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.

@@ -180,10 +180,10 @@ def main():
         help="Unit type for counting (default: 'words')",
     )
     parser.add_argument(
-        "--max_total_units",
+        "--train_split_units",
         type=int,
         default=None,
-        help="Max total units to sample. If not set, processes the entire dataset.",
+        help="Number of units for the train split. If not set, processes the entire dataset.",
     )
     parser.add_argument(
         "--num_units_per_file",
@@ -210,12 +210,11 @@ def main():
         help="Drop partial chunks when splitting documents by max_seq_length",
     )
     parser.add_argument(
-        "--validation_split_percentage",
+        "--validation_split_units",
         type=int,
         default=None,
-        help="Percentage of examples to assign to validation split (e.g., 5 for 5%%). "
-             "Requires --max_total_units. The first (100 - N)%% of units go to train, "
-             "the remaining N%% go to validation. Data is already shuffled before splitting.",
+        help="Number of units for the validation split. "
+             "Requires --train_split_units. Data is already shuffled before splitting.",
     )
     parser.add_argument(
         "--seed",
@@ -255,19 +254,20 @@ def main():
     pretokenizer = WordsSegmentationTokenizer(max_bytes=args.max_bytes_per_word)
 
     logger.info("Starting data preparation...")
-    logger.info(f"  unit_type={args.unit_type}, max_total_units={args.max_total_units}, "
+    logger.info(f"  unit_type={args.unit_type}, train_split_units={args.train_split_units}, "
                 f"num_units_per_file={args.num_units_per_file}, max_seq_length={args.max_seq_length}, "
                 f"language={args.language}")
 
     # Create shard writers
-    if args.validation_split_percentage is not None:
-        if args.max_total_units is None:
-            parser.error("--max_total_units is required when using --validation_split_percentage")
-        train_budget = int(args.max_total_units * (100 - args.validation_split_percentage) / 100)
-        logger.info(f"  validation_split_percentage={args.validation_split_percentage}, train_budget={train_budget}")
+    if args.validation_split_units is not None:
+        if args.train_split_units is None:
+            parser.error("--train_split_units is required when using --validation_split_units")
+        max_total_units = args.train_split_units + args.validation_split_units
+        logger.info(f"  validation_split_units={args.validation_split_units}, max_total_units={max_total_units}")
         train_writer = ShardWriter(output_path, prefix, "train", args.num_units_per_file)
         val_writer = ShardWriter(output_path, prefix, "validation", args.num_units_per_file)
     else:
+        max_total_units = args.train_split_units
         train_writer = ShardWriter(output_path, prefix, None, args.num_units_per_file)
         val_writer = None
 
@@ -278,16 +278,16 @@ def main():
         text_units = num_words if args.unit_type == "words" else len(text)
 
         # Check global limit
-        if args.max_total_units is not None and total_units + text_units > args.max_total_units:
-            logger.info(f"Reached max_total_units limit ({args.max_total_units})")
+        if max_total_units is not None and total_units + text_units > max_total_units:
+            logger.info(f"Reached total units limit ({max_total_units})")
             break
 
         record = {"text": text}
         if args.language:
             record["language"] = args.language
 
-        # Once the train budget is filled, route remaining examples to validation
-        if val_writer is not None and train_writer.total_units + text_units > train_budget:
+        # Fill validation first, then route to train
+        if val_writer is not None and val_writer.total_units < args.validation_split_units:
             val_writer.write(record, text_units)
         else:
             train_writer.write(record, text_units)
@@ -323,7 +323,7 @@ def main():
     if val_writer is not None:
         val_writer.close()
         metadata["num_shards"] += val_writer.num_shards
-        metadata["validation_split_percentage"] = args.validation_split_percentage
+        metadata["validation_split_units"] = args.validation_split_units
         metadata["splits"] = {
             "train": {
                 "num_examples": train_writer.num_examples,

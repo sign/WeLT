@@ -378,11 +378,9 @@ def main():
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
     if data_args.prepared_data_path is not None:
-        raw_datasets = load_prepared_data(
-            data_args.prepared_data_path,
-            validation_split_percentage=data_args.validation_split_percentage,
-            seed=training_args.seed,
-        )
+        if data_args.validation_split_percentage is not None:
+            logger.warning("Ignoring validation_split_percentage because prepared_data_path is set.")
+        raw_datasets = load_prepared_data(data_args.prepared_data_path)
 
     elif data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
