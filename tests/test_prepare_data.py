@@ -10,6 +10,35 @@ from datasets import load_dataset
 from welt_training.data_utils import load_prepared_data
 from welt_training.prepare_data import get_shard_prefix, main
 
+WIKITEXT_DATASET = "wikitext"
+WIKITEXT_CONFIG = "wikitext-2-raw-v1"
+
+
+# --- Helpers ---
+
+
+def read_shard_examples(output_dir, pattern="*.jsonl.gz"):
+    """Read all examples from shards matching *pattern* in *output_dir*."""
+    examples = []
+    for path in sorted(glob.glob(f"{output_dir}/{pattern}")):
+        with gzip.open(path, "rt") as f:
+            for line in f:
+                examples.append(json.loads(line))
+    return examples
+
+
+def read_metadata(output_dir, dataset_name=WIKITEXT_DATASET, dataset_config=WIKITEXT_CONFIG):
+    """Load the metadata JSON produced by prepare_data."""
+    prefix = get_shard_prefix(dataset_name, dataset_config)
+    with open(f"{output_dir}/{prefix}-metadata.json") as f:
+        return json.load(f)
+
+
+def shard_paths(output_dir, pattern="*.jsonl.gz"):
+    """Return sorted list of shard file paths matching *pattern*."""
+    return sorted(glob.glob(f"{output_dir}/{pattern}"))
+
+
 # --- get_shard_prefix ---
 
 
@@ -41,8 +70,8 @@ def test_prepare_data_creates_shards(temp_output_dir, monkeypatch):
         "sys.argv",
         [
             "welt-prepare-data",
-            "--dataset_name", "wikitext",
-            "--dataset_config", "wikitext-2-raw-v1",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "400",
             "--validation_split_units", "100",
             "--num_units_per_file", "200",
@@ -52,33 +81,24 @@ def test_prepare_data_creates_shards(temp_output_dir, monkeypatch):
     )
     main()
 
-    # Verify shards were created
-    shard_files = sorted(glob.glob(f"{temp_output_dir}/*.jsonl.gz"))
-    assert len(shard_files) >= 2, f"Expected at least 2 shards, got {len(shard_files)}"
+    shards = shard_paths(temp_output_dir)
+    assert len(shards) >= 2, f"Expected at least 2 shards, got {len(shards)}"
 
-    # Verify metadata
-    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
-    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
-        metadata = json.load(f)
+    metadata = read_metadata(temp_output_dir)
     assert metadata["format"] == "welt-preprocessed-v1"
     assert metadata["total_units"] <= 500
     assert metadata["unit_type"] == "words"
-    assert metadata["num_shards"] == len(shard_files)
+    assert metadata["num_shards"] == len(shards)
 
-    # Verify each shard is valid gzipped JSONL with a "text" field
-    total_examples = 0
-    for path in shard_files:
-        with gzip.open(path, "rt") as f:
-            for line in f:
-                example = json.loads(line)
-                assert "text" in example
-                assert isinstance(example["text"], str)
-                total_examples += 1
-    assert total_examples == metadata["num_examples"]
+    examples = read_shard_examples(temp_output_dir)
+    for example in examples:
+        assert "text" in example
+        assert isinstance(example["text"], str)
+    assert len(examples) == metadata["num_examples"]
 
     # Verify loading with HuggingFace datasets (same path as train.py)
-    ds = load_dataset("json", data_files=shard_files, split="train")
-    assert len(ds) == total_examples
+    ds = load_dataset("json", data_files=shards, split="train")
+    assert len(ds) == len(examples)
     assert "text" in ds.features
 
 
@@ -88,8 +108,8 @@ def test_prepare_data_with_language(temp_output_dir, monkeypatch):
         "sys.argv",
         [
             "welt-prepare-data",
-            "--dataset_name", "wikitext",
-            "--dataset_config", "wikitext-2-raw-v1",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "160",
             "--validation_split_units", "40",
             "--language", "eng_Latn",
@@ -99,16 +119,10 @@ def test_prepare_data_with_language(temp_output_dir, monkeypatch):
     )
     main()
 
-    shard_files = sorted(glob.glob(f"{temp_output_dir}/*.jsonl.gz"))
-    for path in shard_files:
-        with gzip.open(path, "rt") as f:
-            for line in f:
-                example = json.loads(line)
-                assert example["language"] == "eng_Latn"
+    for example in read_shard_examples(temp_output_dir):
+        assert example["language"] == "eng_Latn"
 
-    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
-    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
-        metadata = json.load(f)
+    metadata = read_metadata(temp_output_dir)
     assert metadata["language"] == "eng_Latn"
 
 
@@ -118,8 +132,8 @@ def test_prepare_data_unit_type_chars(temp_output_dir, monkeypatch):
         "sys.argv",
         [
             "welt-prepare-data",
-            "--dataset_name", "wikitext",
-            "--dataset_config", "wikitext-2-raw-v1",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "400",
             "--validation_split_units", "100",
             "--unit_type", "chars",
@@ -129,9 +143,7 @@ def test_prepare_data_unit_type_chars(temp_output_dir, monkeypatch):
     )
     main()
 
-    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
-    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
-        metadata = json.load(f)
+    metadata = read_metadata(temp_output_dir)
     assert metadata["unit_type"] == "chars"
     assert metadata["total_units"] <= 500
 
@@ -142,8 +154,8 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
         "sys.argv",
         [
             "welt-prepare-data",
-            "--dataset_name", "wikitext",
-            "--dataset_config", "wikitext-2-raw-v1",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "400",
             "--validation_split_units", "100",
             "--max_seq_length", "32",
@@ -153,9 +165,7 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
     )
     main()
 
-    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
-    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
-        metadata = json.load(f)
+    metadata = read_metadata(temp_output_dir)
     assert metadata["max_seq_length"] == 32
     assert metadata["total_units"] <= 500
 
@@ -163,13 +173,9 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
     from words_segmentation.tokenizer import WordsSegmentationTokenizer
     pretokenizer = WordsSegmentationTokenizer(max_bytes=126)
 
-    shard_files = sorted(glob.glob(f"{temp_output_dir}/*.jsonl.gz"))
-    for path in shard_files:
-        with gzip.open(path, "rt") as f:
-            for line in f:
-                example = json.loads(line)
-                words = pretokenizer.tokenize(example["text"])
-                assert len(words) <= 32
+    for example in read_shard_examples(temp_output_dir):
+        words = pretokenizer.tokenize(example["text"])
+        assert len(words) <= 32
 
 
 def test_prepare_data_with_validation_split(temp_output_dir, monkeypatch):
@@ -178,8 +184,8 @@ def test_prepare_data_with_validation_split(temp_output_dir, monkeypatch):
         "sys.argv",
         [
             "welt-prepare-data",
-            "--dataset_name", "wikitext",
-            "--dataset_config", "wikitext-2-raw-v1",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "800",
             "--validation_split_units", "200",
             "--seed", "42",
@@ -188,51 +194,39 @@ def test_prepare_data_with_validation_split(temp_output_dir, monkeypatch):
     )
     main()
 
-    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
+    prefix = get_shard_prefix(WIKITEXT_DATASET, WIKITEXT_CONFIG)
 
     # Verify split-aware shard files were created
-    train_files = sorted(glob.glob(f"{temp_output_dir}/{prefix}-train-*.jsonl.gz"))
-    val_files = sorted(glob.glob(f"{temp_output_dir}/{prefix}-validation-*.jsonl.gz"))
+    train_files = shard_paths(temp_output_dir, f"{prefix}-train-*.jsonl.gz")
+    val_files = shard_paths(temp_output_dir, f"{prefix}-validation-*.jsonl.gz")
     assert len(train_files) >= 1, f"Expected at least 1 train shard, got {len(train_files)}"
     assert len(val_files) >= 1, f"Expected at least 1 validation shard, got {len(val_files)}"
 
     # No legacy (unsplit) shards should exist
-    all_shards = sorted(glob.glob(f"{temp_output_dir}/*.jsonl.gz"))
+    all_shards = shard_paths(temp_output_dir)
     assert len(all_shards) == len(train_files) + len(val_files)
 
     # Count examples per split
-    train_examples = 0
-    for path in train_files:
-        with gzip.open(path, "rt") as f:
-            for line in f:
-                example = json.loads(line)
-                assert "text" in example
-                train_examples += 1
+    train_examples = read_shard_examples(temp_output_dir, f"{prefix}-train-*.jsonl.gz")
+    val_examples = read_shard_examples(temp_output_dir, f"{prefix}-validation-*.jsonl.gz")
+    for example in train_examples + val_examples:
+        assert "text" in example
 
-    val_examples = 0
-    for path in val_files:
-        with gzip.open(path, "rt") as f:
-            for line in f:
-                example = json.loads(line)
-                assert "text" in example
-                val_examples += 1
-
-    total_examples = train_examples + val_examples
+    total_examples = len(train_examples) + len(val_examples)
     assert total_examples > 0
 
     # Verify validation fraction is roughly correct (20% +/- tolerance)
-    val_fraction = val_examples / total_examples
+    val_fraction = len(val_examples) / total_examples
     assert 0.05 < val_fraction < 0.45, f"Expected ~20% validation, got {val_fraction:.1%}"
 
     # Verify metadata
-    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
-        metadata = json.load(f)
+    metadata = read_metadata(temp_output_dir)
     assert metadata["format"] == "welt-preprocessed-v1"
     assert metadata["validation_split_units"] == 200
     assert metadata["num_examples"] == total_examples
     assert "splits" in metadata
-    assert metadata["splits"]["train"]["num_examples"] == train_examples
-    assert metadata["splits"]["validation"]["num_examples"] == val_examples
+    assert metadata["splits"]["train"]["num_examples"] == len(train_examples)
+    assert metadata["splits"]["validation"]["num_examples"] == len(val_examples)
     assert metadata["splits"]["train"]["num_shards"] == len(train_files)
     assert metadata["splits"]["validation"]["num_shards"] == len(val_files)
 
@@ -243,8 +237,8 @@ def test_load_prepared_data_split_aware(temp_output_dir, monkeypatch):
         "sys.argv",
         [
             "welt-prepare-data",
-            "--dataset_name", "wikitext",
-            "--dataset_config", "wikitext-2-raw-v1",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "800",
             "--validation_split_units", "200",
             "--seed", "42",
@@ -263,9 +257,7 @@ def test_load_prepared_data_split_aware(temp_output_dir, monkeypatch):
     assert "text" in result["validation"].features
 
     # Total should match what was prepared
-    prefix = get_shard_prefix("wikitext", "wikitext-2-raw-v1")
-    with open(f"{temp_output_dir}/{prefix}-metadata.json") as f:
-        metadata = json.load(f)
+    metadata = read_metadata(temp_output_dir)
     assert len(result["train"]) + len(result["validation"]) == metadata["num_examples"]
 
 
