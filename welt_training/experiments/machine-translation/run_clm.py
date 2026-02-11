@@ -69,6 +69,8 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+from welt_training.data_utils import load_prepared_data
+
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.57.0.dev0")
@@ -245,13 +247,19 @@ class DataTrainingArguments:
             )
         },
     )
+    prepared_data_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to prepared dataset shards (from welt-prepare-data). Skips download and text extraction."
+        },
+    )
 
     def __post_init__(self):
         if self.streaming:
             require_version("datasets>=2.0.0", "The streaming feature requires `datasets>=2.0.0`")
 
-        if self.dataset_name is None and self.train_file is None and self.validation_file is None:
-            raise ValueError("Need either a dataset name or a training/validation file.")
+        if self.dataset_name is None and self.train_file is None and self.validation_file is None and self.prepared_data_path is None:
+            raise ValueError("Need either a dataset name, a training/validation file, or a prepared data path.")
         else:
             if self.train_file is not None:
                 extension = self.train_file.split(".")[-1]
@@ -369,7 +377,14 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if data_args.dataset_name is not None:
+    if data_args.prepared_data_path is not None:
+        raw_datasets = load_prepared_data(
+            data_args.prepared_data_path,
+            validation_split_percentage=data_args.validation_split_percentage,
+            seed=training_args.seed,
+        )
+
+    elif data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         raw_datasets = load_dataset(
             data_args.dataset_name,

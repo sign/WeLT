@@ -1,6 +1,5 @@
 # Heavily adapted from
 # https://github.com/huggingface/transformers/edit/main/examples/pytorch/language-modeling/run_clm.py
-import glob
 import logging
 import math
 import os
@@ -22,6 +21,7 @@ from welt.model_utils import setup_model
 from welt_training.args_data import DataTrainingArguments
 from welt_training.args_model import ModelArguments
 from welt_training.args_trainer import WeLTTrainingArguments
+from welt_training.data_utils import load_prepared_data
 from welt_training.extendable_yaml import resolve_yaml_file
 from welt_training.flops_callback import FlopsCallback
 from welt_training.freeze_callback import FreezeWarmupCallback
@@ -178,19 +178,11 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
 
     # Load preprocessed data if path provided
     if data_args.prepared_data_path is not None:
-        data_files = sorted(glob.glob(os.path.join(data_args.prepared_data_path, "*.jsonl.gz")))
-        if not data_files:
-            raise ValueError(f"No .jsonl.gz files found in {data_args.prepared_data_path}")
-        logger.info(f"Loading prepared data from {len(data_files)} shard(s) in {data_args.prepared_data_path}")
-        train_data = load_dataset("json", data_files=data_files, split="train")
-
-        # Create validation split if needed
-        if data_args.validation_split_percentage:
-            split = train_data.train_test_split(
-                test_size=data_args.validation_split_percentage / 100, seed=seed
-            )
-            return {"train": split["train"], "validation": split["test"]}
-        return {"train": train_data}
+        return load_prepared_data(
+            data_args.prepared_data_path,
+            validation_split_percentage=data_args.validation_split_percentage,
+            seed=seed,
+        )
 
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
