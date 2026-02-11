@@ -36,6 +36,7 @@ train = [
     "scikit-learn", # For "accuracy" metric in evaluate
     "sacrebleu", # For usual bleu/chrF metrics
     "wandb", # For experiment tracking
+    "zstandard", # For compressing the data
 ]
 
 dion = [
