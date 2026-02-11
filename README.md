@@ -96,6 +96,66 @@ You can also turn off a specific encoder after training has completed, for testi
 > all the embeddings of the previous tokens (on the word level). This is done since not all causal LMs support
 > cross-attention, and so we want to avoid using it, and rely on the self-attention mechanism instead.
 
+## Data Preparation
+
+You can prepare datasets offline using the `welt-prepare-data` CLI.
+It streams a HuggingFace dataset, samples raw text with unit-based limits, and writes sharded `.jsonl.gz` files:
+
+```shell
+welt-prepare-data \
+    --dataset_name HuggingFaceFW/fineweb \
+    --dataset_config sample-10BT \
+    --max_total_units 3200000000 \
+    --num_units_per_file 100000000 \
+    --max_seq_length 512 \
+    --seed 42 \
+    --output_path /scratch/data/pretrain
+```
+
+Multiple datasets can be prepared into the same output directory:
+
+```shell
+welt-prepare-data \
+    --dataset_name monology/pile-uncopyrighted \
+    --max_total_units 1000000000 \
+    --num_units_per_file 100000000 \
+    --max_seq_length 512 \
+    --output_path /scratch/data/pretrain
+```
+
+The output directory contains sharded `.jsonl.gz` files and a `metadata.json` per run:
+
+```
+/scratch/data/pretrain/
+├── fineweb-sample-10BT-00000.jsonl.gz
+├── fineweb-sample-10BT-00001.jsonl.gz
+├── pile-uncopyrighted-00000.jsonl.gz
+└── metadata.json
+```
+
+Then train using the preprocessed data:
+
+```shell
+welt-train config.yaml --preprocessed_data_path /scratch/data/pretrain
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--dataset_name` | HuggingFace dataset identifier (required) |
+| `--dataset_config` | Dataset config name (optional) |
+| `--dataset_split` | Split to use (default: "train") |
+| `--text_column` | Column containing text (default: "text") |
+| `--text_template` | Python format string template (optional) |
+| `--language` | Language tag to store with each example (e.g., "eng_Latn") |
+| `--unit_type` | Unit type for counting: "words" or "chars" (default: "words") |
+| `--max_total_units` | Max total units to sample (optional) |
+| `--num_units_per_file` | Max units per shard file (optional) |
+| `--max_seq_length` | Max words per example; splits long documents using word segmentation |
+| `--max_bytes_per_word` | Max bytes per word for word segmentation (default: 126) |
+| `--seed` | Random seed for shuffling |
+| `--drop_remainder` | Drop partial chunks at document boundaries |
+| `--output_path` | Output directory path (required) |
+
 ## Training
 
 Training instructions are available in the [welt_training/README.md](./welt_training/README.md).
