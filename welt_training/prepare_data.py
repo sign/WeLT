@@ -74,6 +74,12 @@ class ShardWriter:
         if self.num_examples == 0:
             self._shard_path(self.shard_index).unlink(missing_ok=True)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
     @property
     def num_shards(self) -> int:
         if self.num_examples == 0:
@@ -259,48 +265,47 @@ def main():
     # Create shard writers
     max_total_units = args.train_split_units + args.validation_split_units
     logger.info(f"  validation_split_units={args.validation_split_units}, max_total_units={max_total_units}")
-    train_writer = ShardWriter(output_path, prefix, "train", args.num_units_per_file)
-    val_writer = ShardWriter(output_path, prefix, "validation", args.num_units_per_file)
+    with (
+        ShardWriter(output_path, prefix, "train", args.num_units_per_file) as train_writer,
+        ShardWriter(output_path, prefix, "validation", args.num_units_per_file) as val_writer,
+    ):
+        total_units = 0
+        total_examples = 0
 
-    total_units = 0
-    total_examples = 0
+        for text, num_words in stream_examples(args, pretokenizer):
+            text_units = num_words if args.unit_type == "words" else len(text)
 
-    for text, num_words in stream_examples(args, pretokenizer):
-        text_units = num_words if args.unit_type == "words" else len(text)
+            # Check global limit
+            if total_units + text_units > max_total_units:
+                logger.info(f"Reached total units limit ({max_total_units})")
+                break
 
-        # Check global limit
-        if total_units + text_units > max_total_units:
-            logger.info(f"Reached total units limit ({max_total_units})")
-            break
+            record = {"text": text}
+            if args.language:
+                record["language"] = args.language
 
-        record = {"text": text}
-        if args.language:
-            record["language"] = args.language
+            # Fill validation first, then route to train
+            if val_writer.total_units < args.validation_split_units:
+                val_writer.write(record, text_units)
+            else:
+                train_writer.write(record, text_units)
 
-        # Fill validation first, then route to train
-        if val_writer.total_units < args.validation_split_units:
-            val_writer.write(record, text_units)
-        else:
-            train_writer.write(record, text_units)
+            total_units += text_units
+            total_examples += 1
 
-        total_units += text_units
-        total_examples += 1
-
-        if total_examples % 10000 == 0:
-            logger.info(f"Processed {total_examples} examples, {total_units} total {args.unit_type}")
-
-    train_writer.close()
+            if total_examples % 10000 == 0:
+                logger.info(f"Processed {total_examples} examples, {total_units} total {args.unit_type}")
 
     if total_examples == 0:
         logger.warning("No examples were written. Check dataset and filter settings.")
 
-    # Save metadata
+    # Save metadata (both writers are closed, final counts are stable)
     metadata = {
         "format": "welt-preprocessed-v1",
         "num_examples": total_examples,
         "total_units": total_units,
         "unit_type": args.unit_type,
-        "num_shards": train_writer.num_shards,
+        "num_shards": train_writer.num_shards + val_writer.num_shards,
         "source_dataset": args.dataset_name,
         "source_config": args.dataset_config,
         "source_split": args.dataset_split,
@@ -309,21 +314,18 @@ def main():
         "seed": args.seed,
         "text_column": args.text_column,
         "text_template": args.text_template,
-    }
-
-    val_writer.close()
-    metadata["num_shards"] += val_writer.num_shards
-    metadata["validation_split_units"] = args.validation_split_units
-    metadata["splits"] = {
-        "train": {
-            "num_examples": train_writer.num_examples,
-            "total_units": train_writer.total_units,
-            "num_shards": train_writer.num_shards,
-        },
-        "validation": {
-            "num_examples": val_writer.num_examples,
-            "total_units": val_writer.total_units,
-            "num_shards": val_writer.num_shards,
+        "validation_split_units": args.validation_split_units,
+        "splits": {
+            "train": {
+                "num_examples": train_writer.num_examples,
+                "total_units": train_writer.total_units,
+                "num_shards": train_writer.num_shards,
+            },
+            "validation": {
+                "num_examples": val_writer.num_examples,
+                "total_units": val_writer.total_units,
+                "num_shards": val_writer.num_shards,
+            },
         },
     }
 
