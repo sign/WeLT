@@ -141,6 +141,10 @@ class WordLatentTransformer(PreTrainedModel):
 
         self.post_init()
 
+        # Ensure consistent dtype across all submodels (some pretrained checkpoints
+        # may have been saved in different dtypes like float16 vs bfloat16)
+        self.to(dtype=config.dtype)
+
     def _prepare_bytes_decoder(self):
         """Wrap bytes_decoder for multi-byte encodings (UTF-16/UTF-32).
 
@@ -656,19 +660,16 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
                                       max_word_length: int,
                                       tokenizer: UTF8Tokenizer,
                                       bytes_generation_config: GenerationConfig | None = None) -> GenerationConfig:
-        default_generation_config_args = dict(
+        defaults = dict(
             max_new_tokens=max_word_length,
             bos_token_id=tokenizer.bos_token_id,
             pad_token_id=tokenizer.pad_token_id,
             eos_token_id=tokenizer.eos_token_id,
         )
-        if bytes_generation_config is None:
-            return GenerationConfig(**default_generation_config_args)
+        if bytes_generation_config is not None:
+            defaults.update(bytes_generation_config.to_diff_dict())
 
-        for key, value in default_generation_config_args.items():
-            setattr(bytes_generation_config, key, value)
-
-        return bytes_generation_config
+        return GenerationConfig(**defaults)
 
     @torch.inference_mode()
     def generate(

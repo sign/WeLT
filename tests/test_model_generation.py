@@ -2,7 +2,7 @@ from itertools import chain
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, GenerationConfig
 
 from tests.test_model import dataset_to_batch, make_dataset, setup_tiny_model
 
@@ -213,6 +213,71 @@ def test_mid_word_generation():
     batch = processor([text], collated=True)
     output = model.generate(**batch, processor=processor, max_generated_words=2)[0]
     assert output == "lo"
+
+
+def test_bytes_generation_config_max_new_tokens():
+    """Test that bytes_generation_config max_new_tokens truncates per-word output."""
+    model = AutoModelForCausalLM.from_pretrained("sign/WeLT-string-repetition", trust_remote_code=True)
+    model.eval()
+
+    _, processor, _ = setup_tiny_model(image_encoder_name=None)
+
+    text = "<text>\x0eHello\x0f<repeat> "
+    batch = processor([text], collated=True)
+
+    # Normal generation should produce "Hello"
+    normal_output = model.generate(**batch, processor=processor, max_generated_words=2)[0]
+    assert normal_output == "Hello"
+
+    # With max_new_tokens=2, per-word byte generation is limited to 2 bytes → "He"
+    truncated_output = model.generate(
+        **batch, processor=processor, max_generated_words=2,
+        bytes_generation_config=GenerationConfig(max_new_tokens=2),
+    )[0]
+    assert len(truncated_output) < len(normal_output), \
+        f"Expected truncated output shorter than '{normal_output}', got '{truncated_output}'"
+    assert truncated_output == normal_output[:2], \
+        f"Expected '{normal_output[:2]}', got '{truncated_output}'"
+
+
+def test_bytes_generation_config_min_new_tokens():
+    """Test that min_new_tokens forces per-word byte generation past the natural word boundary."""
+    model = AutoModelForCausalLM.from_pretrained("sign/WeLT-string-repetition", trust_remote_code=True)
+    model.eval()
+
+    _, processor, _ = setup_tiny_model(image_encoder_name=None)
+
+    text = "<text>\x0eHello\x0f<repeat> "
+    batch = processor([text], collated=True)
+
+    normal_output = model.generate(**batch, processor=processor, max_generated_words=2)[0]
+    assert normal_output == "Hello"
+
+    # min_new_tokens=10 forces at least 10 bytes per word, overriding WordStoppingCriteria
+    min_output = model.generate(
+        **batch, processor=processor, max_generated_words=2,
+        bytes_generation_config=GenerationConfig(min_new_tokens=10),
+    )[0]
+    assert len(min_output) > len(normal_output), \
+        f"Expected longer than '{normal_output}', got '{min_output}'"
+
+
+def test_bytes_generation_config_exact_length():
+    """Test that min_new_tokens=3 and max_new_tokens=3 forces exactly 3 bytes per word."""
+    model = AutoModelForCausalLM.from_pretrained("sign/WeLT-string-repetition", trust_remote_code=True)
+    model.eval()
+
+    _, processor, _ = setup_tiny_model(image_encoder_name=None)
+
+    text = "<text>\x0eHello\x0f<repeat> "
+    batch = processor([text], collated=True)
+
+    output = model.generate(
+        **batch, processor=processor, max_generated_words=1,
+        bytes_generation_config=GenerationConfig(min_new_tokens=3, max_new_tokens=3),
+    )[0]
+    assert len(output) == 3, \
+        f"Expected exactly 3 chars, got '{output}' ({len(output)} chars)"
 
 
 if __name__ == "__main__":

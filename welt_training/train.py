@@ -140,7 +140,7 @@ def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, see
 
     # Load the model from a local path if provided
     if model_args.model_name_or_path:
-        load_model(model, model_args.model_name_or_path)
+        load_model(model, model_args.model_name_or_path, strict=False)
 
     model.enable_backend_optimizations()
     return model, processor, collator
