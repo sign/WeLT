@@ -109,6 +109,11 @@ def stream_texts(args):
             yield text
 
 
+def _count_non_whitespace(text: str) -> int:
+    """Count non-whitespace characters in text."""
+    return sum(1 for c in text if not c.isspace())
+
+
 def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
     """Stream text examples, optionally chunked by max_seq_length.
 
@@ -116,9 +121,16 @@ def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
     languages without whitespace). When max_seq_length is set, long documents
     are split into chunks of at most max_seq_length words.
 
-    Yields (text, num_words) tuples.
+    Yields (text, unit_count) tuples where unit_count matches args.unit_type.
+    When unit_type is "chars", only non-whitespace characters are counted.
     """
+    count_chars = args.unit_type == "chars"
+
     for text in stream_texts(args):
+        if args.max_seq_length is None and count_chars:
+            yield text, _count_non_whitespace(text)
+            continue
+
         words = pretokenizer.tokenize(text)
 
         if args.max_seq_length is None:
@@ -129,7 +141,8 @@ def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
             chunk_words = words[i:i + args.max_seq_length]
             if args.drop_remainder and len(chunk_words) < args.max_seq_length:
                 continue
-            yield "".join(chunk_words), len(chunk_words)
+            chunk_text = "".join(chunk_words)
+            yield chunk_text, _count_non_whitespace(chunk_text) if count_chars else len(chunk_words)
 
 
 def main():
@@ -272,8 +285,7 @@ def main():
         total_units = 0
         total_examples = 0
 
-        for text, num_words in stream_examples(args, pretokenizer):
-            text_units = num_words if args.unit_type == "words" else len(text)
+        for text, text_units in stream_examples(args, pretokenizer):
 
             # Check global limit
             if total_units + text_units > max_total_units:
