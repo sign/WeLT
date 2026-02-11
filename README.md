@@ -134,10 +134,10 @@ The output directory contains sharded `.jsonl.gz` files and a `{prefix}-metadata
 └── pile-uncopyrighted-metadata.json
 ```
 
-Then train using the preprocessed data:
+Then train using the prepared data:
 
 ```shell
-welt-train config.yaml --preprocessed_data_path /scratch/data/pretrain
+welt-train config.yaml --prepared_data_path /scratch/data/pretrain
 ```
 
 | Argument | Description |
@@ -152,6 +152,7 @@ welt-train config.yaml --preprocessed_data_path /scratch/data/pretrain
 | `--max_total_units` | Max total units to sample (optional) |
 | `--num_units_per_file` | Max units per shard file (optional) |
 | `--max_seq_length` | Max words per example; splits long documents using word segmentation |
+| `--max_bytes_per_word` | Max UTF-8 bytes per word; should match training config `max_word_length - 2` (default: 126) |
 | `--seed` | Random seed for shuffling |
 | `--drop_remainder` | Drop partial chunks at document boundaries |
 | `--output_path` | Output directory path (required) |

@@ -157,7 +157,7 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
 
     # Verify each example has at most max_seq_length words
     from words_segmentation.tokenizer import WordsSegmentationTokenizer
-    pretokenizer = WordsSegmentationTokenizer()
+    pretokenizer = WordsSegmentationTokenizer(max_bytes=126)
 
     shard_files = sorted(glob.glob(f"{temp_output_dir}/*.jsonl.gz"))
     for path in shard_files:

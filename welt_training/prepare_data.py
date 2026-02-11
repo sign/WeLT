@@ -144,6 +144,13 @@ def main():
         help="Max words per example. Long documents are split using word segmentation.",
     )
     parser.add_argument(
+        "--max_bytes_per_word",
+        type=int,
+        default=126,
+        help="Max UTF-8 bytes per word. Words exceeding this are split. "
+             "Should match training config: max_word_length - 2 (default: 128 - 2 = 126).",
+    )
+    parser.add_argument(
         "--drop_remainder",
         action="store_true",
         help="Drop partial chunks when splitting documents by max_seq_length",
@@ -183,7 +190,7 @@ def main():
     output_path.mkdir(parents=True, exist_ok=True)
 
     prefix = get_shard_prefix(args.dataset_name, args.dataset_config)
-    pretokenizer = WordsSegmentationTokenizer()
+    pretokenizer = WordsSegmentationTokenizer(max_bytes=args.max_bytes_per_word)
 
     logger.info("Starting data preparation...")
     logger.info(f"  unit_type={args.unit_type}, max_total_units={args.max_total_units}, "
@@ -239,6 +246,9 @@ def main():
         shard_index -= 1
 
     num_shards = shard_index + 1
+
+    if num_examples == 0:
+        logger.warning("No examples were written. Check dataset and filter settings.")
 
     # Save metadata
     metadata = {

@@ -1,10 +1,10 @@
 # Heavily adapted from
 # https://github.com/huggingface/transformers/edit/main/examples/pytorch/language-modeling/run_clm.py
+import glob
 import logging
 import math
 import os
 import sys
-import glob
 
 import datasets
 import transformers
@@ -177,11 +177,11 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
     # https://huggingface.co/docs/datasets/loading_datasets.
 
     # Load preprocessed data if path provided
-    if data_args.preprocessed_data_path is not None:
-        data_files = sorted(glob.glob(os.path.join(data_args.preprocessed_data_path, "*.jsonl.gz")))
+    if data_args.prepared_data_path is not None:
+        data_files = sorted(glob.glob(os.path.join(data_args.prepared_data_path, "*.jsonl.gz")))
         if not data_files:
-            raise ValueError(f"No .jsonl.gz files found in {data_args.preprocessed_data_path}")
-        logger.info(f"Loading preprocessed data from {len(data_files)} shard(s) in {data_args.preprocessed_data_path}")
+            raise ValueError(f"No .jsonl.gz files found in {data_args.prepared_data_path}")
+        logger.info(f"Loading prepared data from {len(data_files)} shard(s) in {data_args.prepared_data_path}")
         train_data = load_dataset("json", data_files=data_files, split="train")
 
         # Create validation split if needed
