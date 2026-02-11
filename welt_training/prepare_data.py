@@ -109,11 +109,6 @@ def stream_texts(args):
             yield text
 
 
-def _count_non_whitespace(text: str) -> int:
-    """Count non-whitespace characters in text."""
-    return sum(1 for c in text if not c.isspace())
-
-
 def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
     """Stream text examples, optionally chunked by max_seq_length.
 
@@ -122,27 +117,25 @@ def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
     are split into chunks of at most max_seq_length words.
 
     Yields (text, unit_count) tuples where unit_count matches args.unit_type.
-    When unit_type is "chars", only non-whitespace characters are counted.
+    When unit_type is "chars", characters are counted via token lengths
+    (whitespace excluded by the tokenizer).
     """
     count_chars = args.unit_type == "chars"
 
     for text in stream_texts(args):
-        if args.max_seq_length is None and count_chars:
-            yield text, _count_non_whitespace(text)
-            continue
-
         words = pretokenizer.tokenize(text)
+        unit_count = sum(len(w) for w in words) if count_chars else len(words)
 
         if args.max_seq_length is None:
-            yield text, len(words)
-            continue
-
-        for i in range(0, len(words), args.max_seq_length):
-            chunk_words = words[i:i + args.max_seq_length]
-            if args.drop_remainder and len(chunk_words) < args.max_seq_length:
-                continue
-            chunk_text = "".join(chunk_words)
-            yield chunk_text, _count_non_whitespace(chunk_text) if count_chars else len(chunk_words)
+            yield text, unit_count
+        else:
+            for i in range(0, len(words), args.max_seq_length):
+                chunk_words = words[i:i + args.max_seq_length]
+                if args.drop_remainder and len(chunk_words) < args.max_seq_length:
+                    continue
+                chunk_text = "".join(chunk_words)
+                chunk_units = sum(len(w) for w in chunk_words) if count_chars else len(chunk_words)
+                yield chunk_text, chunk_units
 
 
 def main():
