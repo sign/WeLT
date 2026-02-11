@@ -174,6 +174,23 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.
 
+    # Load preprocessed data if path provided
+    if data_args.preprocessed_data_path is not None:
+        import glob
+        data_files = sorted(glob.glob(os.path.join(data_args.preprocessed_data_path, "*.jsonl.gz")))
+        if not data_files:
+            raise ValueError(f"No .jsonl.gz files found in {data_args.preprocessed_data_path}")
+        logger.info(f"Loading preprocessed data from {len(data_files)} shard(s) in {data_args.preprocessed_data_path}")
+        train_data = load_dataset("json", data_files=data_files, split="train")
+
+        # Create validation split if needed
+        if data_args.validation_split_percentage:
+            split = train_data.train_test_split(
+                test_size=data_args.validation_split_percentage / 100, seed=42
+            )
+            return {"train": split["train"], "validation": split["test"]}
+        return {"train": train_data}
+
     if data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         raw_datasets = load_dataset(
