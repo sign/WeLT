@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import sys
+import glob
 
 import datasets
 import transformers
@@ -176,7 +177,6 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
 
     # Load preprocessed data if path provided
     if data_args.preprocessed_data_path is not None:
-        import glob
         data_files = sorted(glob.glob(os.path.join(data_args.preprocessed_data_path, "*.jsonl.gz")))
         if not data_files:
             raise ValueError(f"No .jsonl.gz files found in {data_args.preprocessed_data_path}")
