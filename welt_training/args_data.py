@@ -98,7 +98,9 @@ class DataTrainingArguments:
     )
     prepared_data_path: str | None = field(
         default=None,
-        metadata={"help": "Path to prepared dataset shards (from welt-prepare-data). Skips download and text extraction."},
+        metadata={
+            "help": "Path to prepared dataset shards (from welt-prepare-data). Skips download and text extraction."
+        },
     )
 
     def __post_init__(self):
