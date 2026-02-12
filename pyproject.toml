@@ -81,3 +81,4 @@ testpaths = [
 [project.scripts]
 welt-train = "welt_training.train:train"
 welt-prepare-data = "welt_training.prepare_data:main"
+welt-verify-data = "welt_training.verify_data:main"

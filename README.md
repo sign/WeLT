@@ -160,6 +160,16 @@ welt-train config.yaml --prepared_data_path /scratch/data/pretrain
 | `--drop_remainder` | Drop partial chunks at document boundaries |
 | `--output_path` | Output directory path (required) |
 
+### Verifying Prepared Data
+
+After preparing data, verify integrity with `welt-verify-data`:
+
+```shell
+welt-verify-data --data_path /scratch/data/pretrain
+```
+
+This checks that shard counts and example counts match the metadata, and warns if train/validation splits from the same source were created separately (risking data contamination).
+
 ## Training
 
 Training instructions are available in the [welt_training/README.md](./welt_training/README.md).
