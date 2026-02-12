@@ -97,6 +97,26 @@ def test_verify_contamination_warning(temp_dir):
     assert any("WARN" in m and "overlap" in m for m in messages)
 
 
+def test_verify_multiple_datasets(temp_dir):
+    """Multiple datasets in the same directory should be verified independently."""
+    # Dataset A: 3 train examples in 1 shard
+    write_shard(f"{temp_dir}/ds-a-train-00000000.jsonl.gz",
+                [{"text": f"a{i}"} for i in range(3)])
+    write_metadata(f"{temp_dir}/ds-a-train-metadata.json",
+                   make_metadata("train", 3, 1, source_dataset="dataset-A"))
+
+    # Dataset B: 2 train examples in 1 shard
+    write_shard(f"{temp_dir}/ds-b-train-00000000.jsonl.gz",
+                [{"text": f"b{i}"} for i in range(2)])
+    write_metadata(f"{temp_dir}/ds-b-train-metadata.json",
+                   make_metadata("train", 2, 1, source_dataset="dataset-B"))
+
+    passed, messages = verify(temp_dir)
+    assert passed
+    assert any("ds-a/train" in m for m in messages)
+    assert any("ds-b/train" in m for m in messages)
+
+
 def test_verify_no_contamination_when_created_together(temp_dir):
     """Splits created together should pass contamination check."""
     write_shard(f"{temp_dir}/ds-train-00000000.jsonl.gz", [{"text": "a"}])
@@ -109,6 +129,7 @@ def test_verify_no_contamination_when_created_together(temp_dir):
     passed, messages = verify(temp_dir)
     assert passed
     assert any("no overlap" in m for m in messages)
+    assert any("ds/contamination" in m for m in messages)
 
 
 def test_verify_no_contamination_different_sources(temp_dir):

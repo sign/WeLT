@@ -14,15 +14,23 @@ import sys
 from welt_training.data_utils import find_shard_files
 
 
-def discover_splits(data_path):
-    """Find all per-split metadata files and return {split_name: metadata_dict}."""
-    splits = {}
+def discover_metadata(data_path):
+    """Find all per-split metadata files and return ``[(prefix, metadata)]``.
+
+    Each metadata file is named ``{prefix}-{split}-metadata.json``.  The prefix
+    is derived from the filename and the ``split`` field inside the JSON so that
+    multiple datasets in one directory are handled correctly.
+    """
+    entries = []
     for path in sorted(glob.glob(os.path.join(data_path, "*-metadata.json"))):
         with open(path) as f:
             metadata = json.load(f)
         split_name = metadata["split"]
-        splits[split_name] = metadata
-    return splits
+        filename = os.path.basename(path)
+        suffix = f"-{split_name}-metadata.json"
+        prefix = filename[: -len(suffix)]
+        entries.append((prefix, metadata))
+    return entries
 
 
 def count_shard_examples(shard_files):
@@ -40,42 +48,52 @@ def verify(data_path):
     messages = []
     passed = True
 
-    # 1. Discover splits
-    splits = discover_splits(data_path)
-    if not splits:
+    # 1. Discover metadata (prefix-aware)
+    entries = discover_metadata(data_path)
+    if not entries:
         messages.append("FAIL: No *-metadata.json files found.")
         return False, messages
 
-    messages.append(f"Found splits: {', '.join(splits)}")
+    prefixes = sorted({p for p, _ in entries})
+    splits = sorted({m["split"] for _, m in entries})
+    messages.append(f"Found {len(entries)} metadata file(s): {len(prefixes)} dataset(s), splits: {', '.join(splits)}")
 
-    # 2. Per-split shard consistency
-    for split_name, metadata in splits.items():
-        shard_files = find_shard_files(data_path, split_name)
+    # 2. Per-dataset, per-split shard consistency
+    for prefix, metadata in entries:
+        split_name = metadata["split"]
+        label = f"{prefix}/{split_name}"
+        shard_files = find_shard_files(data_path, split_name, prefix=prefix)
 
         expected_shards = metadata["num_shards"]
         actual_shards = len(shard_files)
         if actual_shards != expected_shards:
             messages.append(
-                f"FAIL [{split_name}]: Expected {expected_shards} shards, found {actual_shards}."
+                f"FAIL [{label}]: Expected {expected_shards} shards, found {actual_shards}."
             )
             passed = False
         else:
-            messages.append(f"OK   [{split_name}]: {actual_shards} shard(s)")
+            messages.append(f"OK   [{label}]: {actual_shards} shard(s)")
 
         expected_examples = metadata["num_examples"]
         actual_examples = count_shard_examples(shard_files)
         if actual_examples != expected_examples:
             messages.append(
-                f"FAIL [{split_name}]: Expected {expected_examples} examples, found {actual_examples}."
+                f"FAIL [{label}]: Expected {expected_examples} examples, found {actual_examples}."
             )
             passed = False
         else:
-            messages.append(f"OK   [{split_name}]: {actual_examples} example(s)")
+            messages.append(f"OK   [{label}]: {actual_examples} example(s)")
 
-    # 3. Data contamination check
-    if "train" in splits and "validation" in splits:
-        train_meta = splits["train"]
-        val_meta = splits["validation"]
+    # 3. Data contamination check (per dataset)
+    by_prefix = {}
+    for prefix, metadata in entries:
+        by_prefix.setdefault(prefix, {})[metadata["split"]] = metadata
+
+    for prefix, split_metas in by_prefix.items():
+        if "train" not in split_metas or "validation" not in split_metas:
+            continue
+        train_meta = split_metas["train"]
+        val_meta = split_metas["validation"]
         same_source = (
             train_meta["source_dataset"] == val_meta["source_dataset"]
             and train_meta["source_config"] == val_meta["source_config"]
@@ -84,11 +102,11 @@ def verify(data_path):
         if same_source:
             if not train_meta.get("created_with_another_split") or not val_meta.get("created_with_another_split"):
                 messages.append(
-                    "WARN: Train and validation share the same source but were not created together. "
+                    f"WARN [{prefix}]: Train and validation share the same source but were not created together. "
                     "Examples may overlap."
                 )
             else:
-                messages.append("OK   [contamination]: Splits created together, no overlap risk.")
+                messages.append(f"OK   [{prefix}/contamination]: Splits created together, no overlap risk.")
 
     return passed, messages
 

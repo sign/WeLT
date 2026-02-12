@@ -14,9 +14,15 @@ def extract_text(example: dict, text_column: str = "text", text_template: str | 
     return example[text_column]
 
 
-def find_shard_files(data_path: str, split_name: str) -> list[str]:
-    """Return sorted shard files for a given split in a prepared data directory."""
-    return sorted(glob.glob(os.path.join(data_path, f"*-{split_name}-*.jsonl.gz")))
+def find_shard_files(data_path: str, split_name: str, prefix: str | None = None) -> list[str]:
+    """Return sorted shard files for a given split in a prepared data directory.
+
+    When *prefix* is given, only shards for that specific dataset are matched.
+    Without it, shards from all datasets in the directory are returned (used by
+    :func:`load_prepared_data` to load multi-dataset mixtures).
+    """
+    name = f"{prefix}-{split_name}" if prefix else f"*-{split_name}"
+    return sorted(glob.glob(os.path.join(data_path, f"{name}-*.jsonl.gz")))
 
 
 def load_prepared_data(prepared_data_path: str):

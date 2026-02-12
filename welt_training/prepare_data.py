@@ -75,6 +75,7 @@ class ShardWriter:
     def close(self):
         if self._current_file is not None:
             self._current_file.close()
+            self._current_file = None
             self._num_shards += 1
 
     def __enter__(self):
@@ -296,11 +297,9 @@ def main():
                 logger.info(f"Reached total units limit ({max_total_units})")
                 break
 
-            record = {"text": text}
+            record = {"text": text, "language": args.language}
             if id_value is not None:
                 record["id"] = id_value
-            if args.language:
-                record["language"] = args.language
 
             # Fill validation first, then route to train
             if val_writer.total_units < args.validation_split_units:
