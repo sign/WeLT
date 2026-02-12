@@ -27,10 +27,10 @@ def read_shard_examples(output_dir, pattern="*.jsonl.gz"):
     return examples
 
 
-def read_metadata(output_dir, dataset_name=WIKITEXT_DATASET, dataset_config=WIKITEXT_CONFIG):
-    """Load the metadata JSON produced by prepare_data."""
+def read_metadata(output_dir, split_name, dataset_name=WIKITEXT_DATASET, dataset_config=WIKITEXT_CONFIG):
+    """Load the per-split metadata JSON produced by prepare_data."""
     prefix = get_shard_prefix(dataset_name, dataset_config)
-    with open(f"{output_dir}/{prefix}-metadata.json") as f:
+    with open(f"{output_dir}/{prefix}-{split_name}-metadata.json") as f:
         return json.load(f)
 
 
@@ -75,6 +75,8 @@ def test_prepare_data_creates_shards(temp_output_dir, monkeypatch):
             "--train_split_units", "400",
             "--validation_split_units", "100",
             "--num_units_per_file", "200",
+            "--max_seq_length", "1024",
+            "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,
         ],
@@ -84,17 +86,18 @@ def test_prepare_data_creates_shards(temp_output_dir, monkeypatch):
     shards = shard_paths(temp_output_dir)
     assert len(shards) >= 2, f"Expected at least 2 shards, got {len(shards)}"
 
-    metadata = read_metadata(temp_output_dir)
-    assert metadata["format"] == "welt-preprocessed-v1"
-    assert metadata["total_units"] <= 500
-    assert metadata["unit_type"] == "words"
-    assert metadata["num_shards"] == len(shards)
+    train_meta = read_metadata(temp_output_dir, "train")
+    val_meta = read_metadata(temp_output_dir, "validation")
+    assert train_meta["format"] == "welt-preprocessed-v1"
+    assert train_meta["total_units"] + val_meta["total_units"] <= 500
+    assert train_meta["unit_type"] == "words"
+    assert train_meta["num_shards"] + val_meta["num_shards"] == len(shards)
 
     examples = read_shard_examples(temp_output_dir)
     for example in examples:
         assert "text" in example
         assert isinstance(example["text"], str)
-    assert len(examples) == metadata["num_examples"]
+    assert len(examples) == train_meta["num_examples"] + val_meta["num_examples"]
 
     # Verify loading with HuggingFace datasets (same path as train.py)
     ds = load_dataset("json", data_files=shards, split="train")
@@ -112,6 +115,7 @@ def test_prepare_data_with_language(temp_output_dir, monkeypatch):
             "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "160",
             "--validation_split_units", "40",
+            "--max_seq_length", "1024",
             "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,
@@ -122,8 +126,8 @@ def test_prepare_data_with_language(temp_output_dir, monkeypatch):
     for example in read_shard_examples(temp_output_dir):
         assert example["language"] == "eng_Latn"
 
-    metadata = read_metadata(temp_output_dir)
-    assert metadata["language"] == "eng_Latn"
+    assert read_metadata(temp_output_dir, "train")["language"] == "eng_Latn"
+    assert read_metadata(temp_output_dir, "validation")["language"] == "eng_Latn"
 
 
 def test_prepare_data_unit_type_chars(temp_output_dir, monkeypatch):
@@ -137,15 +141,17 @@ def test_prepare_data_unit_type_chars(temp_output_dir, monkeypatch):
             "--train_split_units", "400",
             "--validation_split_units", "100",
             "--unit_type", "chars",
+            "--max_seq_length", "1024",
+            "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,
         ],
     )
     main()
 
-    metadata = read_metadata(temp_output_dir)
-    assert metadata["unit_type"] == "chars"
-    assert metadata["total_units"] <= 500
+    meta = read_metadata(temp_output_dir, "validation")
+    assert meta["unit_type"] == "chars"
+    assert meta["total_units"] <= 500
 
 
 def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
@@ -159,15 +165,17 @@ def test_prepare_data_with_max_seq_length(temp_output_dir, monkeypatch):
             "--train_split_units", "400",
             "--validation_split_units", "100",
             "--max_seq_length", "32",
+            "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,
         ],
     )
     main()
 
-    metadata = read_metadata(temp_output_dir)
-    assert metadata["max_seq_length"] == 32
-    assert metadata["total_units"] <= 500
+    train_meta = read_metadata(temp_output_dir, "train")
+    val_meta = read_metadata(temp_output_dir, "validation")
+    assert train_meta["max_seq_length"] == 32
+    assert train_meta["total_units"] + val_meta["total_units"] <= 500
 
     # Verify each example has at most max_seq_length words
     from words_segmentation.tokenizer import WordsSegmentationTokenizer
@@ -188,6 +196,8 @@ def test_prepare_data_with_validation_split(temp_output_dir, monkeypatch):
             "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "800",
             "--validation_split_units", "200",
+            "--max_seq_length", "1024",
+            "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,
         ],
@@ -219,16 +229,14 @@ def test_prepare_data_with_validation_split(temp_output_dir, monkeypatch):
     val_fraction = len(val_examples) / total_examples
     assert 0.05 < val_fraction < 0.45, f"Expected ~20% validation, got {val_fraction:.1%}"
 
-    # Verify metadata
-    metadata = read_metadata(temp_output_dir)
-    assert metadata["format"] == "welt-preprocessed-v1"
-    assert metadata["validation_split_units"] == 200
-    assert metadata["num_examples"] == total_examples
-    assert "splits" in metadata
-    assert metadata["splits"]["train"]["num_examples"] == len(train_examples)
-    assert metadata["splits"]["validation"]["num_examples"] == len(val_examples)
-    assert metadata["splits"]["train"]["num_shards"] == len(train_files)
-    assert metadata["splits"]["validation"]["num_shards"] == len(val_files)
+    # Verify per-split metadata
+    train_meta = read_metadata(temp_output_dir, "train")
+    val_meta = read_metadata(temp_output_dir, "validation")
+    assert train_meta["format"] == "welt-preprocessed-v1"
+    assert train_meta["num_examples"] == len(train_examples)
+    assert val_meta["num_examples"] == len(val_examples)
+    assert train_meta["num_shards"] == len(train_files)
+    assert val_meta["num_shards"] == len(val_files)
 
 
 def test_load_prepared_data_split_aware(temp_output_dir, monkeypatch):
@@ -241,6 +249,8 @@ def test_load_prepared_data_split_aware(temp_output_dir, monkeypatch):
             "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "800",
             "--validation_split_units", "200",
+            "--max_seq_length", "1024",
+            "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,
         ],
@@ -257,11 +267,98 @@ def test_load_prepared_data_split_aware(temp_output_dir, monkeypatch):
     assert "text" in result["validation"].features
 
     # Total should match what was prepared
-    metadata = read_metadata(temp_output_dir)
-    assert len(result["train"]) + len(result["validation"]) == metadata["num_examples"]
+    train_meta = read_metadata(temp_output_dir, "train")
+    val_meta = read_metadata(temp_output_dir, "validation")
+    assert len(result["train"]) + len(result["validation"]) == train_meta["num_examples"] + val_meta["num_examples"]
 
 
-def test_load_prepared_data_requires_validation_shards(temp_output_dir):
-    """Test that load_prepared_data raises when validation shards are missing."""
-    with pytest.raises(ValueError, match="train"):
+def test_load_prepared_data_requires_some_shards(temp_output_dir):
+    """Test that load_prepared_data raises when no shards exist."""
+    with pytest.raises(ValueError, match="No"):
         load_prepared_data(temp_output_dir)
+
+
+def test_prepare_data_train_only(temp_output_dir, monkeypatch):
+    """Test that setting validation_split_units=0 creates only train shards."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "welt-prepare-data",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
+            "--train_split_units", "400",
+            "--max_seq_length", "1024",
+            "--language", "eng_Latn",
+            "--seed", "42",
+            "--output_path", temp_output_dir,
+        ],
+    )
+    main()
+
+    prefix = get_shard_prefix(WIKITEXT_DATASET, WIKITEXT_CONFIG)
+    train_files = shard_paths(temp_output_dir, f"{prefix}-train-*.jsonl.gz")
+    val_files = shard_paths(temp_output_dir, f"{prefix}-validation-*.jsonl.gz")
+    assert len(train_files) >= 1
+    assert len(val_files) == 0
+
+    metadata = read_metadata(temp_output_dir, "train")
+    assert metadata["num_examples"] > 0
+    assert not glob.glob(f"{temp_output_dir}/*-validation-metadata.json")
+
+    result = load_prepared_data(temp_output_dir)
+    assert "train" in result
+    assert "validation" not in result
+
+
+def test_prepare_data_validation_only(temp_output_dir, monkeypatch):
+    """Test that setting train_split_units=0 creates only validation shards."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "welt-prepare-data",
+            "--dataset_name", WIKITEXT_DATASET,
+            "--dataset_config", WIKITEXT_CONFIG,
+            "--validation_split_units", "200",
+            "--max_seq_length", "1024",
+            "--language", "eng_Latn",
+            "--seed", "42",
+            "--output_path", temp_output_dir,
+        ],
+    )
+    main()
+
+    prefix = get_shard_prefix(WIKITEXT_DATASET, WIKITEXT_CONFIG)
+    train_files = shard_paths(temp_output_dir, f"{prefix}-train-*.jsonl.gz")
+    val_files = shard_paths(temp_output_dir, f"{prefix}-validation-*.jsonl.gz")
+    assert len(train_files) == 0
+    assert len(val_files) >= 1
+
+    metadata = read_metadata(temp_output_dir, "validation")
+    assert metadata["num_examples"] > 0
+    assert not glob.glob(f"{temp_output_dir}/*-train-metadata.json")
+
+    result = load_prepared_data(temp_output_dir)
+    assert "train" not in result
+    assert "validation" in result
+
+
+def test_prepare_data_with_id_column(temp_output_dir, monkeypatch):
+    """Test that --id_column preserves the source column as 'id' in output."""
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "welt-prepare-data",
+            "--dataset_name", "HuggingFaceFW/fineweb-2",
+            "--dataset_config", "tur_Latn",
+            "--train_split_units", "400",
+            "--id_column", "id",
+            "--max_seq_length", "1024",
+            "--language", "tur_Latn",
+            "--seed", "42",
+            "--output_path", temp_output_dir,
+        ],
+    )
+    main()
+
+    for example in read_shard_examples(temp_output_dir):
+        assert "id" in example

@@ -151,8 +151,8 @@ welt-train config.yaml --prepared_data_path /scratch/data/pretrain
 | `--text_template` | Python format string template (optional) |
 | `--language` | Language tag to store with each example (e.g., "eng_Latn") |
 | `--unit_type` | Unit type for counting: "words" or "chars" (default: "words") |
-| `--train_split_units` | Number of units for the train split (required) |
-| `--validation_split_units` | Number of units for the validation split (required) |
+| `--train_split_units` | Number of units for the train split (default: 0, no train shards) |
+| `--validation_split_units` | Number of units for the validation split (default: 0, no validation shards) |
 | `--num_units_per_file` | Max units per shard file (optional) |
 | `--max_seq_length` | Max words per example; splits long documents using word segmentation |
 | `--max_bytes_per_word` | Max UTF-8 bytes per word; should match training config `max_word_length - 2` (default: 126) |

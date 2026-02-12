@@ -106,7 +106,8 @@ def stream_texts(args):
     for example in stream:
         text = extract_text(example, text_column=args.text_column, text_template=args.text_template)
         if text:
-            yield text
+            id_value = example.get(args.id_column) if args.id_column else None
+            yield text, id_value
 
 
 def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
@@ -122,12 +123,12 @@ def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
     """
     count_chars = args.unit_type == "chars"
 
-    for text in stream_texts(args):
+    for text, id_value in stream_texts(args):
         words = pretokenizer.tokenize(text)
         unit_count = sum(len(w) for w in words) if count_chars else len(words)
 
         if args.max_seq_length is None:
-            yield text, unit_count
+            yield text, unit_count, id_value
         else:
             for i in range(0, len(words), args.max_seq_length):
                 chunk_words = words[i:i + args.max_seq_length]
@@ -135,7 +136,7 @@ def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
                     continue
                 chunk_text = "".join(chunk_words)
                 chunk_units = sum(len(w) for w in chunk_words) if count_chars else len(chunk_words)
-                yield chunk_text, chunk_units
+                yield chunk_text, chunk_units, id_value
 
 
 def main():
@@ -177,8 +178,14 @@ def main():
     parser.add_argument(
         "--language",
         type=str,
-        default=None,
+        required=True,
         help="Language tag to store with each example (e.g., 'eng_Latn')",
+    )
+    parser.add_argument(
+        "--id_column",
+        type=str,
+        default=None,
+        help="Source column to preserve as 'id' in output (optional)",
     )
 
     # Processing arguments
@@ -192,8 +199,8 @@ def main():
     parser.add_argument(
         "--train_split_units",
         type=int,
-        required=True,
-        help="Number of units for the train split.",
+        default=0,
+        help="Number of units for the train split (default: 0, meaning no train shards).",
     )
     parser.add_argument(
         "--num_units_per_file",
@@ -222,8 +229,8 @@ def main():
     parser.add_argument(
         "--validation_split_units",
         type=int,
-        required=True,
-        help="Number of units for the validation split. "
+        default=0,
+        help="Number of units for the validation split (default: 0, meaning no validation shards). "
              "Data is already shuffled before splitting.",
     )
     parser.add_argument(
@@ -248,6 +255,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    if args.train_split_units <= 0 and args.validation_split_units <= 0:
+        parser.error("At least one of --train_split_units or --validation_split_units must be > 0.")
 
     # Setup logging
     logging.basicConfig(
@@ -278,7 +288,7 @@ def main():
         total_units = 0
         total_examples = 0
 
-        for text, text_units in stream_examples(args, pretokenizer):
+        for text, text_units, id_value in stream_examples(args, pretokenizer):
 
             # Check global limit
             if total_units + text_units > max_total_units:
@@ -286,6 +296,8 @@ def main():
                 break
 
             record = {"text": text}
+            if id_value is not None:
+                record["id"] = id_value
             if args.language:
                 record["language"] = args.language
 
@@ -304,13 +316,10 @@ def main():
     if total_examples == 0:
         logger.warning("No examples were written. Check dataset and filter settings.")
 
-    # Save metadata (both writers are closed, final counts are stable)
-    metadata = {
+    # Save per-split metadata (both writers are closed, final counts are stable)
+    base_metadata = {
         "format": "welt-preprocessed-v1",
-        "num_examples": total_examples,
-        "total_units": total_units,
         "unit_type": args.unit_type,
-        "num_shards": train_writer.num_shards + val_writer.num_shards,
         "source_dataset": args.dataset_name,
         "source_config": args.dataset_config,
         "source_split": args.dataset_split,
@@ -319,30 +328,29 @@ def main():
         "seed": args.seed,
         "text_column": args.text_column,
         "text_template": args.text_template,
-        "validation_split_units": args.validation_split_units,
-        "splits": {
-            "train": {
-                "num_examples": train_writer.num_examples,
-                "total_units": train_writer.total_units,
-                "num_shards": train_writer.num_shards,
-            },
-            "validation": {
-                "num_examples": val_writer.num_examples,
-                "total_units": val_writer.total_units,
-                "num_shards": val_writer.num_shards,
-            },
-        },
     }
 
-    metadata_path = output_path / f"{prefix}-metadata.json"
-    logger.info(f"Saving metadata to {metadata_path}")
-    with open(metadata_path, "w") as f:
-        json.dump(metadata, f, indent=2)
+    active_writers = [w for w in [train_writer, val_writer] if w.num_examples > 0]
+    created_with_another_split = len(active_writers) > 1
+
+    for writer in active_writers:
+        metadata = {
+            **base_metadata,
+            "split": writer.split_name,
+            "created_with_another_split": created_with_another_split,
+            "num_examples": writer.num_examples,
+            "total_units": writer.total_units,
+            "num_shards": writer.num_shards,
+        }
+        metadata_path = output_path / f"{prefix}-{writer.split_name}-metadata.json"
+        logger.info(f"Saving metadata to {metadata_path}")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
 
     logger.info("Data preparation complete!")
     logger.info(f"  - Examples: {total_examples}")
     logger.info(f"  - Total {args.unit_type}: {total_units}")
-    logger.info(f"  - Shards: {metadata['num_shards']}")
+    logger.info(f"  - Shards: {train_writer.num_shards + val_writer.num_shards}")
     logger.info(f"  - Output: {output_path}")
 
 
