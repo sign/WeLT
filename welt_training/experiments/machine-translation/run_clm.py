@@ -48,7 +48,7 @@ from typing import Optional
 import datasets
 import evaluate
 import torch
-from datasets import IterableDataset, IterableDatasetDict, load_dataset
+from datasets import DatasetDict, IterableDataset, IterableDatasetDict, load_dataset
 
 import transformers
 from transformers import (
@@ -68,6 +68,8 @@ from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
+
+from welt_training.data_utils import load_prepared_data
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -245,13 +247,19 @@ class DataTrainingArguments:
             )
         },
     )
+    prepared_data_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Path to prepared dataset shards (from welt-prepare-data). Skips download and text extraction."
+        },
+    )
 
     def __post_init__(self):
         if self.streaming:
             require_version("datasets>=2.0.0", "The streaming feature requires `datasets>=2.0.0`")
 
-        if self.dataset_name is None and self.train_file is None and self.validation_file is None:
-            raise ValueError("Need either a dataset name or a training/validation file.")
+        if self.dataset_name is None and self.train_file is None and self.validation_file is None and self.prepared_data_path is None:
+            raise ValueError("Need either a dataset name, a training/validation file, or a prepared data path.")
         else:
             if self.train_file is not None:
                 extension = self.train_file.split(".")[-1]
@@ -310,6 +318,8 @@ def main():
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    elif len(sys.argv) == 2 and sys.argv[1].endswith((".yaml", ".yml")):
+        model_args, data_args, training_args = parser.parse_yaml_file(yaml_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -369,7 +379,12 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    if data_args.dataset_name is not None:
+    if data_args.prepared_data_path is not None:
+        if data_args.validation_split_percentage is not None:
+            logger.warning("Ignoring validation_split_percentage because prepared_data_path is set.")
+        raw_datasets = DatasetDict(load_prepared_data(data_args.prepared_data_path))
+
+    elif data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         raw_datasets = load_dataset(
             data_args.dataset_name,
@@ -553,6 +568,7 @@ def main():
         desc="Keep only the text column & apply template",
         **map_args
     )
+    column_names = [text_column_name]
 
 
     def tokenize_function(examples):

@@ -96,6 +96,80 @@ You can also turn off a specific encoder after training has completed, for testi
 > all the embeddings of the previous tokens (on the word level). This is done since not all causal LMs support
 > cross-attention, and so we want to avoid using it, and rely on the self-attention mechanism instead.
 
+## Data Preparation
+
+You can prepare datasets offline using the `welt-prepare-data` CLI.
+It streams a HuggingFace dataset, samples raw text with unit-based limits, and writes sharded `.jsonl.gz` files:
+
+```shell
+welt-prepare-data \
+    --dataset_name HuggingFaceFW/fineweb \
+    --dataset_config sample-10BT \
+    --train_split_units 3200000000 \
+    --validation_split_units 100000000 \
+    --num_units_per_file 100000000 \
+    --max_seq_length 512 \
+    --seed 42 \
+    --output_path /scratch/data/pretrain
+```
+
+Multiple datasets can be prepared into the same output directory:
+
+```shell
+welt-prepare-data \
+    --dataset_name monology/pile-uncopyrighted \
+    --train_split_units 1000000000 \
+    --validation_split_units 50000000 \
+    --num_units_per_file 100000000 \
+    --max_seq_length 512 \
+    --output_path /scratch/data/pretrain
+```
+
+The output directory contains sharded `.jsonl.gz` files and a `{prefix}-metadata.json` per dataset:
+
+```
+/scratch/data/pretrain/
+├── fineweb-sample-10BT-00000000.jsonl.gz
+├── fineweb-sample-10BT-00000001.jsonl.gz
+├── fineweb-sample-10BT-metadata.json
+├── pile-uncopyrighted-00000000.jsonl.gz
+└── pile-uncopyrighted-metadata.json
+```
+
+Then train using the prepared data:
+
+```shell
+welt-train config.yaml --prepared_data_path /scratch/data/pretrain
+```
+
+| Argument | Description |
+|----------|-------------|
+| `--dataset_name` | HuggingFace dataset identifier (required) |
+| `--dataset_config` | Dataset config name (optional) |
+| `--dataset_split` | Split to use (default: "train") |
+| `--text_column` | Column containing text (default: "text") |
+| `--text_template` | Python format string template (optional) |
+| `--language` | Language tag to store with each example (e.g., "eng_Latn") |
+| `--unit_type` | Unit type for counting: "words" or "chars" (default: "words") |
+| `--train_split_units` | Number of units for the train split (default: 0, no train shards) |
+| `--validation_split_units` | Number of units for the validation split (default: 0, no validation shards) |
+| `--num_units_per_file` | Max units per shard file (optional) |
+| `--max_seq_length` | Max words per example; splits long documents using word segmentation |
+| `--max_bytes_per_word` | Max UTF-8 bytes per word; should match training config `max_word_length - 2` (default: 126) |
+| `--seed` | Random seed for shuffling |
+| `--drop_remainder` | Drop partial chunks at document boundaries |
+| `--output_path` | Output directory path (required) |
+
+### Verifying Prepared Data
+
+After preparing data, verify integrity with `welt-verify-data`:
+
+```shell
+welt-verify-data --data_path /scratch/data/pretrain
+```
+
+This checks that shard counts and example counts match the metadata, and warns if train/validation splits from the same source were created separately (risking data contamination).
+
 ## Training
 
 Training instructions are available in the [welt_training/README.md](./welt_training/README.md).

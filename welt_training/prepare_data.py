@@ -1,0 +1,358 @@
+"""
+Data preparation script for offline use.
+
+Downloads HuggingFace datasets, samples raw text with unit-based limits,
+and saves sharded .jsonl.gz files for offline training.
+"""
+
+import argparse
+import gzip
+import json
+import logging
+from pathlib import Path
+
+from datasets import load_dataset
+from words_segmentation.tokenizer import WordsSegmentationTokenizer
+
+from welt_training.data_utils import extract_text
+
+logger = logging.getLogger(__name__)
+
+
+def get_shard_prefix(dataset_name: str, dataset_config: str | None) -> str:
+    """Derive a shard filename prefix from dataset name and config."""
+    name = dataset_name.split("/")[-1]
+    if dataset_config:
+        return f"{name}-{dataset_config}"
+    return name
+
+
+class ShardWriter:
+    """Manages writing sharded .jsonl.gz files for a single data split.
+
+    Files are opened lazily on first write, so creating a writer for
+    a split that receives no data produces no files on disk.
+    """
+
+    def __init__(self, output_path: Path, prefix: str, split_name: str | None, num_units_per_file: int | None):
+        self.output_path = output_path
+        self.prefix = prefix
+        self.split_name = split_name
+        self.num_units_per_file = num_units_per_file
+        self._shard_index = 0
+        self._shard_units = 0
+        self._num_shards = 0
+        self._current_file = None
+        self.total_units = 0
+        self.num_examples = 0
+
+    def _shard_path(self, index: int) -> Path:
+        if self.split_name:
+            return self.output_path / f"{self.prefix}-{self.split_name}-{index:08d}.jsonl.gz"
+        return self.output_path / f"{self.prefix}-{index:08d}.jsonl.gz"
+
+    def _open_shard(self):
+        path = self._shard_path(self._shard_index)
+        logger.info(f"Writing shard: {path.name}")
+        self._current_file = gzip.open(path, "wt")
+
+    def write(self, record: dict, text_units: int):
+        if self._current_file is None:
+            self._open_shard()
+        self._current_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._shard_units += text_units
+        self.total_units += text_units
+        self.num_examples += 1
+
+        if self.num_units_per_file is not None and self._shard_units >= self.num_units_per_file:
+            self._current_file.close()
+            logger.info(f"Completed shard {self._shard_index} ({self._shard_units} units)")
+            self._num_shards += 1
+            self._shard_index += 1
+            self._shard_units = 0
+            self._current_file = None
+
+    def close(self):
+        if self._current_file is not None:
+            self._current_file.close()
+            self._current_file = None
+            self._num_shards += 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    @property
+    def num_shards(self) -> int:
+        return self._num_shards
+
+
+def stream_texts(args):
+    """Stream raw text examples from a HuggingFace dataset."""
+    load_kwargs = {
+        "path": args.dataset_name,
+        "split": args.dataset_split,
+        "streaming": True,
+    }
+    if args.dataset_config:
+        load_kwargs["name"] = args.dataset_config
+
+    logger.info(f"Loading dataset: {args.dataset_name} (config: {args.dataset_config}, split: {args.dataset_split})")
+    stream = load_dataset(**load_kwargs)
+
+    # Shuffle with seed
+    stream = stream.shuffle(seed=args.seed, buffer_size=args.shuffle_buffer_size)
+
+    for example in stream:
+        text = extract_text(example, text_column=args.text_column, text_template=args.text_template)
+        if text:
+            id_value = example.get(args.id_column) if args.id_column else None
+            yield text, id_value
+
+
+def stream_examples(args, pretokenizer: WordsSegmentationTokenizer):
+    """Stream text examples, optionally chunked by max_seq_length.
+
+    Uses word segmentation to split text into words (handles Thai and other
+    languages without whitespace). When max_seq_length is set, long documents
+    are split into chunks of at most max_seq_length words.
+
+    Yields (text, unit_count) tuples where unit_count matches args.unit_type.
+    When unit_type is "chars", characters are counted via token lengths
+    (whitespace excluded by the tokenizer).
+    """
+    count_chars = args.unit_type == "chars"
+
+    for text, id_value in stream_texts(args):
+        words = pretokenizer.tokenize(text)
+        unit_count = sum(len(w) for w in words) if count_chars else len(words)
+
+        if args.max_seq_length is None:
+            yield text, unit_count, id_value
+        else:
+            for i in range(0, len(words), args.max_seq_length):
+                chunk_words = words[i:i + args.max_seq_length]
+                if args.drop_remainder and len(chunk_words) < args.max_seq_length:
+                    continue
+                chunk_text = "".join(chunk_words)
+                chunk_units = sum(len(w) for w in chunk_words) if count_chars else len(chunk_words)
+                yield chunk_text, chunk_units, id_value
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Prepare HuggingFace datasets for offline training."
+    )
+
+    # Dataset arguments
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        required=True,
+        help="HuggingFace dataset identifier (required)",
+    )
+    parser.add_argument(
+        "--dataset_config",
+        type=str,
+        default=None,
+        help="Dataset config name (optional)",
+    )
+    parser.add_argument(
+        "--dataset_split",
+        type=str,
+        default="train",
+        help="Split to use (default: 'train')",
+    )
+    parser.add_argument(
+        "--text_column",
+        type=str,
+        default="text",
+        help="Column containing text (default: 'text')",
+    )
+    parser.add_argument(
+        "--text_template",
+        type=str,
+        default=None,
+        help="Python format string template (optional)",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        required=True,
+        help="Language tag to store with each example (e.g., 'eng_Latn')",
+    )
+    parser.add_argument(
+        "--id_column",
+        type=str,
+        default=None,
+        help="Source column to preserve as 'id' in output (optional)",
+    )
+
+    # Processing arguments
+    parser.add_argument(
+        "--unit_type",
+        type=str,
+        choices=["words", "chars"],
+        default="words",
+        help="Unit type for counting (default: 'words')",
+    )
+    parser.add_argument(
+        "--train_split_units",
+        type=int,
+        default=0,
+        help="Number of units for the train split (default: 0, meaning no train shards).",
+    )
+    parser.add_argument(
+        "--num_units_per_file",
+        type=int,
+        default=None,
+        help="Max units per shard file. If not set, all data goes into one file.",
+    )
+    parser.add_argument(
+        "--max_seq_length",
+        type=int,
+        default=None,
+        help="Max words per example. Long documents are split using word segmentation.",
+    )
+    parser.add_argument(
+        "--max_bytes_per_word",
+        type=int,
+        default=126,
+        help="Max UTF-8 bytes per word. Words exceeding this are split. "
+             "Should match training config: max_word_length - 2 (default: 128 - 2 = 126).",
+    )
+    parser.add_argument(
+        "--drop_remainder",
+        action="store_true",
+        help="Drop partial chunks when splitting documents by max_seq_length",
+    )
+    parser.add_argument(
+        "--validation_split_units",
+        type=int,
+        default=0,
+        help="Number of units for the validation split (default: 0, meaning no validation shards). "
+             "Data is already shuffled before splitting.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for shuffling",
+    )
+    parser.add_argument(
+        "--shuffle_buffer_size",
+        type=int,
+        default=10000,
+        help="Buffer size for streaming shuffle (default: 10000)",
+    )
+
+    # Output arguments
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        required=True,
+        help="Output directory path (required)",
+    )
+
+    args = parser.parse_args()
+
+    if args.train_split_units <= 0 and args.validation_split_units <= 0:
+        parser.error("At least one of --train_split_units or --validation_split_units must be > 0.")
+
+    # Setup logging
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+
+    # Create output directory
+    output_path = Path(args.output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    prefix = get_shard_prefix(args.dataset_name, args.dataset_config)
+    pretokenizer = WordsSegmentationTokenizer(max_bytes=args.max_bytes_per_word)
+
+    logger.info("Starting data preparation...")
+    logger.info(f"  unit_type={args.unit_type}, train_split_units={args.train_split_units}, "
+                f"num_units_per_file={args.num_units_per_file}, max_seq_length={args.max_seq_length}, "
+                f"language={args.language}")
+
+    # Create shard writers
+    max_total_units = args.train_split_units + args.validation_split_units
+    logger.info(f"  validation_split_units={args.validation_split_units}, max_total_units={max_total_units}")
+    with (
+        ShardWriter(output_path, prefix, "train", args.num_units_per_file) as train_writer,
+        ShardWriter(output_path, prefix, "validation", args.num_units_per_file) as val_writer,
+    ):
+        total_units = 0
+        total_examples = 0
+
+        for text, text_units, id_value in stream_examples(args, pretokenizer):
+
+            # Check global limit
+            if total_units + text_units > max_total_units:
+                logger.info(f"Reached total units limit ({max_total_units})")
+                break
+
+            record = {"text": text, "language": args.language}
+            if id_value is not None:
+                record["id"] = id_value
+
+            # Fill validation first, then route to train
+            if val_writer.total_units < args.validation_split_units:
+                val_writer.write(record, text_units)
+            else:
+                train_writer.write(record, text_units)
+
+            total_units += text_units
+            total_examples += 1
+
+            if total_examples % 10000 == 0:
+                logger.info(f"Processed {total_examples} examples, {total_units} total {args.unit_type}")
+
+    if total_examples == 0:
+        logger.warning("No examples were written. Check dataset and filter settings.")
+
+    # Save per-split metadata (both writers are closed, final counts are stable)
+    base_metadata = {
+        "format": "welt-preprocessed-v1",
+        "unit_type": args.unit_type,
+        "source_dataset": args.dataset_name,
+        "source_config": args.dataset_config,
+        "source_split": args.dataset_split,
+        "language": args.language,
+        "max_seq_length": args.max_seq_length,
+        "seed": args.seed,
+        "text_column": args.text_column,
+        "text_template": args.text_template,
+    }
+
+    active_writers = [w for w in [train_writer, val_writer] if w.num_examples > 0]
+    created_with_another_split = len(active_writers) > 1
+
+    for writer in active_writers:
+        metadata = {
+            **base_metadata,
+            "split": writer.split_name,
+            "created_with_another_split": created_with_another_split,
+            "num_examples": writer.num_examples,
+            "total_units": writer.total_units,
+            "num_shards": writer.num_shards,
+        }
+        metadata_path = output_path / f"{prefix}-{writer.split_name}-metadata.json"
+        logger.info(f"Saving metadata to {metadata_path}")
+        with open(metadata_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+
+    logger.info("Data preparation complete!")
+    logger.info(f"  - Examples: {total_examples}")
+    logger.info(f"  - Total {args.unit_type}: {total_units}")
+    logger.info(f"  - Shards: {train_writer.num_shards + val_writer.num_shards}")
+    logger.info(f"  - Output: {output_path}")
+
+
+if __name__ == "__main__":
+    main()
