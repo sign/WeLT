@@ -48,7 +48,7 @@ from typing import Optional
 import datasets
 import evaluate
 import torch
-from datasets import IterableDataset, IterableDatasetDict, load_dataset
+from datasets import DatasetDict, IterableDataset, IterableDatasetDict, load_dataset
 
 import transformers
 from transformers import (
@@ -318,6 +318,8 @@ def main():
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    elif len(sys.argv) == 2 and sys.argv[1].endswith((".yaml", ".yml")):
+        model_args, data_args, training_args = parser.parse_yaml_file(yaml_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -380,7 +382,7 @@ def main():
     if data_args.prepared_data_path is not None:
         if data_args.validation_split_percentage is not None:
             logger.warning("Ignoring validation_split_percentage because prepared_data_path is set.")
-        raw_datasets = load_prepared_data(data_args.prepared_data_path)
+        raw_datasets = DatasetDict(load_prepared_data(data_args.prepared_data_path))
 
     elif data_args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
@@ -566,6 +568,7 @@ def main():
         desc="Keep only the text column & apply template",
         **map_args
     )
+    column_names = [text_column_name]
 
 
     def tokenize_function(examples):

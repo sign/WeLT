@@ -375,6 +375,12 @@ def train(args: list[str] | None | str = None):  # noqa: C901
                                   trust_remote_code=model_args.trust_remote_code,
                                   do_train=training_args.do_train)
 
+    # Drop columns not needed for training (e.g. "language" from prepared data)
+    for split in list(text_datasets):
+        extra_cols = [c for c in text_datasets[split].column_names if c != "text"]
+        if extra_cols:
+            text_datasets[split] = text_datasets[split].remove_columns(extra_cols)
+
     train_dataset = None
     if training_args.do_train:
         if "train" not in text_datasets:
