@@ -28,18 +28,23 @@ def get_shard_prefix(dataset_name: str, dataset_config: str | None) -> str:
 
 
 class ShardWriter:
-    """Manages writing sharded .jsonl.gz files for a single data split."""
+    """Manages writing sharded .jsonl.gz files for a single data split.
+
+    Files are opened lazily on first write, so creating a writer for
+    a split that receives no data produces no files on disk.
+    """
 
     def __init__(self, output_path: Path, prefix: str, split_name: str | None, num_units_per_file: int | None):
         self.output_path = output_path
         self.prefix = prefix
         self.split_name = split_name
         self.num_units_per_file = num_units_per_file
-        self.shard_index = 0
-        self.shard_units = 0
+        self._shard_index = 0
+        self._shard_units = 0
+        self._num_shards = 0
+        self._current_file = None
         self.total_units = 0
         self.num_examples = 0
-        self._current_file = self._open_shard()
 
     def _shard_path(self, index: int) -> Path:
         if self.split_name:
@@ -47,32 +52,30 @@ class ShardWriter:
         return self.output_path / f"{self.prefix}-{index:08d}.jsonl.gz"
 
     def _open_shard(self):
-        path = self._shard_path(self.shard_index)
+        path = self._shard_path(self._shard_index)
         logger.info(f"Writing shard: {path.name}")
-        return gzip.open(path, "wt")
+        self._current_file = gzip.open(path, "wt")
 
     def write(self, record: dict, text_units: int):
+        if self._current_file is None:
+            self._open_shard()
         self._current_file.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self.shard_units += text_units
+        self._shard_units += text_units
         self.total_units += text_units
         self.num_examples += 1
 
-        if self.num_units_per_file is not None and self.shard_units >= self.num_units_per_file:
+        if self.num_units_per_file is not None and self._shard_units >= self.num_units_per_file:
             self._current_file.close()
-            logger.info(f"Completed shard {self.shard_index} ({self.shard_units} units)")
-            self.shard_index += 1
-            self.shard_units = 0
-            self._current_file = self._open_shard()
+            logger.info(f"Completed shard {self._shard_index} ({self._shard_units} units)")
+            self._num_shards += 1
+            self._shard_index += 1
+            self._shard_units = 0
+            self._current_file = None
 
     def close(self):
-        self._current_file.close()
-        # Remove empty last shard
-        if self.shard_units == 0 and self.shard_index > 0:
-            self._shard_path(self.shard_index).unlink()
-            self.shard_index -= 1
-        # Remove shard file if no examples were written at all
-        if self.num_examples == 0:
-            self._shard_path(self.shard_index).unlink(missing_ok=True)
+        if self._current_file is not None:
+            self._current_file.close()
+            self._num_shards += 1
 
     def __enter__(self):
         return self
@@ -82,9 +85,7 @@ class ShardWriter:
 
     @property
     def num_shards(self) -> int:
-        if self.num_examples == 0:
-            return 0
-        return self.shard_index + 1
+        return self._num_shards
 
 
 def stream_texts(args):

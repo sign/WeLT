@@ -14,6 +14,11 @@ def extract_text(example: dict, text_column: str = "text", text_template: str | 
     return example[text_column]
 
 
+def find_shard_files(data_path: str, split_name: str) -> list[str]:
+    """Return sorted shard files for a given split in a prepared data directory."""
+    return sorted(glob.glob(os.path.join(data_path, f"*-{split_name}-*.jsonl.gz")))
+
+
 def load_prepared_data(prepared_data_path: str):
     """Load preprocessed shards produced by prepare_data.py.
 
@@ -28,8 +33,8 @@ def load_prepared_data(prepared_data_path: str):
     Returns:
         A dict with ``"train"`` and/or ``"validation"`` datasets.
     """
-    train_files = sorted(glob.glob(os.path.join(prepared_data_path, "*-train-*.jsonl.gz")))
-    validation_files = sorted(glob.glob(os.path.join(prepared_data_path, "*-validation-*.jsonl.gz")))
+    train_files = find_shard_files(prepared_data_path, "train")
+    validation_files = find_shard_files(prepared_data_path, "validation")
 
     if not train_files and not validation_files:
         raise ValueError(

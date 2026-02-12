@@ -161,8 +161,7 @@ def detect_last_checkpoint(training_args: TrainingArguments):
 def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
                   trust_remote_code: bool,
                   do_train: bool = True,
-                  cache_dir: str = None,
-                  seed: int = 42):
+                  cache_dir: str = None):
     # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
     # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
     # (the dataset will be downloaded automatically from the datasets Hub).
@@ -374,8 +373,7 @@ def train(args: list[str] | None | str = None):  # noqa: C901
     text_datasets = init_datasets(data_args,
                                   cache_dir=cache_dir,
                                   trust_remote_code=model_args.trust_remote_code,
-                                  do_train=training_args.do_train,
-                                  seed=training_args.seed)
+                                  do_train=training_args.do_train)
 
     train_dataset = None
     if training_args.do_train:

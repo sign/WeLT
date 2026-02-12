@@ -11,6 +11,8 @@ import json
 import os
 import sys
 
+from welt_training.data_utils import find_shard_files
+
 
 def discover_splits(data_path):
     """Find all per-split metadata files and return {split_name: metadata_dict}."""
@@ -48,8 +50,7 @@ def verify(data_path):
 
     # 2. Per-split shard consistency
     for split_name, metadata in splits.items():
-        pattern = os.path.join(data_path, f"*-{split_name}-*.jsonl.gz")
-        shard_files = sorted(glob.glob(pattern))
+        shard_files = find_shard_files(data_path, split_name)
 
         expected_shards = metadata["num_shards"]
         actual_shards = len(shard_files)
