@@ -36,6 +36,7 @@ train = [
     "scikit-learn", # For "accuracy" metric in evaluate
     "sacrebleu", # For usual bleu/chrF metrics
     "wandb", # For experiment tracking
+    "zstandard", # For compressing the data
 ]
 
 dion = [
@@ -79,3 +80,5 @@ testpaths = [
 
 [project.scripts]
 welt-train = "welt_training.train:train"
+welt-prepare-data = "welt_training.prepare_data:main"
+welt-verify-data = "welt_training.verify_data:main"
