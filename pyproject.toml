@@ -38,6 +38,7 @@ train = [
     # For "sign/signwriting_similarity" metric
     "signwriting-evaluation @ git+https://github.com/sign-language-processing/signwriting-evaluation.git",
     "wandb", # For experiment tracking
+    "zstandard", # For compressing the data
 ]
 
 dion = [
@@ -81,3 +82,5 @@ testpaths = [
 
 [project.scripts]
 welt-train = "welt_training.train:train"
+welt-prepare-data = "welt_training.prepare_data:main"
+welt-verify-data = "welt_training.verify_data:main"

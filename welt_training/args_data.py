@@ -96,6 +96,12 @@ class DataTrainingArguments:
     keep_linebreaks: bool = field(
         default=True, metadata={"help": "Whether to keep line breaks when using TXT files or not."}
     )
+    prepared_data_path: str | None = field(
+        default=None,
+        metadata={
+            "help": "Path to prepared dataset shards (from welt-prepare-data). Skips download and text extraction."
+        },
+    )
 
     def __post_init__(self):
         if self.streaming:
@@ -117,8 +123,13 @@ class DataTrainingArguments:
                 )
                 raise ValueError(msg)
 
-        if self.dataset_name is None and self.train_file is None and self.validation_file is None:
-            raise ValueError("Need either a dataset name or a training/validation file.")
+        if (
+            self.dataset_name is None
+            and self.train_file is None
+            and self.validation_file is None
+            and self.prepared_data_path is None
+        ):
+            raise ValueError("Need either a dataset name, a training/validation file, or a prepared data path.")
         else:
             if self.train_file is not None:
                 extension = self.train_file.split(".")[-1]
