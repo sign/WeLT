@@ -30,6 +30,7 @@ jobs:
       - name: Test code
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          WANDB_MODE: disabled
         run: uv run pytest -n auto --dist loadscope
 
       - name: Freeze working environment

@@ -41,6 +41,7 @@ def train_model(setup_function,
         learning_rate=5e-4,
         lr_scheduler_type="constant",  # Keep learning rate constant
         use_cpu=True,
+        report_to="none",
     )
 
     # Initialize trainer

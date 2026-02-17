@@ -73,8 +73,10 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
         "logging_steps": 5,
         "log_samples": 1,
 
-        # Disable bf16 for compatibility
+        # Disable bf16 and torch_compile for CPU compatibility
         "bf16": False,
+        "torch_compile": False,
+        "optim": "adamw_torch",
     })
 
     # Write modified config to temp file
@@ -145,6 +147,8 @@ def test_training_without_generation_metrics(temp_output_dir):
         "logging_steps": 5,
         "log_samples": 0,
         "bf16": False,
+        "torch_compile": False,
+        "optim": "adamw_torch",
     })
 
     config_path = Path(temp_output_dir) / "test_config_no_metrics.yaml"
@@ -196,6 +200,8 @@ def test_training_with_sacrebleu(temp_output_dir):
         "logging_steps": 5,
         "log_samples": 1,
         "bf16": False,
+        "torch_compile": False,
+        "optim": "adamw_torch",
     })
 
     config_path = Path(temp_output_dir) / "test_config_sacrebleu.yaml"
@@ -247,6 +253,8 @@ def test_training_with_streaming(temp_output_dir):
         "logging_steps": 5,
         "log_samples": 1,
         "bf16": False,
+        "torch_compile": False,
+        "optim": "adamw_torch",
         "streaming": True,
     })
 
@@ -294,6 +302,8 @@ def test_training_determinism(temp_output_dir):
         "logging_steps": 3,
         "log_samples": 0,
         "bf16": False,
+        "torch_compile": False,
+        "optim": "adamw_torch",
         "seed": 12345,  # Fixed seed for determinism
     })
 
