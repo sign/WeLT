@@ -17,6 +17,7 @@ import torch
 from transformers import GenerationConfig, Trainer
 
 from welt.processor import TextImageProcessor
+from welt_training.metrics import compute_bits_per_byte
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class WeLTTrainer(Trainer):
 
     Computed metrics:
     - eval_loss: Cross-entropy loss
-    - eval_bits_per_byte: Bits per byte (loss / ln(2) for byte-level model)
+    - eval_bits_per_byte: Bits per byte (derived from actual token/byte counts in labels)
     - eval_byte_accuracy: Token/byte-level accuracy (always computed)
     - eval_word_accuracy: Word-level accuracy - all tokens in word must be correct (always computed)
     - eval_{metric}: Generation metrics (e.g., eval_sacrebleu, eval_chrf)
@@ -426,13 +427,7 @@ class WeLTTrainer(Trainer):
             metrics["perplexity"] = perplexity
             additional_metrics["perplexity"] = perplexity
 
-            # Bits per byte: for byte-level model, tokens == bytes, so BPB = loss / ln(2)
-            from welt_training.metrics import compute_bits_per_byte
-            bpb = compute_bits_per_byte(loss, num_tokens=1, num_bytes=1)
-            metrics["eval_bits_per_byte"] = bpb
-            additional_metrics["eval_bits_per_byte"] = bpb
-
-        # Compute byte and word accuracy from stored logits
+        # Compute byte and word accuracy and bits per byte from stored logits
         if self._eval_logits and self._eval_labels_for_accuracy:
             accuracy_metrics = self._compute_accuracy(
                 self._eval_logits,
@@ -442,6 +437,11 @@ class WeLTTrainer(Trainer):
             metrics["eval_word_accuracy"] = accuracy_metrics["word_accuracy"]
             additional_metrics["eval_byte_accuracy"] = accuracy_metrics["byte_accuracy"]
             additional_metrics["eval_word_accuracy"] = accuracy_metrics["word_accuracy"]
+
+            if "eval_loss" in metrics:
+                bpb = self._compute_bits_per_byte(metrics["eval_loss"], self._eval_labels_for_accuracy)
+                metrics["eval_bits_per_byte"] = bpb
+                additional_metrics["eval_bits_per_byte"] = bpb
 
         # Add eval_samples count
         if self._eval_sample_count > 0:
@@ -537,6 +537,21 @@ class WeLTTrainer(Trainer):
                 logger.warning(f"Failed to compute metric '{metric_name}': {e}")
 
         return metrics
+
+    def _compute_bits_per_byte(self, loss: float, label_batches: list[torch.Tensor]) -> float:
+        """
+        Compute bits per byte from loss and eval labels.
+
+        labels_output contains content bytes + one EOS per word + PAD for alignment.
+        Loss is averaged over non-PAD positions (content bytes + EOS), but BPB
+        should reflect bits per actual text byte, so we separate the two counts.
+        """
+        all_labels = torch.cat([l.flatten() for l in label_batches])
+        pad_id = self.processor.tokenizer.pad_token_id
+        eos_id = self.processor.tokenizer.eos_token_id
+        num_tokens = (all_labels != pad_id).sum().item()
+        num_bytes = ((all_labels != pad_id) & (all_labels != eos_id)).sum().item()
+        return compute_bits_per_byte(loss, num_tokens, num_bytes)
 
     def _compute_accuracy(
             self,

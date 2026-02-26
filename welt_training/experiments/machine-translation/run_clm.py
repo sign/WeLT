@@ -760,9 +760,9 @@ def main():
         # Compute bits per byte from the evaluated subset.
         # Decode tokens back to text to count the corresponding UTF-8 bytes.
         if not data_args.streaming:
-            num_eval_tokens = len(eval_dataset) * block_size
+            num_eval_tokens = len(eval_dataset) * (block_size - 1)
             num_eval_bytes = sum(
-                len(tokenizer.decode(example["input_ids"]).encode("utf-8"))
+                len(tokenizer.decode(example["input_ids"][1:]).encode("utf-8"))
                 for example in eval_dataset
             )
             if num_eval_bytes > 0:

@@ -115,12 +115,12 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
     assert "eval_samples" in eval_metrics, "eval_samples should be present"
     assert "perplexity" in eval_metrics, "perplexity should be present"
 
-    # Verify bits per byte is present and consistent with loss
+    # Verify bits per byte is present and accounts for EOS tokens (BPB > loss/ln(2))
     assert "eval_bits_per_byte" in eval_metrics, "eval_bits_per_byte should be present"
     import math
-    expected_bpb = eval_metrics["eval_loss"] / math.log(2)
-    assert abs(eval_metrics["eval_bits_per_byte"] - expected_bpb) < 0.001, \
-        f"eval_bits_per_byte should equal loss/ln(2): {eval_metrics['eval_bits_per_byte']} vs {expected_bpb}"
+    naive_bpb = eval_metrics["eval_loss"] / math.log(2)
+    assert eval_metrics["eval_bits_per_byte"] > naive_bpb, \
+        f"eval_bits_per_byte should exceed loss/ln(2) due to EOS overhead: {eval_metrics['eval_bits_per_byte']} vs {naive_bpb}"
 
     print("\n✓ Training completed successfully!")
     print(f"✓ eval_chrf = {chrf_score:.2f}")
