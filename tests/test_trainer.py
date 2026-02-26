@@ -1012,6 +1012,53 @@ def test_dataloader_reuse(trainer_setup):
     assert abs(metrics1["eval_loss"] - metrics2["eval_loss"]) < 0.1
 
 
+def test_bits_per_byte_computation(trainer_setup):
+    """Test that bits_per_byte is computed correctly from loss."""
+    model, processor, collator = trainer_setup
+
+    eval_dataset = make_generation_dataset(
+        prefixes=["a", "b"],
+        completions=[" x", " y"],
+    )
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir="output/test_trainer",
+        per_device_eval_batch_size=2,
+        do_train=False,
+        do_eval=True,
+        remove_unused_columns=False,
+        predict_with_generate=True,
+    )
+
+    trainer = WeLTTrainer(
+        model=model,
+        args=training_args,
+        processor=processor,
+        data_collator=collator,
+        eval_metrics=None,
+        max_generated_words=3,
+    )
+
+    metrics = trainer.evaluate(eval_dataset)
+
+    # Verify bits_per_byte is present and positive
+    assert "eval_bits_per_byte" in metrics, \
+        f"eval_bits_per_byte should be in metrics. Found: {list(metrics.keys())}"
+    assert metrics["eval_bits_per_byte"] > 0, \
+        f"eval_bits_per_byte should be positive, got {metrics['eval_bits_per_byte']}"
+
+    # For byte-level model, BPB = loss / ln(2)
+    import math
+    expected_bpb = metrics["eval_loss"] / math.log(2)
+    assert abs(metrics["eval_bits_per_byte"] - expected_bpb) < 0.001, \
+        f"eval_bits_per_byte should equal loss/ln(2): {metrics['eval_bits_per_byte']} vs {expected_bpb}"
+
+    # BPB should also equal log2(perplexity) for byte-level model
+    assert abs(metrics["eval_bits_per_byte"] - math.log2(metrics["perplexity"])) < 0.001, \
+        f"eval_bits_per_byte should equal log2(perplexity): " \
+        f"{metrics['eval_bits_per_byte']} vs {math.log2(metrics['perplexity'])}"
+
+
 def test_accuracy_is_computed(trainer_setup):
     """Test that eval_accuracy is computed during evaluation."""
     model, processor, collator = trainer_setup

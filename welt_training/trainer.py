@@ -4,7 +4,7 @@ WeLT Trainer for generation-based evaluation with accuracy metrics.
 Minimal extension of Trainer that adds support for:
 - Generation-based metrics (BLEU, ROUGE, SacreBLEU, ChrF, etc.)
 - Byte-level accuracy (token-level) and word-level accuracy from logits
-- Perplexity computation from loss
+- Perplexity and bits-per-byte computation from loss
 
 Overrides prediction_step to generate text predictions and store logits,
 then computes all metrics in evaluate().
@@ -41,6 +41,7 @@ class WeLTTrainer(Trainer):
 
     Computed metrics:
     - eval_loss: Cross-entropy loss
+    - eval_bits_per_byte: Bits per byte (loss / ln(2) for byte-level model)
     - eval_byte_accuracy: Token/byte-level accuracy (always computed)
     - eval_word_accuracy: Word-level accuracy - all tokens in word must be correct (always computed)
     - eval_{metric}: Generation metrics (e.g., eval_sacrebleu, eval_chrf)
@@ -417,13 +418,19 @@ class WeLTTrainer(Trainer):
                 metrics[metric_key] = value
                 additional_metrics[metric_key] = value
 
-        # Add perplexity if we have loss
+        # Add perplexity and bits per byte if we have loss
         if "eval_loss" in metrics:
             loss = metrics["eval_loss"]
             # Use 709 as threshold to avoid float overflow; exp(709) ~ 8.2e307 is the largest representable float
             perplexity = math.exp(loss) if loss < 709 else float('inf')
             metrics["perplexity"] = perplexity
             additional_metrics["perplexity"] = perplexity
+
+            # Bits per byte: for byte-level model, tokens == bytes, so BPB = loss / ln(2)
+            from welt_training.metrics import compute_bits_per_byte
+            bpb = compute_bits_per_byte(loss, num_tokens=1, num_bytes=1)
+            metrics["eval_bits_per_byte"] = bpb
+            additional_metrics["eval_bits_per_byte"] = bpb
 
         # Compute byte and word accuracy from stored logits
         if self._eval_logits and self._eval_labels_for_accuracy:
