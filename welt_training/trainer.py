@@ -21,6 +21,22 @@ from welt.processor import TextImageProcessor
 logger = logging.getLogger(__name__)
 
 
+class _TorchIterableAdapter(torch.utils.data.IterableDataset):
+    """Wraps a HuggingFace datasets.IterableDataset as a torch IterableDataset.
+
+    datasets.IterableDataset does not inherit from torch.utils.data.IterableDataset,
+    so PyTorch's DataLoader treats it as map-style and tries len()/__getitem__,
+    which fails. This thin adapter delegates __iter__ so DataLoader uses the
+    iterable protocol instead.
+    """
+
+    def __init__(self, hf_dataset):
+        self._dataset = hf_dataset
+
+    def __iter__(self):
+        yield from self._dataset
+
+
 class WeLTTrainer(Trainer):
     """
     Minimal trainer extension for WeLT generation-based evaluation.
@@ -121,29 +137,120 @@ class WeLTTrainer(Trainer):
         self._eval_predictions = []
         self._eval_labels = []
         self._eval_sample_count = 0
-        self._eval_logits = []
-        self._eval_labels_for_accuracy = []
+        # Accuracy accumulators: incremental scalar counters (computed on-device
+        # in prediction_step, then all_reduced across ranks in _sync_eval_state).
+        self._eval_correct_bytes = 0
+        self._eval_total_bytes = 0
+        self._eval_correct_words = 0
+        self._eval_total_words = 0
         # BPB accumulators: accumulate per-batch to avoid bias from
         # unequal non-PAD counts across batches (eval_loss is an unweighted
         # mean of per-batch means, so eval_loss * total_tokens != true total nats).
         self._eval_total_nats = 0.0
         self._eval_total_content_bytes = 0
 
+    def _sync_eval_state(self):
+        """Synchronize evaluation accumulators across distributed processes.
+
+        Uses accelerator.reduce for scalar counters and torch.distributed.all_gather_object
+        for string predictions/references. No-op when running on a single process.
+        """
+        if self.accelerator.num_processes <= 1:
+            return
+
+        import torch.distributed as dist
+
+        device = self.accelerator.device
+
+        # Reduce scalar counters across ranks (single all_reduce for integers)
+        int_counts = torch.tensor([
+            self._eval_correct_bytes,
+            self._eval_total_bytes,
+            self._eval_correct_words,
+            self._eval_total_words,
+            self._eval_total_content_bytes,
+            self._eval_sample_count,
+        ], dtype=torch.long, device=device)
+        int_counts = self.accelerator.reduce(int_counts, reduction="sum")
+
+        self._eval_correct_bytes = int_counts[0].item()
+        self._eval_total_bytes = int_counts[1].item()
+        self._eval_correct_words = int_counts[2].item()
+        self._eval_total_words = int_counts[3].item()
+        self._eval_total_content_bytes = int_counts[4].item()
+        self._eval_sample_count = int_counts[5].item()
+
+        # Reduce float accumulator (separate tensor for precision)
+        float_counts = torch.tensor([self._eval_total_nats], dtype=torch.double, device=device)
+        float_counts = self.accelerator.reduce(float_counts, reduction="sum")
+        self._eval_total_nats = float_counts[0].item()
+
+        # Gather string predictions/labels across ranks.
+        # Use raw all_gather_object (NOT gather_for_metrics) because
+        # gather_for_metrics trims to gradient_state.remainder, which is
+        # designed for per-batch use inside the eval loop. Calling it post-loop
+        # on the fully accumulated list would slice the entire evaluation down
+        # to only the last batch's remainder.
+        # Guard on config flags (not data presence) to ensure all ranks
+        # enter the collective and avoid deadlocks.
+        if self.args.predict_with_generate and self.loaded_metrics:
+            all_preds = [None] * self.accelerator.num_processes
+            all_labels = [None] * self.accelerator.num_processes
+            dist.all_gather_object(all_preds, self._eval_predictions)
+            dist.all_gather_object(all_labels, self._eval_labels)
+            self._eval_predictions = [s for rank_preds in all_preds for s in rank_preds]
+            self._eval_labels = [s for rank_labels in all_labels for s in rank_labels]
+
     def get_eval_dataloader(self, eval_dataset=None):
         """
-        Override to handle streaming eval datasets without accelerate's batch dispatch.
+        Override to handle streaming eval datasets.
 
-        Streaming datasets (IterableDataset) with string fields like 'prefix' and 'completion'
-        fail when accelerate tries to concatenate batches. We create a dataloader without
-        accelerate's prepare() to avoid this issue.
+        For IterableDataset (both torch and HuggingFace datasets variants):
+        - Shards across distributed ranks via split_dataset_by_node
+        - Wraps HF IterableDataset in a torch-compatible adapter so PyTorch's
+          DataLoader treats it as iterable (not map-style)
+        - Creates a DataLoader without accelerate's prepare() to avoid
+          string field concatenation errors
+
+        For regular Dataset:
+        - Falls through to the base Trainer (handles DistributedSampler)
         """
-        from torch.utils.data import DataLoader, IterableDataset
+        import datasets
+        from torch.utils.data import DataLoader
+        from torch.utils.data import IterableDataset as TorchIterableDataset
 
         eval_dataset = eval_dataset or self.eval_dataset
 
-        # For IterableDataset, create dataloader without accelerate's prepare
-        # to avoid string field concatenation errors
-        if isinstance(eval_dataset, IterableDataset):
+        # Check both torch and HF IterableDataset (they are unrelated classes;
+        # CustomIterableDataset inherits from datasets.IterableDataset only)
+        if isinstance(eval_dataset, (TorchIterableDataset, datasets.IterableDataset)):
+            # Shard across ranks for distributed evaluation
+            if self.accelerator.num_processes > 1:
+                from datasets.distributed import split_dataset_by_node
+
+                from welt_training.streaming import CustomIterableDataset
+
+                rank = self.accelerator.process_index
+                world_size = self.accelerator.num_processes
+
+                if isinstance(eval_dataset, CustomIterableDataset):
+                    old_transform = eval_dataset._transform
+                    sharded_inner = split_dataset_by_node(
+                        eval_dataset._dataset, rank=rank, world_size=world_size)
+                    eval_dataset = CustomIterableDataset(sharded_inner)
+                    if old_transform is not None:
+                        eval_dataset.set_transform(old_transform)
+                elif isinstance(eval_dataset, datasets.IterableDataset):
+                    eval_dataset = split_dataset_by_node(
+                        eval_dataset, rank=rank, world_size=world_size)
+
+            # datasets.IterableDataset does NOT inherit from
+            # torch.utils.data.IterableDataset, so PyTorch's DataLoader would
+            # treat it as map-style and try len()/__getitem__, which fails.
+            # Wrap in a thin torch-compatible adapter.
+            if not isinstance(eval_dataset, TorchIterableDataset):
+                eval_dataset = _TorchIterableAdapter(eval_dataset)
+
             return DataLoader(
                 eval_dataset,
                 batch_size=self.args.per_device_eval_batch_size,
@@ -287,9 +394,19 @@ class WeLTTrainer(Trainer):
         prefixes = inputs.get("prefix", None)
         completions = inputs.get("completion", None)
 
-        # Count samples in this batch
-        if prefixes is not None:
-            self._eval_sample_count += len(prefixes)
+        # Count samples in this batch (adjusted for last-batch padding below)
+        batch_sample_count = len(prefixes) if prefixes is not None else 0
+        if (batch_sample_count > 0
+                and self.accelerator.num_processes > 1
+                and self.accelerator.gradient_state.end_of_dataloader):
+            remainder = self.accelerator.gradient_state.remainder
+            if remainder > 0:
+                rank = self.accelerator.process_index
+                real_on_this_rank = max(
+                    0, min(batch_sample_count, remainder - rank * batch_sample_count)
+                )
+                batch_sample_count = real_on_this_rank
+        self._eval_sample_count += batch_sample_count
 
         # Create model inputs without custom fields
         model_inputs = {
@@ -315,20 +432,67 @@ class WeLTTrainer(Trainer):
                 # Get predicted token IDs (argmax over vocabulary)
                 pred_token_ids = logits.argmax(dim=-1)  # (batch, seq_len, vocab) -> (batch, seq_len)
 
-                # Store predictions and labels for accuracy
+                # Compute accuracy incrementally and accumulate BPB counters
                 labels_output = inputs.get("labels_output")
                 if labels_output is not None:
-                    self._eval_logits.append(pred_token_ids.cpu())
-                    self._eval_labels_for_accuracy.append(labels_output.cpu())
+                    # Ensure labels are on the same device as predictions
+                    # (streaming path skips accelerator.prepare, so labels may be on CPU)
+                    if labels_output.device != pred_token_ids.device:
+                        labels_output = labels_output.to(pred_token_ids.device)
 
-                    # Accumulate exact per-batch nats and content byte counts for BPB
+                    # Exclude padded last-batch replicas in distributed eval.
+                    # DataLoaderShard pads the last batch by replaying earlier samples
+                    # to keep batch sizes uniform across ranks. We trim to only real
+                    # samples so these replicas don't inflate the eval counters.
+                    if (self.accelerator.num_processes > 1
+                            and self.accelerator.gradient_state.end_of_dataloader):
+                        remainder = self.accelerator.gradient_state.remainder
+                        if remainder > 0:
+                            rank = self.accelerator.process_index
+                            per_device_bs = labels_output.shape[0]
+                            real_on_this_rank = max(
+                                0, min(per_device_bs, remainder - rank * per_device_bs)
+                            )
+                            if real_on_this_rank < per_device_bs:
+                                labels_output = labels_output[:real_on_this_rank]
+                                pred_token_ids = pred_token_ids[:real_on_this_rank]
+                                logits = logits[:real_on_this_rank]
+
                     pad_id = self.processor.tokenizer.pad_token_id
                     eos_id = self.processor.tokenizer.eos_token_id
-                    flat_labels = labels_output.flatten()
-                    batch_non_pad = (flat_labels != pad_id).sum().item()
-                    batch_content_bytes = ((flat_labels != pad_id) & (flat_labels != eos_id)).sum().item()
-                    self._eval_total_nats += loss.item() * batch_non_pad
-                    self._eval_total_content_bytes += batch_content_bytes
+
+                    # Accuracy: compute on-device, accumulate scalars
+                    non_pad_mask = labels_output != pad_id
+                    byte_matches = (pred_token_ids == labels_output) & non_pad_mask
+                    self._eval_correct_bytes += byte_matches.sum().item()
+                    self._eval_total_bytes += non_pad_mask.sum().item()
+
+                    # Word-level: a word is correct if ALL its non-padding tokens match
+                    word_nonpad = non_pad_mask.any(dim=2)
+                    word_all_correct = ((pred_token_ids == labels_output) | ~non_pad_mask).all(dim=2)
+                    self._eval_correct_words += (word_all_correct & word_nonpad).sum().item()
+                    self._eval_total_words += word_nonpad.sum().item()
+
+                    # Accumulate exact per-batch nats and content byte counts for BPB.
+                    # BPB is only well-defined for UTF-8 where each prediction is a byte.
+                    # For UTF-16/UTF-32 the loss goes through bytes_decoder.compute_loss()
+                    # with different semantics; skip BPB rather than report wrong values.
+                    model_encoding = getattr(getattr(model, "config", None), "encoding", "UTF-8")
+                    if model_encoding == "UTF-8":
+                        # Recompute loss from (possibly trimmed) logits/labels so the
+                        # numerator stays consistent with the trimmed token counts when
+                        # padded last-batch replicas have been removed.
+                        flat_labels = labels_output.flatten()
+                        flat_logits = logits.reshape(-1, logits.size(-1))
+                        batch_non_pad = (flat_labels != pad_id).sum().item()
+                        batch_content_bytes = ((flat_labels != pad_id) & (flat_labels != eos_id)).sum().item()
+                        if batch_non_pad > 0:
+                            batch_loss = torch.nn.functional.cross_entropy(
+                                flat_logits, flat_labels, ignore_index=pad_id
+                            )
+                            if torch.isfinite(batch_loss):
+                                self._eval_total_nats += batch_loss.item() * batch_non_pad
+                                self._eval_total_content_bytes += batch_content_bytes
 
         # Generate predictions if predict_with_generate is enabled
         # Only do generation when: (1) predict_with_generate is True, (2) we have prefixes,
@@ -358,13 +522,28 @@ class WeLTTrainer(Trainer):
 
                 predictions_text = model.generate(**generation_inputs, **generation_kwargs)
 
+                # Trim padded last-batch replicas for generation as well
+                if (self.accelerator.num_processes > 1
+                        and self.accelerator.gradient_state.end_of_dataloader):
+                    remainder = self.accelerator.gradient_state.remainder
+                    if remainder > 0:
+                        rank = self.accelerator.process_index
+                        per_device_bs = len(predictions_text)
+                        real_on_this_rank = max(
+                            0, min(per_device_bs, remainder - rank * per_device_bs)
+                        )
+                        predictions_text = predictions_text[:real_on_this_rank]
+                        if completions is not None:
+                            completions = completions[:real_on_this_rank]
+
                 # Store predictions and labels for generation metrics computation
                 self._eval_predictions.extend(predictions_text)
                 if completions is not None:
                     self._eval_labels.extend(completions)
 
-        # Log samples once per evaluation
-        if not self._logged_samples_this_eval and predictions_text and self.log_samples > 0:
+        # Log samples once per evaluation (main process only to avoid duplicates)
+        if (not self._logged_samples_this_eval and predictions_text
+                and self.log_samples > 0 and self.is_world_process_zero()):
             self._log_samples(predictions_text, prefixes, completions)
             self._logged_samples_this_eval = True
 
@@ -396,7 +575,7 @@ class WeLTTrainer(Trainer):
         metrics = super().evaluate(eval_dataset=eval_dataset, **kwargs)
 
         # Add custom metrics (generation, accuracy, perplexity)
-        additional_metrics = self._add_custom_metrics(metrics)
+        additional_metrics = self._add_custom_metrics(metrics, eval_dataset)
 
         # Log only the additional metrics we computed (not all metrics)
         # This allows them to appear in wandb and progress bars without creating
@@ -416,11 +595,18 @@ class WeLTTrainer(Trainer):
                 eval_dataset = eval_dataset.with_transform(self.processor)
         return eval_dataset
 
-    def _add_custom_metrics(self, metrics):
-        """Add custom metrics (generation, accuracy, perplexity) to metrics dict."""
+    def _add_custom_metrics(self, metrics, eval_dataset=None):
+        """Add custom metrics (generation, accuracy, perplexity) to metrics dict.
+
+        Synchronizes accumulators across distributed processes before computing
+        final metric values.
+        """
+        # Synchronize accumulators across ranks (no-op for single process)
+        self._sync_eval_state()
+
         additional_metrics = {}
 
-        # Compute generation metrics from stored predictions
+        # Compute generation metrics from stored predictions (globally gathered)
         if self._eval_predictions and self._eval_labels and self.loaded_metrics:
             generation_metrics = self._compute_generation_metrics(
                 self._eval_predictions,
@@ -432,7 +618,7 @@ class WeLTTrainer(Trainer):
                 metrics[metric_key] = value
                 additional_metrics[metric_key] = value
 
-        # Add perplexity and bits per byte if we have loss
+        # Add perplexity if we have loss
         if "eval_loss" in metrics:
             loss = metrics["eval_loss"]
             # Use 709 as threshold to avoid float overflow; exp(709) ~ 8.2e307 is the largest representable float
@@ -440,27 +626,32 @@ class WeLTTrainer(Trainer):
             metrics["perplexity"] = perplexity
             additional_metrics["perplexity"] = perplexity
 
-        # Compute byte and word accuracy and bits per byte from stored logits
-        if self._eval_logits and self._eval_labels_for_accuracy:
-            accuracy_metrics = self._compute_accuracy(
-                self._eval_logits,
-                self._eval_labels_for_accuracy
-            )
-            metrics["eval_byte_accuracy"] = accuracy_metrics["byte_accuracy"]
-            metrics["eval_word_accuracy"] = accuracy_metrics["word_accuracy"]
-            additional_metrics["eval_byte_accuracy"] = accuracy_metrics["byte_accuracy"]
-            additional_metrics["eval_word_accuracy"] = accuracy_metrics["word_accuracy"]
+        # Compute byte and word accuracy from globally-reduced scalar counters
+        if self._eval_total_bytes > 0:
+            byte_accuracy = self._eval_correct_bytes / self._eval_total_bytes
+            word_accuracy = (self._eval_correct_words / self._eval_total_words
+                             if self._eval_total_words > 0 else 0.0)
+            metrics["eval_byte_accuracy"] = byte_accuracy
+            metrics["eval_word_accuracy"] = word_accuracy
+            additional_metrics["eval_byte_accuracy"] = byte_accuracy
+            additional_metrics["eval_word_accuracy"] = word_accuracy
 
-            if self._eval_total_content_bytes > 0:
-                bpb = self._eval_total_nats / (self._eval_total_content_bytes * math.log(2))
-                metrics["eval_bits_per_byte"] = bpb
-                additional_metrics["eval_bits_per_byte"] = bpb
+        # Compute bits per byte from globally-reduced counters
+        if self._eval_total_content_bytes > 0:
+            bpb = self._eval_total_nats / (self._eval_total_content_bytes * math.log(2))
+            metrics["eval_bits_per_byte"] = bpb
+            additional_metrics["eval_bits_per_byte"] = bpb
 
-        # Add eval_samples count
-        if self._eval_sample_count > 0:
-            metrics["eval_samples"] = self._eval_sample_count
+        # Add eval_samples count.
+        # For map-style datasets, use len() to avoid overcounting from accelerate's
+        # batch padding. For generation, use gathered predictions count. Fall back to
+        # the reduced counter for sharded iterables.
+        if eval_dataset is not None and hasattr(eval_dataset, "__len__"):
+            metrics["eval_samples"] = len(eval_dataset)
         elif self._eval_predictions:
             metrics["eval_samples"] = len(self._eval_predictions)
+        elif self._eval_sample_count > 0:
+            metrics["eval_samples"] = self._eval_sample_count
 
         return additional_metrics
 
@@ -551,54 +742,3 @@ class WeLTTrainer(Trainer):
 
         return metrics
 
-    def _compute_accuracy(
-            self,
-            pred_token_ids: list[torch.Tensor],
-            labels: list[torch.Tensor]
-    ) -> dict[str, float]:
-        """
-        Compute byte-level and word-level accuracy from predictions and labels.
-
-        Byte accuracy: Percentage of correctly predicted tokens
-        Word accuracy: Percentage of words where ALL tokens are correctly predicted
-
-        Args:
-            pred_token_ids: List of predicted token ID tensors, shape (batch_size, num_words, tokens_per_word)
-            labels: List of label tensors, shape (batch_size, num_words, tokens_per_word)
-
-        Returns:
-            dict with 'byte_accuracy' and 'word_accuracy' as floats between 0 and 1
-        """
-        pad_token_id = self.processor.tokenizer.pad_token_id
-
-        total_bytes = 0
-        correct_bytes = 0
-        total_words = 0
-        correct_words = 0
-
-        # Process each batch separately (can't concatenate if tokens_per_word differs between batches)
-        # but vectorize operations within each batch for efficiency
-        for preds, label in zip(pred_token_ids, labels, strict=False):
-            # preds/label shape: (batch_size, num_words, tokens_per_word)
-            # Mask for non-padding tokens
-            non_pad_mask = label != pad_token_id  # (batch_size, num_words, tokens_per_word)
-
-            # Byte-level: count matching non-padding tokens across entire batch
-            byte_matches = (preds == label) & non_pad_mask
-            correct_bytes += byte_matches.sum().item()
-            total_bytes += non_pad_mask.sum().item()
-
-            # Word-level: a word is correct if all its non-padding tokens are correct
-            word_nonpad = non_pad_mask.any(dim=2)  # (batch_size, num_words)
-            word_matches = ((preds == label) | ~non_pad_mask).all(dim=2)  # (batch_size, num_words)
-            valid_words = word_nonpad.sum().item()
-            correct_words += (word_matches & word_nonpad).sum().item()
-            total_words += valid_words
-
-        byte_accuracy = correct_bytes / total_bytes if total_bytes > 0 else 0.0
-        word_accuracy = correct_words / total_words if total_words > 0 else 0.0
-
-        return {
-            "byte_accuracy": byte_accuracy,
-            "word_accuracy": word_accuracy
-        }

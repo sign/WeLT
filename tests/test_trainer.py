@@ -1102,5 +1102,138 @@ def test_accuracy_is_computed(trainer_setup):
     # while longer words are only partially correct
 
 
+def test_sync_eval_state_noop_single_gpu(trainer_setup):
+    """Test that _sync_eval_state does not modify values in single-GPU mode."""
+    model, processor, collator = trainer_setup
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir="output/test_trainer",
+        per_device_eval_batch_size=2,
+        do_train=False,
+        do_eval=True,
+        remove_unused_columns=False,
+    )
+
+    trainer = WeLTTrainer(
+        model=model,
+        args=training_args,
+        processor=processor,
+        data_collator=collator,
+    )
+
+    # Set known values on all accumulators
+    trainer._eval_correct_bytes = 10
+    trainer._eval_total_bytes = 20
+    trainer._eval_correct_words = 5
+    trainer._eval_total_words = 10
+    trainer._eval_total_nats = 100.0
+    trainer._eval_total_content_bytes = 50
+    trainer._eval_sample_count = 8
+    trainer._eval_predictions = ["hello", "world"]
+    trainer._eval_labels = ["hi", "earth"]
+
+    trainer._sync_eval_state()
+
+    # Values should be unchanged (num_processes == 1 => no-op)
+    assert trainer._eval_correct_bytes == 10
+    assert trainer._eval_total_bytes == 20
+    assert trainer._eval_correct_words == 5
+    assert trainer._eval_total_words == 10
+    assert trainer._eval_total_nats == 100.0
+    assert trainer._eval_total_content_bytes == 50
+    assert trainer._eval_sample_count == 8
+    assert trainer._eval_predictions == ["hello", "world"]
+    assert trainer._eval_labels == ["hi", "earth"]
+
+
+def test_metrics_consistent_across_batch_sizes(trainer_setup):
+    """Test that metrics don't depend on batch size (validates correct incremental accumulation)."""
+    model, processor, collator = trainer_setup
+
+    dataset = make_generation_dataset(
+        prefixes=["a ", "b ", "c ", "d "],
+        completions=["x", "y", "z", "w"],
+    )
+
+    results = {}
+    for bs in [1, 2, 4]:
+        args = Seq2SeqTrainingArguments(
+            output_dir="output/test_trainer",
+            per_device_eval_batch_size=bs,
+            do_train=False,
+            do_eval=True,
+            remove_unused_columns=False,
+            predict_with_generate=False,
+            report_to="none",
+        )
+        trainer = WeLTTrainer(
+            model=model,
+            args=args,
+            processor=processor,
+            data_collator=collator,
+        )
+        results[bs] = trainer.evaluate(dataset)
+
+    # BPB and accuracy should be identical regardless of batch size
+    for bs in [2, 4]:
+        assert abs(results[1]["eval_bits_per_byte"] - results[bs]["eval_bits_per_byte"]) < 1e-6, \
+            f"BPB differs between batch_size=1 ({results[1]['eval_bits_per_byte']}) " \
+            f"and batch_size={bs} ({results[bs]['eval_bits_per_byte']})"
+        assert abs(results[1]["eval_byte_accuracy"] - results[bs]["eval_byte_accuracy"]) < 1e-6, \
+            f"byte_accuracy differs between batch_size=1 and batch_size={bs}"
+        assert abs(results[1]["eval_word_accuracy"] - results[bs]["eval_word_accuracy"]) < 1e-6, \
+            f"word_accuracy differs between batch_size=1 and batch_size={bs}"
+
+    # Verify BPB > loss/ln(2) (due to EOS overhead) for at least one batch size
+    import math
+    ref = results[1]
+    naive_bpb = ref["eval_loss"] / math.log(2)
+    assert ref["eval_bits_per_byte"] > naive_bpb, \
+        f"BPB ({ref['eval_bits_per_byte']}) should exceed loss/ln(2) ({naive_bpb}) due to EOS overhead"
+
+    # Verify accuracy is in valid range
+    assert 0.0 <= ref["eval_byte_accuracy"] <= 1.0
+    assert 0.0 <= ref["eval_word_accuracy"] <= 1.0
+
+
+def test_get_eval_dataloader_recognizes_custom_iterable(trainer_setup):
+    """Test that get_eval_dataloader takes the streaming branch for CustomIterableDataset."""
+    from torch.utils.data import DataLoader
+
+    from welt_training.streaming import CustomIterableDataset
+
+    model, processor, collator = trainer_setup
+
+    # Create a CustomIterableDataset (inherits from datasets.IterableDataset)
+    base_dataset = Dataset.from_dict({
+        "text": ["Hello world", "Test text"],
+        "prefix": ["Hello ", "Test "],
+        "completion": ["world", "text"],
+    })
+    iterable_ds = CustomIterableDataset(base_dataset.to_iterable_dataset())
+    iterable_ds = iterable_ds.with_transform(processor)
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir="output/test_trainer",
+        per_device_eval_batch_size=2,
+        do_train=False,
+        do_eval=True,
+        remove_unused_columns=False,
+    )
+
+    trainer = WeLTTrainer(
+        model=model,
+        args=training_args,
+        processor=processor,
+        data_collator=collator,
+    )
+
+    dataloader = trainer.get_eval_dataloader(iterable_ds)
+
+    # Should return a plain DataLoader (not wrapped by accelerate's DataLoaderShard)
+    assert type(dataloader) is DataLoader, \
+        f"Expected plain DataLoader for IterableDataset, got {type(dataloader).__name__}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "-s"])
