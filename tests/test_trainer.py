@@ -20,6 +20,20 @@ def trainer_setup():
     return model, processor, collator
 
 
+@pytest.fixture(scope="module")
+def trainer_setup_utf32():
+    """Setup UTF-32 model, processor, and collator for trainer tests."""
+    model, processor, collator = setup_tiny_model(
+        image_encoder_name=None,
+        encoding="UTF-32",
+        bytes_decoder_name="sign/utf8-lm-tiny",
+    )
+    # Force CPU to avoid device placement issues during generation
+    model = model.to(torch.device("cpu"))
+    model.eval()
+    return model, processor, collator
+
+
 def make_generation_dataset(prefixes: list[str], completions: list[str]) -> Dataset:
     """
     Create a dataset for generation-based evaluation.
@@ -1050,6 +1064,50 @@ def test_bits_per_byte_computation(trainer_setup):
     # For a byte-level model with EOS tokens, BPB > loss / ln(2).
     # labels_output contains content bytes + one EOS per word; EOS is counted
     # in num_tokens (loss denominator) but not in num_bytes, so BPB is inflated.
+    import math
+    naive_bpb = metrics["eval_loss"] / math.log(2)
+    assert metrics["eval_bits_per_byte"] > naive_bpb, \
+        f"eval_bits_per_byte should exceed loss/ln(2) due to EOS overhead: " \
+        f"{metrics['eval_bits_per_byte']} vs {naive_bpb}"
+
+
+def test_bits_per_byte_computation_utf32(trainer_setup_utf32):
+    """Test that bits_per_byte is computed correctly for UTF-32."""
+    model, processor, collator = trainer_setup_utf32
+
+    eval_dataset = make_generation_dataset(
+        prefixes=["a", "b"],
+        completions=[" x", " y"],
+    )
+
+    training_args = Seq2SeqTrainingArguments(
+        output_dir="output/test_trainer",
+        per_device_eval_batch_size=2,
+        do_train=False,
+        do_eval=True,
+        remove_unused_columns=False,
+        predict_with_generate=False,
+    )
+
+    trainer = WeLTTrainer(
+        model=model,
+        args=training_args,
+        processor=processor,
+        data_collator=collator,
+        eval_metrics=None,
+        max_generated_words=3,
+    )
+
+    metrics = trainer.evaluate(eval_dataset)
+
+    # Verify bits_per_byte is present and positive
+    assert "eval_bits_per_byte" in metrics, \
+        f"eval_bits_per_byte should be in metrics. Found: {list(metrics.keys())}"
+    assert metrics["eval_bits_per_byte"] > 0, \
+        f"eval_bits_per_byte should be positive, got {metrics['eval_bits_per_byte']}"
+
+    # Loss is averaged over all non-PAD bytes (content + EOS bytes), while BPB
+    # divides by content bytes only, so BPB must exceed loss/ln(2).
     import math
     naive_bpb = metrics["eval_loss"] / math.log(2)
     assert metrics["eval_bits_per_byte"] > naive_bpb, \

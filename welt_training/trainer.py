@@ -474,24 +474,31 @@ class WeLTTrainer(Trainer):
                     self._eval_total_words += word_nonpad.sum().item()
 
                     # Accumulate exact per-batch nats and content byte counts for BPB.
-                    # BPB is only well-defined for UTF-8 where each prediction is a byte.
-                    # For UTF-16/UTF-32 the loss goes through bytes_decoder.compute_loss()
-                    # with different semantics; skip BPB rather than report wrong values.
+                    # UTF-8 uses direct byte-level CE, while UTF-16/UTF-32 use
+                    # CharacterCausalLMWrapper.compute_loss() over split bytes.
                     model_encoding = getattr(getattr(model, "config", None), "encoding", "UTF-8")
-                    if model_encoding == "UTF-8":
+                    bytes_per_token = {"UTF-8": 1, "UTF-16": 2, "UTF-32": 4}.get(model_encoding)
+                    if bytes_per_token is not None:
                         # Recompute loss from (possibly trimmed) logits/labels so the
                         # numerator stays consistent with the trimmed token counts when
                         # padded last-batch replicas have been removed.
                         flat_labels = labels_output.flatten()
                         flat_logits = logits.reshape(-1, logits.size(-1))
-                        batch_non_pad = (flat_labels != pad_id).sum().item()
-                        batch_content_bytes = ((flat_labels != pad_id) & (flat_labels != eos_id)).sum().item()
-                        if batch_non_pad > 0:
-                            batch_loss = torch.nn.functional.cross_entropy(
-                                flat_logits, flat_labels, ignore_index=pad_id
-                            )
+                        batch_non_pad_tokens = (flat_labels != pad_id).sum().item()
+                        batch_non_pad_bytes = batch_non_pad_tokens * bytes_per_token
+                        batch_content_bytes = (
+                            ((flat_labels != pad_id) & (flat_labels != eos_id)).sum().item() * bytes_per_token
+                        )
+                        if batch_non_pad_bytes > 0:
+                            if model_encoding == "UTF-8":
+                                batch_loss = torch.nn.functional.cross_entropy(
+                                    flat_logits, flat_labels, ignore_index=pad_id
+                                )
+                            else:
+                                batch_loss = model.bytes_decoder.compute_loss(flat_logits, flat_labels)
+
                             if torch.isfinite(batch_loss):
-                                self._eval_total_nats += batch_loss.item() * batch_non_pad
+                                self._eval_total_nats += batch_loss.item() * batch_non_pad_bytes
                                 self._eval_total_content_bytes += batch_content_bytes
 
         # Generate predictions if predict_with_generate is enabled
@@ -741,4 +748,3 @@ class WeLTTrainer(Trainer):
                 logger.warning(f"Failed to compute metric '{metric_name}': {e}")
 
         return metrics
-
