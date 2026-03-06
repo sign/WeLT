@@ -377,6 +377,23 @@ class WeLTTrainer(Trainer):
         )
         return self.optimizer
 
+    def _real_batch_count(self, nominal_count):
+        """Return the number of real samples on this rank for the current batch.
+
+        In distributed evaluation, DataLoaderShard pads the last batch by
+        replaying earlier samples so every rank has the same batch size.
+        This method trims the count to only real (non-padded) samples.
+        Returns ``nominal_count`` unchanged for single-GPU or non-last batches.
+        """
+        if (nominal_count > 0
+                and self.accelerator.num_processes > 1
+                and self.accelerator.gradient_state.end_of_dataloader):
+            remainder = self.accelerator.gradient_state.remainder
+            if remainder > 0:
+                rank = self.accelerator.process_index
+                return max(0, min(nominal_count, remainder - rank * nominal_count))
+        return nominal_count
+
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
         """
         Override prediction_step to generate predictions and store data for metrics.
@@ -394,19 +411,9 @@ class WeLTTrainer(Trainer):
         prefixes = inputs.get("prefix", None)
         completions = inputs.get("completion", None)
 
-        # Count samples in this batch (adjusted for last-batch padding below)
+        # Count samples in this batch (adjusted for last-batch padding)
         batch_sample_count = len(prefixes) if prefixes is not None else 0
-        if (batch_sample_count > 0
-                and self.accelerator.num_processes > 1
-                and self.accelerator.gradient_state.end_of_dataloader):
-            remainder = self.accelerator.gradient_state.remainder
-            if remainder > 0:
-                rank = self.accelerator.process_index
-                real_on_this_rank = max(
-                    0, min(batch_sample_count, remainder - rank * batch_sample_count)
-                )
-                batch_sample_count = real_on_this_rank
-        self._eval_sample_count += batch_sample_count
+        self._eval_sample_count += self._real_batch_count(batch_sample_count)
 
         # Create model inputs without custom fields
         model_inputs = {
@@ -441,22 +448,11 @@ class WeLTTrainer(Trainer):
                         labels_output = labels_output.to(pred_token_ids.device)
 
                     # Exclude padded last-batch replicas in distributed eval.
-                    # DataLoaderShard pads the last batch by replaying earlier samples
-                    # to keep batch sizes uniform across ranks. We trim to only real
-                    # samples so these replicas don't inflate the eval counters.
-                    if (self.accelerator.num_processes > 1
-                            and self.accelerator.gradient_state.end_of_dataloader):
-                        remainder = self.accelerator.gradient_state.remainder
-                        if remainder > 0:
-                            rank = self.accelerator.process_index
-                            per_device_bs = labels_output.shape[0]
-                            real_on_this_rank = max(
-                                0, min(per_device_bs, remainder - rank * per_device_bs)
-                            )
-                            if real_on_this_rank < per_device_bs:
-                                labels_output = labels_output[:real_on_this_rank]
-                                pred_token_ids = pred_token_ids[:real_on_this_rank]
-                                logits = logits[:real_on_this_rank]
+                    real_count = self._real_batch_count(labels_output.shape[0])
+                    if real_count < labels_output.shape[0]:
+                        labels_output = labels_output[:real_count]
+                        pred_token_ids = pred_token_ids[:real_count]
+                        logits = logits[:real_count]
 
                     pad_id = self.processor.tokenizer.pad_token_id
                     eos_id = self.processor.tokenizer.eos_token_id
@@ -530,18 +526,11 @@ class WeLTTrainer(Trainer):
                 predictions_text = model.generate(**generation_inputs, **generation_kwargs)
 
                 # Trim padded last-batch replicas for generation as well
-                if (self.accelerator.num_processes > 1
-                        and self.accelerator.gradient_state.end_of_dataloader):
-                    remainder = self.accelerator.gradient_state.remainder
-                    if remainder > 0:
-                        rank = self.accelerator.process_index
-                        per_device_bs = len(predictions_text)
-                        real_on_this_rank = max(
-                            0, min(per_device_bs, remainder - rank * per_device_bs)
-                        )
-                        predictions_text = predictions_text[:real_on_this_rank]
-                        if completions is not None:
-                            completions = completions[:real_on_this_rank]
+                real_count = self._real_batch_count(len(predictions_text))
+                if real_count < len(predictions_text):
+                    predictions_text = predictions_text[:real_count]
+                    if completions is not None:
+                        completions = completions[:real_count]
 
                 # Store predictions and labels for generation metrics computation
                 self._eval_predictions.extend(predictions_text)
