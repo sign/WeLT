@@ -118,6 +118,7 @@ class TestBPBTokenizerIntegration:
         assert bpb_bpe < bpb_byte
         assert bpb_bpe == pytest.approx(bpb_byte * 400 / 1400)
 
+    @pytest.mark.integration
     def test_decode_roundtrip_byte_counting(self):
         """
         Validate the run_clm.py approach: decode token IDs → encode as UTF-8 → count bytes.

@@ -507,7 +507,13 @@ class WeLTTrainer(Trainer):
         completions = inputs.get("completion", None)
 
         # Count samples in this batch (adjusted for last-batch padding)
-        batch_sample_count = len(prefixes) if prefixes is not None else 0
+        if prefixes is not None:
+            batch_sample_count = len(prefixes)
+        else:
+            batch_sample_count = next(
+                (v.shape[0] for v in inputs.values() if isinstance(v, torch.Tensor) and v.dim() > 0),
+                0,
+            )
         self._eval_sample_count += self._real_batch_count(batch_sample_count)
 
         # Create model inputs without custom fields
