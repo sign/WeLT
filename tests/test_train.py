@@ -119,8 +119,10 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
     assert "eval_bits_per_byte" in eval_metrics, "eval_bits_per_byte should be present"
     import math
     naive_bpb = eval_metrics["eval_loss"] / math.log(2)
-    assert eval_metrics["eval_bits_per_byte"] > naive_bpb, \
-        f"eval_bits_per_byte should exceed loss/ln(2) due to EOS overhead: {eval_metrics['eval_bits_per_byte']} vs {naive_bpb}"
+    assert eval_metrics["eval_bits_per_byte"] > naive_bpb, (
+        f"eval_bits_per_byte should exceed loss/ln(2) due to EOS overhead: "
+        f"{eval_metrics['eval_bits_per_byte']} vs {naive_bpb}"
+    )
 
     print("\n✓ Training completed successfully!")
     print(f"✓ eval_chrf = {chrf_score:.2f}")
