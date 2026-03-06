@@ -70,6 +70,7 @@ from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 from welt_training.data_utils import load_prepared_data
+from welt_training.metrics import compute_bits_per_byte
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -570,7 +571,6 @@ def main():
     )
     column_names = [text_column_name]
 
-
     def tokenize_function(examples):
         with CaptureLogger(tok_logger) as cl:
             output = tokenizer(examples[text_column_name])
@@ -756,6 +756,19 @@ def main():
         except OverflowError:
             perplexity = float("inf")
         metrics["perplexity"] = perplexity
+
+        # Compute bits per byte from the evaluated subset.
+        # Decode tokens back to text to count the corresponding UTF-8 bytes.
+        if not data_args.streaming:
+            num_eval_tokens = len(eval_dataset) * (block_size - 1)
+            num_eval_bytes = sum(
+                len(tokenizer.decode(example["input_ids"][1:]).encode("utf-8"))
+                for example in eval_dataset
+            )
+            if num_eval_bytes > 0:
+                metrics["eval_bits_per_byte"] = compute_bits_per_byte(
+                    metrics["eval_loss"], num_eval_tokens, num_eval_bytes
+                )
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
