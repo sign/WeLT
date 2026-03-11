@@ -46,7 +46,6 @@ from itertools import chain
 from typing import Optional
 
 import datasets
-import evaluate
 import torch
 from datasets import DatasetDict, IterableDataset, IterableDatasetDict, load_dataset
 
@@ -70,6 +69,7 @@ from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 from welt_training.data_utils import load_prepared_data
+from welt_training.metrics import compute_bits_per_byte
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -570,7 +570,6 @@ def main():
     )
     column_names = [text_column_name]
 
-
     def tokenize_function(examples):
         with CaptureLogger(tok_logger) as cl:
             output = tokenizer(examples[text_column_name])
@@ -683,22 +682,50 @@ def main():
                 max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
                 eval_dataset = eval_dataset.select(range(max_eval_samples))
 
+        # Pre-compute token/byte counts for bits-per-byte on every evaluation
+        if not data_args.streaming:
+            num_eval_tokens = len(eval_dataset) * (block_size - 1)
+            num_eval_bytes = sum(
+                len(tokenizer.decode(example["input_ids"][1:]).encode("utf-8"))
+                for example in eval_dataset
+            )
+        else:
+            num_eval_tokens = 0
+            num_eval_bytes = 0
+
         def preprocess_logits_for_metrics(logits, labels):
             if isinstance(logits, tuple):
-                # Depending on the model and config, logits may contain extra tensors,
-                # like past_key_values, but logits always come first
                 logits = logits[0]
-            return logits.argmax(dim=-1)
-
-        metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
+            preds = logits.argmax(dim=-1)
+            # Compute per-token cross-entropy for BPB calculation
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            per_token_loss = torch.nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="none",
+            ).view(shift_labels.shape)
+            # Pad to same seq_len as preds so Trainer can concatenate them
+            per_token_loss = torch.nn.functional.pad(per_token_loss, (0, 1), value=0.0)
+            return preds, per_token_loss
 
         def compute_metrics(eval_preds):
-            preds, labels = eval_preds
-            # preds have the same shape as the labels, after the argmax(-1) has been calculated
-            # by preprocess_logits_for_metrics but we need to shift the labels
+            (preds, per_token_losses), labels = eval_preds
+            # Accuracy (shift preds/labels for next-token prediction)
             labels = labels[:, 1:].reshape(-1)
             preds = preds[:, :-1].reshape(-1)
-            return metric.compute(predictions=preds, references=labels)
+            metrics = {"accuracy": float((preds == labels).mean())}
+            # Perplexity and BPB from per-token losses (strip padding column)
+            avg_loss = float(per_token_losses[:, :-1].mean())
+            try:
+                metrics["perplexity"] = math.exp(avg_loss)
+            except OverflowError:
+                metrics["perplexity"] = float("inf")
+            if num_eval_bytes > 0:
+                metrics["bits_per_byte"] = compute_bits_per_byte(
+                    avg_loss, num_eval_tokens, num_eval_bytes
+                )
+            return metrics
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -750,12 +777,6 @@ def main():
             metrics["eval_samples"] = max_eval_samples
         else:
             metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-
-        try:
-            perplexity = math.exp(metrics["eval_loss"])
-        except OverflowError:
-            perplexity = float("inf")
-        metrics["perplexity"] = perplexity
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)

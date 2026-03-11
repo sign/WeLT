@@ -115,9 +115,19 @@ def test_basic_training_with_eval_chrf(temp_output_dir):
     assert "eval_samples" in eval_metrics, "eval_samples should be present"
     assert "perplexity" in eval_metrics, "perplexity should be present"
 
+    # Verify bits per byte is present and accounts for EOS tokens (BPB > loss/ln(2))
+    assert "eval_bits_per_byte" in eval_metrics, "eval_bits_per_byte should be present"
+    import math
+    naive_bpb = eval_metrics["eval_loss"] / math.log(2)
+    assert eval_metrics["eval_bits_per_byte"] > naive_bpb, (
+        f"eval_bits_per_byte should exceed loss/ln(2) due to EOS overhead: "
+        f"{eval_metrics['eval_bits_per_byte']} vs {naive_bpb}"
+    )
+
     print("\n✓ Training completed successfully!")
     print(f"✓ eval_chrf = {chrf_score:.2f}")
     print(f"✓ eval_loss = {eval_metrics['eval_loss']:.4f}")
+    print(f"✓ eval_bits_per_byte = {eval_metrics['eval_bits_per_byte']:.4f}")
     print(f"✓ eval_samples = {eval_metrics['eval_samples']}")
     print(f"✓ All metrics: {list(eval_metrics.keys())}")
 
@@ -167,9 +177,10 @@ def test_training_without_generation_metrics(temp_output_dir):
     with open(eval_results_path) as f:
         eval_metrics = json.load(f)
 
-    # Should have loss and perplexity but no generation metrics
+    # Should have loss, perplexity, and bits_per_byte but no generation metrics
     assert "eval_loss" in eval_metrics
     assert "perplexity" in eval_metrics
+    assert "eval_bits_per_byte" in eval_metrics
     assert "eval_samples" in eval_metrics
     # Should not have generation metrics
     assert "eval_chrf" not in eval_metrics

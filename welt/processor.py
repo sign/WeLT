@@ -79,7 +79,7 @@ class TextImageProcessor(ProcessorMixin):
             attr.save_pretrained(attr_dir)
 
         output = {k: v for k, v in self.__dict__.items()
-                  if k not in self.attributes and isinstance(v, (int, float, str, bool))}
+                  if k not in self.attributes and isinstance(v, int | float | str | bool)}
         output["processor_class"] = self.__class__.__name__
         config_file = os.path.join(save_directory, PROCESSOR_CONFIG_NAME)
         with open(config_file, "w") as f:
