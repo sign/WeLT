@@ -438,23 +438,26 @@ class WeLTTrainer(Trainer):
         # Recompute loss from (possibly trimmed) logits/labels so the
         # numerator stays consistent with the trimmed token counts when
         # padded last-batch replicas have been removed.
+        # Exclude EOS from both numerator and denominator so BPB measures
+        # only content-byte prediction cost, comparable to CLM baselines.
         flat_labels = labels_output.flatten()
         flat_logits = logits.reshape(-1, logits.size(-1))
-        batch_non_pad_tokens = (flat_labels != pad_id).sum().item()
-        batch_non_pad_bytes = batch_non_pad_tokens * bytes_per_token
-        batch_content_bytes = (
-            ((flat_labels != pad_id) & (flat_labels != eos_id)).sum().item() * bytes_per_token
-        )
-        if batch_non_pad_bytes > 0:
+        content_mask = (flat_labels != pad_id) & (flat_labels != eos_id)
+        batch_content_bytes = content_mask.sum().item() * bytes_per_token
+        if batch_content_bytes > 0:
+            # Mask EOS positions so they are ignored by the loss
+            flat_labels_content = flat_labels.clone()
+            flat_labels_content[flat_labels == eos_id] = pad_id
+
             if model_encoding == "UTF-8":
                 batch_loss = torch.nn.functional.cross_entropy(
-                    flat_logits, flat_labels, ignore_index=pad_id
+                    flat_logits, flat_labels_content, ignore_index=pad_id
                 )
             else:
-                batch_loss = model.bytes_decoder.compute_loss(flat_logits, flat_labels)
+                batch_loss = model.bytes_decoder.compute_loss(flat_logits, flat_labels_content)
 
             if torch.isfinite(batch_loss):
-                self._eval_total_nats += batch_loss.item() * batch_non_pad_bytes
+                self._eval_total_nats += batch_loss.item() * batch_content_bytes
                 self._eval_total_content_bytes += batch_content_bytes
 
     def _generate_predictions(self, model, prefixes, completions):

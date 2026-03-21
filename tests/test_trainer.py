@@ -61,6 +61,7 @@ def test_trainer_initialization(trainer_setup):
         do_eval=True,
         remove_unused_columns=False,
         predict_with_generate=True,
+        report_to="none",
     )
 
     # Initialize trainer with no metrics
@@ -90,6 +91,7 @@ def test_trainer_with_generation_config(trainer_setup):
         do_eval=True,
         remove_unused_columns=False,
         predict_with_generate=True,
+        report_to="none",
     )
 
     # Initialize with generation config
@@ -118,6 +120,7 @@ def test_trainer_with_metrics(trainer_setup):
         do_eval=True,
         remove_unused_columns=False,
         predict_with_generate=True,
+        report_to="none",
     )
 
     # Initialize trainer with metrics (only bleu, as cer might not be available)
@@ -149,6 +152,7 @@ def test_evaluation_with_generate(trainer_setup):
         do_eval=True,
         remove_unused_columns=False,
         predict_with_generate=True,
+        report_to="none",
     )
 
     trainer = WeLTTrainer(
@@ -610,6 +614,7 @@ def test_perplexity_computation(trainer_setup):
         do_eval=True,
         remove_unused_columns=False,
         predict_with_generate=True,
+        report_to="none",
     )
 
     trainer = WeLTTrainer(
@@ -1042,6 +1047,7 @@ def test_bits_per_byte_computation(trainer_setup):
         do_eval=True,
         remove_unused_columns=False,
         predict_with_generate=True,
+        report_to="none",
     )
 
     trainer = WeLTTrainer(
@@ -1061,14 +1067,12 @@ def test_bits_per_byte_computation(trainer_setup):
     assert metrics["eval_bits_per_byte"] > 0, \
         f"eval_bits_per_byte should be positive, got {metrics['eval_bits_per_byte']}"
 
-    # For a byte-level model with EOS tokens, BPB > loss / ln(2).
-    # labels_output contains content bytes + one EOS per word; EOS is counted
-    # in num_tokens (loss denominator) but not in num_bytes, so BPB is inflated.
+    # EOS is excluded from both numerator and denominator, so BPB is derived
+    # from the trainer's content-only accumulators rather than eval_loss.
     import math
-    naive_bpb = metrics["eval_loss"] / math.log(2)
-    assert metrics["eval_bits_per_byte"] > naive_bpb, \
-        f"eval_bits_per_byte should exceed loss/ln(2) due to EOS overhead: " \
-        f"{metrics['eval_bits_per_byte']} vs {naive_bpb}"
+    expected_bpb = trainer._eval_total_nats / (trainer._eval_total_content_bytes * math.log(2))
+    assert metrics["eval_bits_per_byte"] == pytest.approx(expected_bpb)
+    assert trainer._eval_total_content_bytes < trainer._eval_total_bytes
 
 
 def test_bits_per_byte_computation_utf32(trainer_setup_utf32):
@@ -1087,6 +1091,7 @@ def test_bits_per_byte_computation_utf32(trainer_setup_utf32):
         do_eval=True,
         remove_unused_columns=False,
         predict_with_generate=False,
+        report_to="none",
     )
 
     trainer = WeLTTrainer(
@@ -1106,13 +1111,12 @@ def test_bits_per_byte_computation_utf32(trainer_setup_utf32):
     assert metrics["eval_bits_per_byte"] > 0, \
         f"eval_bits_per_byte should be positive, got {metrics['eval_bits_per_byte']}"
 
-    # Loss is averaged over all non-PAD bytes (content + EOS bytes), while BPB
-    # divides by content bytes only, so BPB must exceed loss/ln(2).
+    # EOS is excluded from both numerator and denominator, so BPB is derived
+    # from the trainer's content-only accumulators rather than eval_loss.
     import math
-    naive_bpb = metrics["eval_loss"] / math.log(2)
-    assert metrics["eval_bits_per_byte"] > naive_bpb, \
-        f"eval_bits_per_byte should exceed loss/ln(2) due to EOS overhead: " \
-        f"{metrics['eval_bits_per_byte']} vs {naive_bpb}"
+    expected_bpb = trainer._eval_total_nats / (trainer._eval_total_content_bytes * math.log(2))
+    assert metrics["eval_bits_per_byte"] == pytest.approx(expected_bpb)
+    assert trainer._eval_total_content_bytes < trainer._eval_total_bytes * 4
 
 
 def test_accuracy_is_computed(trainer_setup):
@@ -1242,12 +1246,11 @@ def test_metrics_consistent_across_batch_sizes(trainer_setup):
         assert abs(results[1]["eval_word_accuracy"] - results[bs]["eval_word_accuracy"]) < 1e-6, \
             f"word_accuracy differs between batch_size=1 and batch_size={bs}"
 
-    # Verify BPB > loss/ln(2) (due to EOS overhead) for at least one batch size
-    import math
+    # EOS is excluded from both numerator and denominator, so BPB reflects
+    # only content-byte prediction cost.
     ref = results[1]
-    naive_bpb = ref["eval_loss"] / math.log(2)
-    assert ref["eval_bits_per_byte"] > naive_bpb, \
-        f"BPB ({ref['eval_bits_per_byte']}) should exceed loss/ln(2) ({naive_bpb}) due to EOS overhead"
+    assert ref["eval_bits_per_byte"] > 0, \
+        f"BPB should be positive, got {ref['eval_bits_per_byte']}"
 
     # Verify accuracy is in valid range
     assert 0.0 <= ref["eval_byte_accuracy"] <= 1.0

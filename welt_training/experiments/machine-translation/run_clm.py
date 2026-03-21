@@ -253,6 +253,16 @@ class DataTrainingArguments:
             "help": "Path to prepared dataset shards (from welt-prepare-data). Skips download and text extraction."
         },
     )
+    eval_preserve_document_boundaries: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Chunk each validation document independently instead of concatenating all text "
+                "into one stream. Preserves document boundaries so the model never sees cross-document "
+                "context during eval, matching WeLT's packed-eval protocol for fair BPB comparison."
+            )
+        },
+    )
 
     def __post_init__(self):
         if self.streaming:
@@ -570,6 +580,22 @@ def main():
     )
     column_names = [text_column_name]
 
+    # Limit samples before tokenization/packing so max_eval_samples and
+    # max_train_samples select raw documents, consistent with WELT's train.py.
+    if training_args.do_train and data_args.max_train_samples is not None:
+        if data_args.streaming:
+            raw_datasets["train"] = raw_datasets["train"].take(data_args.max_train_samples)
+        else:
+            max_train_samples = min(len(raw_datasets["train"]), data_args.max_train_samples)
+            raw_datasets["train"] = raw_datasets["train"].select(range(max_train_samples))
+
+    if training_args.do_eval and data_args.max_eval_samples is not None:
+        if data_args.streaming:
+            raw_datasets["validation"] = raw_datasets["validation"].take(data_args.max_eval_samples)
+        else:
+            max_eval_samples = min(len(raw_datasets["validation"]), data_args.max_eval_samples)
+            raw_datasets["validation"] = raw_datasets["validation"].select(range(max_eval_samples))
+
     def tokenize_function(examples):
         with CaptureLogger(tok_logger) as cl:
             output = tokenizer(examples[text_column_name])
@@ -638,6 +664,33 @@ def main():
         result["labels"] = result["input_ids"].copy()
         return result
 
+    # Chunk each document independently, preserving document boundaries.
+    # The model never sees cross-document context, matching WeLT's packed-eval protocol.
+    # Remainder chunks are padded to block_size; labels use -100 for padding so the loss ignores them.
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+
+    def chunk_documents(examples):
+        result = {k: [] for k in examples}
+        result["labels"] = []
+        for i in range(len(examples["input_ids"])):
+            doc_len = len(examples["input_ids"][i])
+            if doc_len == 0:
+                continue
+            for start in range(0, doc_len, block_size):
+                real_len = min(block_size, doc_len - start)
+                pad_len = block_size - real_len
+                result["input_ids"].append(
+                    examples["input_ids"][i][start:start + block_size] + [pad_id] * pad_len
+                )
+                result["attention_mask"].append(
+                    examples["attention_mask"][i][start:start + block_size] + [0] * pad_len
+                )
+                # Labels: real tokens keep their IDs, padding positions = -100 (ignored by CE loss)
+                result["labels"].append(
+                    examples["input_ids"][i][start:start + block_size] + [-100] * pad_len
+                )
+        return result
+
     # Note that with `batched=True`, this map processes 1,000 texts together, so group_texts throws away a remainder
     # for each of those groups of 1,000 texts. You can adjust that batch_size here but a higher value might be slower
     # to preprocess.
@@ -645,50 +698,64 @@ def main():
     # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
     # https://huggingface.co/docs/datasets/process#map
 
+    use_chunk_documents = (
+        data_args.eval_preserve_document_boundaries
+        and training_args.do_eval
+    )
+
+    map_kwargs = {}
+    if not data_args.streaming:
+        map_kwargs = {
+            "num_proc": data_args.preprocessing_num_workers,
+            "load_from_cache_file": not data_args.overwrite_cache,
+        }
+
     with training_args.main_process_first(desc="grouping texts together"):
-        if not data_args.streaming:
-            lm_datasets = tokenized_datasets.map(
-                group_texts,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
-                desc=f"Grouping texts in chunks of {block_size}",
-            )
-        else:
-            lm_datasets = tokenized_datasets.map(
-                group_texts,
-                batched=True,
+        if training_args.do_train:
+            if "train" not in tokenized_datasets:
+                raise ValueError("--do_train requires a train dataset")
+            train_dataset = tokenized_datasets["train"].map(
+                group_texts, batched=True,
+                desc=f"Grouping train texts in chunks of {block_size}",
+                **map_kwargs,
             )
 
-    if training_args.do_train:
-        if "train" not in tokenized_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = lm_datasets["train"]
-        if data_args.max_train_samples is not None:
-            if data_args.streaming:
-                train_dataset = train_dataset.take(data_args.max_train_samples)
-            else:
-                max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-                train_dataset = train_dataset.select(range(max_train_samples))
+        if training_args.do_eval:
+            if "validation" not in tokenized_datasets:
+                raise ValueError("--do_eval requires a validation dataset")
+            eval_fn = chunk_documents if use_chunk_documents else group_texts
+            eval_desc = (
+                f"Chunking eval documents in blocks of {block_size} (preserving boundaries)"
+                if use_chunk_documents
+                else f"Grouping eval texts in chunks of {block_size}"
+            )
+            eval_dataset = tokenized_datasets["validation"].map(
+                eval_fn, batched=True, desc=eval_desc, **map_kwargs,
+            )
 
     if training_args.do_eval:
-        if "validation" not in tokenized_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = lm_datasets["validation"]
-        if data_args.max_eval_samples is not None:
-            if data_args.streaming:
-                eval_dataset = eval_dataset.take(data_args.max_eval_samples)
-            else:
-                max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-                eval_dataset = eval_dataset.select(range(max_eval_samples))
-
-        # Pre-compute token/byte counts for bits-per-byte on every evaluation
+        # Pre-compute token/byte counts for bits-per-byte on every evaluation.
+        # When chunk_documents is used, chunks may be shorter than block_size
+        # (labels use -100 for padding), so we count only real predicted positions.
         if not data_args.streaming:
-            num_eval_tokens = len(eval_dataset) * (block_size - 1)
-            num_eval_bytes = sum(
-                len(tokenizer.decode(example["input_ids"][1:]).encode("utf-8"))
-                for example in eval_dataset
-            )
+            if use_chunk_documents:
+                num_eval_tokens = 0
+                num_eval_bytes = 0
+                for example in eval_dataset:
+                    # Real length = number of non-padding labels
+                    real_len = sum(1 for l in example["labels"] if l != -100)
+                    # Predicted positions = real_len - 1 (first token is context only)
+                    num_eval_tokens += max(0, real_len - 1)
+                    if real_len > 1:
+                        num_eval_bytes += len(
+                            tokenizer.decode(example["input_ids"][1:real_len]).encode("utf-8")
+                        )
+            else:
+                num_eval_tokens = len(eval_dataset) * (block_size - 1)
+                num_eval_bytes = sum(
+                    len(tokenizer.decode(example["input_ids"][1:]).encode("utf-8"))
+                    for example in eval_dataset
+                )
         else:
             num_eval_tokens = 0
             num_eval_bytes = 0
@@ -704,6 +771,7 @@ def main():
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
                 reduction="none",
+                ignore_index=-100,
             ).view(shift_labels.shape)
             # Pad to same seq_len as preds so Trainer can concatenate them
             per_token_loss = torch.nn.functional.pad(per_token_loss, (0, 1), value=0.0)
@@ -711,12 +779,16 @@ def main():
 
         def compute_metrics(eval_preds):
             (preds, per_token_losses), labels = eval_preds
-            # Accuracy (shift preds/labels for next-token prediction)
-            labels = labels[:, 1:].reshape(-1)
-            preds = preds[:, :-1].reshape(-1)
-            metrics = {"accuracy": float((preds == labels).mean())}
-            # Perplexity and BPB from per-token losses (strip padding column)
-            avg_loss = float(per_token_losses[:, :-1].mean())
+            # Accuracy (shift preds/labels for next-token prediction, ignoring padding)
+            shifted_labels = labels[:, 1:].reshape(-1)
+            shifted_preds = preds[:, :-1].reshape(-1)
+            valid = shifted_labels != -100
+            metrics = {"accuracy": float((shifted_preds[valid] == shifted_labels[valid]).mean())}
+            # Perplexity and BPB from per-token losses (strip padding column).
+            # Padding positions have loss=0 (from ignore_index=-100), so sum / num_eval_tokens
+            # gives the correct weighted average for both padded and non-padded chunks.
+            total_loss = float(per_token_losses[:, :-1].sum())
+            avg_loss = total_loss / num_eval_tokens if num_eval_tokens > 0 else 0.0
             try:
                 metrics["perplexity"] = math.exp(avg_loss)
             except OverflowError:
