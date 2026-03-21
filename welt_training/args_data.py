@@ -102,6 +102,17 @@ class DataTrainingArguments:
             "help": "Path to prepared dataset shards (from welt-prepare-data). Skips download and text extraction."
         },
     )
+    pack_eval_dataset: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Pack the evaluation dataset the same way as the training set. "
+                "Use this for apples-to-apples BPB comparison against CLM baselines (e.g. Pythia). "
+                "Incompatible with generation-based eval metrics (eval_metrics). "
+                "When enabled, eval_samples reflects packed chunks, not raw validation examples."
+            )
+        },
+    )
 
     def __post_init__(self):
         if self.streaming:
