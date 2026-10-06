@@ -19,4 +19,4 @@ jobs:
         uses: ./.github/actions/setup-environment
 
       - name: Lint code
-        run: uv run ruff check .
+        run: uv run --no-sync ruff check .

@@ -11,7 +11,7 @@ class NaViTConfig(PretrainedConfig):
 
     def __init__(
             self,
-            image_size: int = 256,  # only used to set a default; NaViT handles var-size
+            image_size: int | tuple[int, int] | list = 256,  # max image size for positional embeddings
             patch_size: int = 16,
             hidden_size: int = 512,
             dim: int = 512,
@@ -42,8 +42,13 @@ class NaViTModel(PreTrainedModel):
     def __init__(self, config: NaViTConfig):
         super().__init__(config)
 
+        # Convert list to tuple for vit_pytorch's pair() check (JSON round-trips tuples as lists)
+        image_size = config.image_size
+        if isinstance(image_size, list):
+            image_size = tuple(image_size)
+
         navit = NaViT(
-            image_size=config.image_size,
+            image_size=image_size,
             patch_size=config.patch_size,
             num_classes=config.hidden_size,
             dim=config.dim,

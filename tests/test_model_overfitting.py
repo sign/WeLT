@@ -1,10 +1,18 @@
 import tempfile
 
 import pytest
-from transformers import Trainer, TrainingArguments
+from transformers import Trainer, TrainerCallback, TrainingArguments, set_seed
 from trl import pack_dataset
 
 from tests.test_model import make_dataset, predict_dataset, setup_tiny_model
+
+
+class ResetTrainingSeed(TrainerCallback):
+    def on_step_begin(self, args, state, control, **kwargs):
+        # Seed after the first batch is prepared: lazy setup in Transformers 5
+        # may consume RNG state before that point on the first training run.
+        if state.global_step == 0:
+            set_seed(args.seed)
 
 
 # TODO: this training is flaky due to https://github.com/huggingface/transformers/issues/40219
@@ -41,6 +49,7 @@ def train_model(setup_function,
         learning_rate=5e-4,
         lr_scheduler_type="constant",  # Keep learning rate constant
         use_cpu=True,
+        data_seed=42,  # Seed Accelerate's sampler explicitly across Transformers versions.
         report_to="none",
     )
 
@@ -51,6 +60,7 @@ def train_model(setup_function,
         processing_class=processor,
         train_dataset=train_dataset,
         data_collator=collator,
+        callbacks=[ResetTrainingSeed()],
     )
 
     # Train the model
@@ -66,7 +76,9 @@ def train_model(setup_function,
 @pytest.fixture(scope="module")
 def trained_models():
     """Train the model once and reuse for all tests."""
-    num_epochs = 300
+    # Packed examples need longer to learn character conditioning on CPU with
+    # Transformers 5; keep the same strict conditioning assertions on all hosts.
+    num_epochs = 600
     kwargs = dict(image_encoder_name="NaViT-tiny", modality_dropout=0.15)
     return {
         "packed": train_model(setup_tiny_model, num_epochs=num_epochs, packing=True, **kwargs),

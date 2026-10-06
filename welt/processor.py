@@ -79,7 +79,7 @@ class TextImageProcessor(ProcessorMixin):
             attr.save_pretrained(attr_dir)
 
         output = {k: v for k, v in self.__dict__.items()
-                  if k not in self.attributes and isinstance(v, (int, float, str, bool))}
+                  if k not in self.attributes and isinstance(v, int | float | str | bool)}
         output["processor_class"] = self.__class__.__name__
         config_file = os.path.join(save_directory, PROCESSOR_CONFIG_NAME)
         with open(config_file, "w") as f:
@@ -197,6 +197,13 @@ class TextImageProcessor(ProcessorMixin):
         # Tokenize words with BOS and EOS tokens
         tokenized = self.tokenize_words(words)  # Tokenized inputs
         tokenized_labels = self.tokenize_words(labels)  # Tokenized outputs
+
+        # Packed fixed-size chunks use PAD words as isolated sequences. Their
+        # empty labels would otherwise contribute synthetic EOS targets.
+        for index, word in enumerate(words):
+            if word == self.tokenizer.pad_token:
+                tokenized_labels.input_ids[index] = self.tokenizer.pad_token_id
+                tokenized_labels.attention_mask[index] = 0
 
         # Mask labels inside shift blocks (except for ShiftIn token)
         for start, end in get_shift_blocks(words):

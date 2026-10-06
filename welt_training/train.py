@@ -25,7 +25,7 @@ from welt_training.data_utils import extract_text, load_prepared_data
 from welt_training.extendable_yaml import resolve_yaml_file
 from welt_training.flops_callback import FlopsCallback
 from welt_training.freeze_callback import FreezeWarmupCallback
-from welt_training.streaming import CustomIterableDataset
+from welt_training.streaming import CustomIterableDataset, take_streaming_dataset
 from welt_training.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)
@@ -337,7 +337,7 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
 def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool = False):
     if max_samples is not None:
         if streaming:
-            dataset = dataset.take(max_samples)
+            dataset = take_streaming_dataset(dataset, max_samples)
         elif max_samples < len(dataset):
             dataset = dataset.select(range(max_samples))
 
@@ -402,10 +402,19 @@ def train(args: list[str] | None | str = None):  # noqa: C901
                                           streaming=data_args.streaming)
 
     # Sequence packing
-    if train_dataset:
-        block_size = min(data_args.block_size or math.inf, processor.max_seq_length)
-        train_dataset = processor.pretokenize_dataset(train_dataset, num_proc=data_args.preprocessing_num_workers)
-        train_dataset = pack_dataset(train_dataset, seq_length=block_size)
+    block_size = min(data_args.block_size or math.inf, processor.max_seq_length)
+
+    def pretokenize_and_pack(dataset):
+        # Strip columns that can't survive packing (scalar strings from generation templates).
+        # Packing concatenates documents, destroying per-document prefix/completion boundaries.
+        col_names = dataset.column_names if hasattr(dataset, "column_names") else None
+        if col_names:
+            drop = [c for c in col_names if c not in {"text", "words"}]
+            if drop:
+                dataset = dataset.remove_columns(drop)
+
+        dataset = processor.pretokenize_dataset(dataset, num_proc=data_args.preprocessing_num_workers)
+        dataset = pack_dataset(dataset, seq_length=block_size)
 
         # Pad to fixed length for CUDA kernel caching (consistent tensor shapes)
         def pad_to_fixed_length(example):
@@ -418,7 +427,22 @@ def train(args: list[str] | None | str = None):  # noqa: C901
                 example["seq_lengths"] = seq_lengths + [1] * pad_count  # Each padding is a separate "sequence"
             return example
 
-        train_dataset = train_dataset.map(pad_to_fixed_length, batched=False)
+        return dataset.map(pad_to_fixed_length, batched=False)
+
+    if train_dataset:
+        train_dataset = pretokenize_and_pack(train_dataset)
+    if eval_dataset and data_args.pack_eval_dataset:
+        # Validate: packed eval is incompatible with generation metrics
+        eval_cols = getattr(eval_dataset, "column_names", None) or []
+        has_generation_cols = "prefix" in eval_cols or "completion" in eval_cols
+        has_generation_metrics = bool(training_args.eval_metrics) if hasattr(training_args, "eval_metrics") else False
+        if has_generation_cols or has_generation_metrics:
+            raise ValueError(
+                "pack_eval_dataset=True is incompatible with generation-based evaluation. "
+                "Packing concatenates documents, destroying per-document prefix/completion boundaries. "
+                "Either disable pack_eval_dataset or remove eval_metrics and the two-part dataset_text_template."
+            )
+        eval_dataset = pretokenize_and_pack(eval_dataset)
 
     # Wrap streaming datasets with CustomIterableDataset to support with_transform
     if train_dataset:

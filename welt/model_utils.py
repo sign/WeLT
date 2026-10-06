@@ -9,7 +9,9 @@ from transformers import (
     AutoConfig,
     AutoImageProcessor,
     AutoTokenizer,
+    BertConfig,
     PretrainedConfig,
+    ViTImageProcessorFast,
     set_seed,
 )
 from utf8_tokenizer.tokenizer import UTF8Tokenizer, UTF16Tokenizer, UTF32Tokenizer
@@ -41,6 +43,7 @@ def get_attn_implementation():
 
 CUSTOM_MODELS: dict[str, PretrainedConfig] = {
     "NaViT-tiny": NaViTConfig(
+        image_size=(16, 1536),  # height=16px (rendered text), width up to 1536px
         patch_size=16,
         hidden_size=128,
         dim=64,
@@ -52,6 +55,7 @@ CUSTOM_MODELS: dict[str, PretrainedConfig] = {
         token_dropout_prob=0.1,
     ),
     "NaViT-small": NaViTConfig(
+        image_size=(16, 1536),  # height=16px (rendered text), width up to 1536px
         patch_size=16,
         hidden_size=512,
         dim=256,
@@ -62,10 +66,6 @@ CUSTOM_MODELS: dict[str, PretrainedConfig] = {
         emb_dropout=0.0,
         token_dropout_prob=0.1,
     )
-}
-CUSTOM_PROCESSORS_ALIAS: dict[str, str] = {
-    "NaViT-tiny": "WinKawaks/vit-tiny-patch16-224",
-    "NaViT-small": "WinKawaks/vit-tiny-patch16-224",
 }
 
 
@@ -100,6 +100,12 @@ def get_model_config(model_name, config_path: str | None = None):
 
     if model_name in CUSTOM_MODELS:
         return CUSTOM_MODELS[model_name]
+    if model_name == "prajjwal1/bert-tiny":
+        # This legacy checkpoint has no model_type; Transformers 5 no longer
+        # infers BERT from the repository name. Preserve its existing architecture.
+        config = BertConfig.from_pretrained(model_name)
+        config._name_or_path = model_name
+        return config
     return AutoConfig.from_pretrained(model_name)
 
 
@@ -124,12 +130,11 @@ def setup_model(
 ):
     set_seed(seed)
 
-    # Load image processor - need a pretrained name even when using config
-    if image_encoder_name is not None:
-        image_processor_name = CUSTOM_PROCESSORS_ALIAS.get(image_encoder_name, image_encoder_name)
-        image_processor = AutoImageProcessor.from_pretrained(image_processor_name, use_fast=True)
+    if image_encoder_name in CUSTOM_MODELS:
+        image_processor = ViTImageProcessorFast()
+    elif image_encoder_name is not None:
+        image_processor = AutoImageProcessor.from_pretrained(image_encoder_name, use_fast=True)
     elif image_encoder_config is not None:
-        # When using config file, default to a standard ViT processor
         image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224", use_fast=True)
     else:
         image_processor = NoopImageProcessor()

@@ -581,7 +581,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
         batch_indices = torch.arange(logits.size(0), device=logits.device)
         mapped_latent = logits[batch_indices, num_words - 1].unsqueeze(1)  # (B, 1, bytes_decoder_dim)
 
-        return latent_output.past_key_values, mapped_latent
+        return latent_output.past_key_values, mapped_latent, logits
 
     def _decode(self, past_key_values: Any, new_embedding: torch.Tensor,
                 attention_mask: torch.Tensor, position_ids: torch.Tensor | None = None) -> tuple[Any, torch.Tensor]:
@@ -682,6 +682,8 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             processor: TextImageProcessor,
             max_generated_words: int = 50,
             bytes_generation_config: GenerationConfig | None = None,
+            return_entropy: bool = False,
+            prompt_words: list[str] | None = None,
             **_unused_kwargs):
         """
         Generate text using prefill/decode with KV-cache.
@@ -698,6 +700,8 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
             processor: TextImageProcessor for tokenization and rendering
             max_generated_words: maximum words to generate
             bytes_generation_config: optional GenerationConfig for bytes_decoder
+            return_entropy: if True, also return per-byte entropy (batch_size must be 1)
+            prompt_words: original prompt words (from processor.pretokenize), needed for prompt entropy
         """
         tokenizer = processor.tokenizer
         device = input_ids.device
@@ -725,7 +729,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
         # Use default position_ids for prefill (sequential), attention mask handles padding
         max_initial = initial_num_words.max().item()
-        past_key_values, latents = self._prefill(encoded_input, attention_mask, initial_num_words)
+        past_key_values, latents, prefill_logits = self._prefill(encoded_input, attention_mask, initial_num_words)
 
         # Pre-allocate decode attention mask (1s everywhere except padding positions)
         decode_mask_full = torch.ones((batch_size, max_initial + max_generated_words), device=device,
@@ -736,6 +740,7 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
 
         # Generation loop
         all_generated_words = [[] for _ in range(batch_size)]
+        word_latents = []
         words = None
 
         for step_idx in range(max_generated_words):
@@ -752,6 +757,9 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
                     past_key_values, new_embedding, decode_mask, decode_position_ids
                 )
 
+            if return_entropy:
+                word_latents.append(latents.detach())
+
             # Generate bytes from latents
             generated_bytes = self._generate_word_bytes(
                 latents, tokenizer, bos_embed, bytes_generation_config, stopping_criteria,
@@ -767,7 +775,81 @@ class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
                 if not collected or collected[-1]:
                     collected.append(word)
 
-        return ["".join(words) for words in all_generated_words]
+        texts = ["".join(words) for words in all_generated_words]
+
+        if return_entropy:
+            entropies, byte_labels, prompt_byte_count = self._compute_entropy_for_generation(
+                prefill_logits, initial_num_words, prompt_words,
+                word_latents, all_generated_words[0], tokenizer, device)
+            return texts, entropies, byte_labels, prompt_byte_count
+
+        return texts
+
+    def _compute_entropy_for_generation(
+            self, prefill_logits, initial_num_words, prompt_words,
+            word_latents, generated_words, tokenizer, device):
+        """Combine teacher-forced prompt and generated-word entropy."""
+        if prefill_logits.shape[0] != 1:
+            raise ValueError(f"return_entropy=True requires batch_size=1, got {prefill_logits.shape[0]}")
+        prompt_entropies, prompt_byte_labels = [], []
+        if prompt_words is not None and len(prompt_words) > 1:
+            num_prompt = min(initial_num_words[0].item(), len(prompt_words))
+            prompt_latents = [prefill_logits[:, i:i+1, :] for i in range(num_prompt - 1)]
+            prompt_entropies, prompt_byte_labels = self._compute_generation_entropy(
+                prompt_latents, prompt_words[1:num_prompt], tokenizer, device)
+        gen_entropies, gen_byte_labels = self._compute_generation_entropy(
+            word_latents, generated_words, tokenizer, device)
+        return (prompt_entropies + gen_entropies,
+                prompt_byte_labels + gen_byte_labels,
+                len(prompt_entropies))
+
+    def _compute_generation_entropy(
+            self,
+            word_latents: list[torch.Tensor],
+            generated_words: list[str],
+            tokenizer,
+            device: torch.device,
+    ) -> tuple[list[float], list[str]]:
+        """Compute per-byte entropy for generated words using teacher-forced decoding."""
+        # Filter to non-empty words and their corresponding latents
+        valid = [(lat, w) for lat, w in zip(word_latents, generated_words, strict=False) if w]
+        if not valid:
+            return [], []
+
+        latents_list, words_list = zip(*valid, strict=True)
+        tokenized = tokenizer.torch(list(words_list), padding=True, add_special_tokens=True, device=device)
+        labels_input = tokenized.input_ids[:, :-1].unsqueeze(0)
+        labels_mask = tokenized.attention_mask[:, :-1].unsqueeze(0)
+        word_byte_ids = [list(w.encode(tokenizer.encoding)) for w in words_list]
+        bytes_per_token = {"UTF-8": 1, "UTF-16": 2, "UTF-32": 4}[self.config.encoding]
+
+        # Stack latents: (1, num_words, hidden_dim)
+        latents_stacked = torch.cat(list(latents_list), dim=1)
+
+        # Teacher-forced forward pass to get logits
+        logits = self.parallel_causal_decode(latents_stacked, labels_input, labels_mask)
+        # logits: (1, num_words, max_len, vocab_size)
+
+        # Character decoders predict a separate 256-way distribution per byte.
+        if bytes_per_token > 1:
+            logits = logits.reshape(*logits.shape[:-1], bytes_per_token, 256)
+        probs = torch.softmax(logits.float(), dim=-1)
+        log2_probs = torch.log2(probs + 1e-10)
+        entropy = -(probs * log2_probs).sum(dim=-1)
+        entropy = entropy.reshape(1, len(words_list), -1)
+
+        # Flatten per-byte entropies and create display labels
+        byte_entropies = []
+        byte_labels = []
+        for i, ids in enumerate(word_byte_ids):
+            for j, byte_val in enumerate(ids):
+                byte_entropies.append(entropy[0, i, j].item())
+                if 32 <= byte_val < 127:
+                    byte_labels.append(chr(byte_val))
+                else:
+                    byte_labels.append(f"\\x{byte_val:02x}")
+
+        return byte_entropies, byte_labels
 
 
 AutoConfig.register(WordLatentTransformerConfig.model_type, WordLatentTransformerConfig)
