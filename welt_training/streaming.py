@@ -1,3 +1,6 @@
+from itertools import islice
+
+import torch
 from datasets import IterableDataset
 
 
@@ -42,3 +45,30 @@ class CustomIterableDataset(IterableDataset):
 
     def take(self, n):
         return CustomIterableDataset(self._dataset.take(n))
+
+
+class TorchIterableAdapter(torch.utils.data.IterableDataset):
+    """Expose HF iterables to DataLoader and optionally shard torch iterables by rank."""
+
+    def __init__(self, dataset, rank=0, world_size=1):
+        self._dataset = dataset
+        self.rank = rank
+        self.world_size = world_size
+
+    def __iter__(self):
+        for index, example in enumerate(self._dataset):
+            if index % self.world_size == self.rank:
+                yield example
+
+
+def take_streaming_dataset(dataset, count):
+    """Keep a fixed streaming subset that remains iterable on subsequent epochs.
+
+    HF take() locks source order and newer datasets releases reject epoch
+    reshuffling through that operation. A generator preserves the same subset
+    without exposing the locked source to the outer dataset's epoch handling.
+    """
+    def examples():
+        yield from islice(dataset, count)
+
+    return IterableDataset.from_generator(examples, features=dataset.features)

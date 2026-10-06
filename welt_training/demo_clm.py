@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from transformers.trainer_utils import get_last_checkpoint
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-AUTOCAST_DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float16
+AUTOCAST_DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float16 if DEVICE == "mps" else torch.float32
 
 STRATEGY_GREEDY = "Greedy"
 STRATEGY_BEAM = "Beam search"
@@ -26,10 +26,10 @@ def load_model_and_tokenizer(model_path: str | Path):
             checkpoint_path = last_ckpt
             print(f"Using last checkpoint: {checkpoint_path}")
 
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint_path)
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint_path,
-        torch_dtype=torch.bfloat16,
+        dtype=AUTOCAST_DTYPE,
         device_map=DEVICE,
     )
     model.eval()
@@ -61,7 +61,9 @@ def build_generation_config(strategy, num_beams, top_k, top_p, temperature, repe
 
 @torch.inference_mode()
 @torch.autocast(device_type=DEVICE, dtype=AUTOCAST_DTYPE, enabled=DEVICE != "cpu")
-def generate(prompt, max_new_tokens, strategy, num_beams, top_k, top_p, temperature, repetition_penalty, model, tokenizer):
+def generate(
+        prompt, max_new_tokens, strategy, num_beams, top_k, top_p,
+        temperature, repetition_penalty, model, tokenizer):
     if not prompt.strip():
         return ""
 
@@ -93,7 +95,8 @@ def main():
 
     def on_generate(prompt, max_new_tokens, strategy, num_beams, top_k, top_p, temperature, repetition_penalty):
         return generate(
-            prompt, max_new_tokens, strategy, num_beams, top_k, top_p, temperature, repetition_penalty, model, tokenizer)
+            prompt, max_new_tokens, strategy, num_beams, top_k, top_p,
+            temperature, repetition_penalty, model, tokenizer)
 
     with gr.Blocks(title="CLM Demo") as demo:
         gr.Markdown("# Sub-word CLM – Qualitative Demo")

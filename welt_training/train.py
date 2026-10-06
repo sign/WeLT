@@ -25,7 +25,7 @@ from welt_training.data_utils import extract_text, load_prepared_data
 from welt_training.extendable_yaml import resolve_yaml_file
 from welt_training.flops_callback import FlopsCallback
 from welt_training.freeze_callback import FreezeWarmupCallback
-from welt_training.streaming import CustomIterableDataset
+from welt_training.streaming import CustomIterableDataset, take_streaming_dataset
 from welt_training.trainer import WeLTTrainer
 
 logger = logging.getLogger(__name__)
@@ -337,7 +337,7 @@ def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
 def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool = False):
     if max_samples is not None:
         if streaming:
-            dataset = dataset.take(max_samples)
+            dataset = take_streaming_dataset(dataset, max_samples)
         elif max_samples < len(dataset):
             dataset = dataset.select(range(max_samples))
 

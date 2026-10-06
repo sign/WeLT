@@ -16,7 +16,7 @@ from welt.model import WordLatentTransformerForCausalLM
 from welt.processor import TextImageProcessor
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-AUTOCAST_DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float16
+AUTOCAST_DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float16 if DEVICE == "mps" else torch.float32
 
 STRATEGY_GREEDY = "Greedy"
 STRATEGY_BEAM = "Beam search"
@@ -35,7 +35,7 @@ def load_model_and_processor(model_path: str | Path):
     model: WordLatentTransformerForCausalLM = (
         WordLatentTransformerForCausalLM.from_pretrained(
             checkpoint_path,
-            dtype=torch.bfloat16,
+            dtype=AUTOCAST_DTYPE,
             device_map=DEVICE,
         )
     )
@@ -87,7 +87,7 @@ def create_entropy_plot(entropies: list[float], byte_labels: list[str], prompt_b
     # Fade prompt bars to distinguish from generated
     if prompt_byte_count > 0:
         alphas = [0.4] * prompt_byte_count + [1.0] * (len(entropies) - prompt_byte_count)
-        for i, (xi, h, c, a) in enumerate(zip(x, entropies, colors, alphas)):
+        for xi, h, c, a in zip(x, entropies, colors, alphas, strict=True):
             ax.bar(xi, h, color=c, alpha=a, edgecolor="none", width=0.8)
         # Separator line between prompt and generated
         ax.axvline(prompt_byte_count - 0.5, color="black", linewidth=1, linestyle="--", alpha=0.5)

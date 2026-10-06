@@ -17,24 +17,9 @@ import torch
 from transformers import GenerationConfig, Trainer
 
 from welt.processor import TextImageProcessor
+from welt_training.streaming import CustomIterableDataset, TorchIterableAdapter
 
 logger = logging.getLogger(__name__)
-
-
-class _TorchIterableAdapter(torch.utils.data.IterableDataset):
-    """Wraps a HuggingFace datasets.IterableDataset as a torch IterableDataset.
-
-    datasets.IterableDataset does not inherit from torch.utils.data.IterableDataset,
-    so PyTorch's DataLoader treats it as map-style and tries len()/__getitem__,
-    which fails. This thin adapter delegates __iter__ so DataLoader uses the
-    iterable protocol instead.
-    """
-
-    def __init__(self, hf_dataset):
-        self._dataset = hf_dataset
-
-    def __iter__(self):
-        yield from self._dataset
 
 
 class WeLTTrainer(Trainer):
@@ -205,7 +190,7 @@ class WeLTTrainer(Trainer):
         """
         Override to handle streaming eval datasets.
 
-        For IterableDataset (both torch and HuggingFace datasets variants):
+        For IterableDataset (torch and HuggingFace datasets):
         - Shards across distributed ranks via split_dataset_by_node
         - Wraps HF IterableDataset in a torch-compatible adapter so PyTorch's
           DataLoader treats it as iterable (not map-style)
@@ -219,7 +204,7 @@ class WeLTTrainer(Trainer):
         from torch.utils.data import DataLoader
         from torch.utils.data import IterableDataset as TorchIterableDataset
 
-        eval_dataset = eval_dataset or self.eval_dataset
+        eval_dataset = self.eval_dataset if eval_dataset is None else eval_dataset
 
         # Check both torch and HF IterableDataset (they are unrelated classes;
         # CustomIterableDataset inherits from datasets.IterableDataset only)
@@ -228,15 +213,16 @@ class WeLTTrainer(Trainer):
             if self.accelerator.num_processes > 1:
                 from datasets.distributed import split_dataset_by_node
 
-                from welt_training.streaming import CustomIterableDataset
-
                 rank = self.accelerator.process_index
                 world_size = self.accelerator.num_processes
 
                 if isinstance(eval_dataset, CustomIterableDataset):
                     old_transform = eval_dataset._transform
-                    sharded_inner = split_dataset_by_node(
-                        eval_dataset._dataset, rank=rank, world_size=world_size)
+                    inner = eval_dataset._dataset
+                    if isinstance(inner, datasets.IterableDataset):
+                        sharded_inner = split_dataset_by_node(inner, rank=rank, world_size=world_size)
+                    else:
+                        sharded_inner = TorchIterableAdapter(inner, rank=rank, world_size=world_size)
                     eval_dataset = CustomIterableDataset(sharded_inner)
                     if old_transform is not None:
                         eval_dataset.set_transform(old_transform)
@@ -244,12 +230,15 @@ class WeLTTrainer(Trainer):
                     eval_dataset = split_dataset_by_node(
                         eval_dataset, rank=rank, world_size=world_size)
 
+                else:
+                    eval_dataset = TorchIterableAdapter(eval_dataset, rank=rank, world_size=world_size)
+
             # datasets.IterableDataset does NOT inherit from
             # torch.utils.data.IterableDataset, so PyTorch's DataLoader would
             # treat it as map-style and try len()/__getitem__, which fails.
             # Wrap in a thin torch-compatible adapter.
             if not isinstance(eval_dataset, TorchIterableDataset):
-                eval_dataset = _TorchIterableAdapter(eval_dataset)
+                eval_dataset = TorchIterableAdapter(eval_dataset)
 
             return DataLoader(
                 eval_dataset,
@@ -396,7 +385,14 @@ class WeLTTrainer(Trainer):
 
     def _accumulate_accuracy_and_bpb(self, model, inputs, logits):
         """Accumulate byte/word accuracy and bits-per-byte counters from logits."""
-        pred_token_ids = logits.argmax(dim=-1)
+        model = self.accelerator.unwrap_model(model)
+        bytes_per_token = {"UTF-8": 1, "UTF-16": 2, "UTF-32": 4}[model.config.encoding]
+        if bytes_per_token == 1:
+            pred_token_ids = logits.argmax(dim=-1)
+        else:
+            embedding = model.bytes_decoder.char_embedding
+            byte_predictions = logits.reshape(*logits.shape[:-1], bytes_per_token, 256).argmax(dim=-1)
+            pred_token_ids = embedding._combine_from_bytes(byte_predictions)
 
         labels_output = inputs.get("labels_output")
         if labels_output is None:
@@ -430,10 +426,7 @@ class WeLTTrainer(Trainer):
         # Accumulate exact per-batch nats and content byte counts for BPB.
         # UTF-8 uses direct byte-level CE, while UTF-16/UTF-32 use
         # CharacterCausalLMWrapper.compute_loss() over split bytes.
-        model_encoding = getattr(getattr(model, "config", None), "encoding", "UTF-8")
-        bytes_per_token = {"UTF-8": 1, "UTF-16": 2, "UTF-32": 4}.get(model_encoding)
-        if bytes_per_token is None:
-            return
+        model_encoding = model.config.encoding
 
         # Recompute loss from (possibly trimmed) logits/labels so the
         # numerator stays consistent with the trimmed token counts when
@@ -443,8 +436,15 @@ class WeLTTrainer(Trainer):
         flat_labels = labels_output.flatten()
         flat_logits = logits.reshape(-1, logits.size(-1))
         content_mask = (flat_labels != pad_id) & (flat_labels != eos_id)
-        batch_content_bytes = content_mask.sum().item() * bytes_per_token
-        if batch_content_bytes > 0:
+        loss_byte_count = content_mask.sum().item() * bytes_per_token
+        if loss_byte_count > 0:
+            # Use UTF-8 text bytes for every model encoding so BPB remains
+            # comparable to the subword CLM baseline (including UTF-32 models).
+            batch_content_bytes = loss_byte_count
+            if bytes_per_token > 1:
+                content_labels = labels_output.reshape(-1, labels_output.shape[-1]).cpu()
+                texts = self.processor.tokenizer.batch_decode(content_labels, skip_special_tokens=True)
+                batch_content_bytes = sum(len(text.encode("utf-8")) for text in texts)
             # Mask EOS positions so they are ignored by the loss
             flat_labels_content = flat_labels.clone()
             flat_labels_content[flat_labels == eos_id] = pad_id
@@ -457,7 +457,7 @@ class WeLTTrainer(Trainer):
                 batch_loss = model.bytes_decoder.compute_loss(flat_logits, flat_labels_content)
 
             if torch.isfinite(batch_loss):
-                self._eval_total_nats += batch_loss.item() * batch_content_bytes
+                self._eval_total_nats += batch_loss.item() * loss_byte_count
                 self._eval_total_content_bytes += batch_content_bytes
 
     def _generate_predictions(self, model, prefixes, completions):
@@ -598,10 +598,16 @@ class WeLTTrainer(Trainer):
 
     def _prepare_eval_dataset(self, eval_dataset):
         """Prepare and validate evaluation dataset."""
-        eval_dataset = eval_dataset or self.eval_dataset
+        eval_dataset = self.eval_dataset if eval_dataset is None else eval_dataset
         if eval_dataset is not None:
             self._validate_eval_dataset(eval_dataset)
-            # Apply processor transform if needed
+            # HF and torch iterables need a wrapper to support processor transforms.
+            import datasets
+            from torch.utils.data import IterableDataset as TorchIterableDataset
+
+            if isinstance(eval_dataset, datasets.IterableDataset | TorchIterableDataset):
+                if not isinstance(eval_dataset, CustomIterableDataset):
+                    eval_dataset = CustomIterableDataset(eval_dataset)
             if not hasattr(eval_dataset, '_transforms') or eval_dataset._transforms is None:
                 eval_dataset = eval_dataset.with_transform(self.processor)
         return eval_dataset

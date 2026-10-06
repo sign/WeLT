@@ -65,11 +65,11 @@ from transformers import (
 )
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 from welt_training.data_utils import load_prepared_data
 from welt_training.metrics import compute_bits_per_byte
+from welt_training.streaming import take_streaming_dataset
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -333,10 +333,6 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_clm", model_args, data_args)
-
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -455,6 +451,7 @@ def main():
             data_files=data_files,
             cache_dir=model_args.cache_dir,
             token=model_args.token,
+            streaming=data_args.streaming,
             **dataset_args,
         )
         # If no validation data is there, validation_split_percentage will be used to divide the dataset.
@@ -575,7 +572,7 @@ def main():
     raw_datasets = raw_datasets.map(
         mapping_function,
         remove_columns=column_names,
-        desc="Keep only the text column & apply template",
+        **({"desc": "Keep only the text column & apply template"} if not data_args.streaming else {}),
         **map_args
     )
     column_names = [text_column_name]
@@ -584,14 +581,14 @@ def main():
     # max_train_samples select raw documents, consistent with WELT's train.py.
     if training_args.do_train and data_args.max_train_samples is not None:
         if data_args.streaming:
-            raw_datasets["train"] = raw_datasets["train"].take(data_args.max_train_samples)
+            raw_datasets["train"] = take_streaming_dataset(raw_datasets["train"], data_args.max_train_samples)
         else:
             max_train_samples = min(len(raw_datasets["train"]), data_args.max_train_samples)
             raw_datasets["train"] = raw_datasets["train"].select(range(max_train_samples))
 
     if training_args.do_eval and data_args.max_eval_samples is not None:
         if data_args.streaming:
-            raw_datasets["validation"] = raw_datasets["validation"].take(data_args.max_eval_samples)
+            raw_datasets["validation"] = take_streaming_dataset(raw_datasets["validation"], data_args.max_eval_samples)
         else:
             max_eval_samples = min(len(raw_datasets["validation"]), data_args.max_eval_samples)
             raw_datasets["validation"] = raw_datasets["validation"].select(range(max_eval_samples))
@@ -716,7 +713,7 @@ def main():
                 raise ValueError("--do_train requires a train dataset")
             train_dataset = tokenized_datasets["train"].map(
                 group_texts, batched=True,
-                desc=f"Grouping train texts in chunks of {block_size}",
+                **({"desc": f"Grouping train texts in chunks of {block_size}"} if not data_args.streaming else {}),
                 **map_kwargs,
             )
 
@@ -730,36 +727,11 @@ def main():
                 else f"Grouping eval texts in chunks of {block_size}"
             )
             eval_dataset = tokenized_datasets["validation"].map(
-                eval_fn, batched=True, desc=eval_desc, **map_kwargs,
+                eval_fn, batched=True,
+                **({"desc": eval_desc} if not data_args.streaming else {}), **map_kwargs,
             )
 
     if training_args.do_eval:
-        # Pre-compute token/byte counts for bits-per-byte on every evaluation.
-        # When chunk_documents is used, chunks may be shorter than block_size
-        # (labels use -100 for padding), so we count only real predicted positions.
-        if not data_args.streaming:
-            if use_chunk_documents:
-                num_eval_tokens = 0
-                num_eval_bytes = 0
-                for example in eval_dataset:
-                    # Real length = number of non-padding labels
-                    real_len = sum(1 for l in example["labels"] if l != -100)
-                    # Predicted positions = real_len - 1 (first token is context only)
-                    num_eval_tokens += max(0, real_len - 1)
-                    if real_len > 1:
-                        num_eval_bytes += len(
-                            tokenizer.decode(example["input_ids"][1:real_len]).encode("utf-8")
-                        )
-            else:
-                num_eval_tokens = len(eval_dataset) * (block_size - 1)
-                num_eval_bytes = sum(
-                    len(tokenizer.decode(example["input_ids"][1:]).encode("utf-8"))
-                    for example in eval_dataset
-                )
-        else:
-            num_eval_tokens = 0
-            num_eval_bytes = 0
-
         def preprocess_logits_for_metrics(logits, labels):
             if isinstance(logits, tuple):
                 logits = logits[0]
@@ -784,10 +756,18 @@ def main():
             shifted_preds = preds[:, :-1].reshape(-1)
             valid = shifted_labels != -100
             metrics = {"accuracy": float((shifted_preds[valid] == shifted_labels[valid]).mean())}
-            # Perplexity and BPB from per-token losses (strip padding column).
-            # Padding positions have loss=0 (from ignore_index=-100), so sum / num_eval_tokens
-            # gives the correct weighted average for both padded and non-padded chunks.
-            total_loss = float(per_token_losses[:, :-1].sum())
+            # Count the labels actually evaluated, including streaming datasets and
+            # distributed last-batch trimming. Decode without spacing cleanup.
+            num_eval_tokens = int(valid.sum())
+            num_eval_bytes = sum(
+                len(tokenizer.decode(row[1:][row[1:] != -100],
+                                     skip_special_tokens=False,
+                                     clean_up_tokenization_spaces=False).encode("utf-8"))
+                for row in labels
+            )
+            # Trainer pads concatenated predictions with -100; exclude these sentinels.
+            losses = per_token_losses[:, :-1].reshape(-1)
+            total_loss = float(losses[valid].sum())
             avg_loss = total_loss / num_eval_tokens if num_eval_tokens > 0 else 0.0
             try:
                 metrics["perplexity"] = math.exp(avg_loss)
@@ -844,11 +824,8 @@ def main():
 
         metrics = trainer.evaluate()
 
-        max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
-        if data_args.streaming:
-            metrics["eval_samples"] = max_eval_samples
-        else:
-            metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+        if not data_args.streaming:
+            metrics["eval_samples"] = len(eval_dataset)
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)

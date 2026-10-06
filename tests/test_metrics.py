@@ -80,23 +80,11 @@ class TestComputeBitsPerByte:
 class TestBPBTokenizerIntegration:
     """Validate BPB computation patterns used in the training scripts."""
 
-    def test_byte_level_model_with_eos_overhead(self):
-        """
-        Validate the WeLTTrainer BPB pattern.
-
-        WeLT labels contain content bytes + one EOS per word. Loss is averaged
-        over all non-PAD positions (content + EOS), but BPB divides total bits
-        by content bytes only, producing BPB > loss/ln(2).
-        """
+    def test_byte_level_model_excluding_eos(self):
+        """Content-only byte loss reduces to nats per byte divided by ln(2)."""
         loss = 4.2
-        # Simulate 100 content bytes across 20 words → 120 loss tokens (100 bytes + 20 EOS)
-        num_tokens = 120
-        num_bytes = 100
-
-        bpb = compute_bits_per_byte(loss, num_tokens, num_bytes)
-
-        assert bpb == pytest.approx(loss * 120 / (100 * math.log(2)))
-        assert bpb > loss / math.log(2)  # must exceed naive estimate
+        bpb = compute_bits_per_byte(loss, num_tokens=100, num_bytes=100)
+        assert bpb == pytest.approx(loss / math.log(2))
 
     def test_subword_tokenizer_compression_ratio(self):
         """

@@ -209,3 +209,20 @@ If you use this code in your research, please consider citing the work:
   year={2025}
 }
 ```
+
+## Evaluation bits per byte
+
+Both `welt-train` and `welt_training/experiments/machine-translation/run_clm.py`
+report `eval_bits_per_byte`: summed prediction cross-entropy in nats divided by
+the number of evaluated UTF-8 text bytes and `ln(2)`. Lower values indicate
+better compression. Counts are accumulated over the evaluated labels, so
+padding, batch size, and distributed last-batch replicas do not bias BPB.
+
+WeLT excludes padding and word EOS markers from BPB, retaining EOS in accuracy
+and loss. UTF-16/32 decoders sum their individual byte prediction losses and
+normalize by UTF-8 text bytes, allowing comparison with the subword baseline.
+The CLM script excludes each chunk's first token (context only) and ignored
+labels, and preserves tokenizer spacing when counting bytes. Both scripts
+support streaming evaluation. Use matching text, sample limits, and document
+boundaries when comparing models; `pack_eval_dataset` in WeLT and
+`eval_preserve_document_boundaries` in the CLM script control these protocols.
