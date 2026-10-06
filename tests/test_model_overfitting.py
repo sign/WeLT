@@ -76,7 +76,9 @@ def train_model(setup_function,
 @pytest.fixture(scope="module")
 def trained_models():
     """Train the model once and reuse for all tests."""
-    num_epochs = 300
+    # Packed examples need longer to learn character conditioning on CPU with
+    # Transformers 5; keep the same strict conditioning assertions on all hosts.
+    num_epochs = 600
     kwargs = dict(image_encoder_name="NaViT-tiny", modality_dropout=0.15)
     return {
         "packed": train_model(setup_tiny_model, num_epochs=num_epochs, packing=True, **kwargs),
