@@ -55,6 +55,16 @@ def test_processor_single_text_not_collated(processor):
     assert all(isinstance(inputs[key], list) and len(inputs[key]) == 1 for key in expected_tensor_keys)
 
 
+def test_packed_padding_does_not_add_eos_labels(processor):
+    words = processor.pretokenize("a b")
+    original = processor.process_single_example(words, [len(words)])
+    padded = processor.process_single_example(
+        words + [processor.tokenizer.pad_token] * 5, [len(words)] + [1] * 5)
+    assert torch.equal(padded["labels_output"][:len(words)], original["labels_output"])
+    assert (padded["labels_output"][len(words):] == processor.tokenizer.pad_token_id).all()
+    assert (padded["labels_attention_mask"][len(words):] == 0).all()
+
+
 def test_processor_single_text_value(processor):
     text = "a b"
     inputs = processor(text)

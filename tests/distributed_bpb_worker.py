@@ -76,7 +76,14 @@ def main():
             trainer.model_wrapped = trainer.model
             assert isinstance(trainer.model, torch.nn.parallel.DistributedDataParallel)
             trainer.loaded_metrics = {"count": CountMetric()}
-            metrics = trainer.evaluate(data)
+            # Evaluation can run inside the final training batch while its
+            # Accelerate dataloader is still active with a nonzero remainder.
+            training_loader = trainer.accelerator.prepare_data_loader(
+                torch.utils.data.DataLoader(list(range(3)), batch_size=2))
+            for _batch in training_loader:
+                assert trainer.accelerator.gradient_state.end_of_dataloader
+                assert trainer.accelerator.gradient_state.remainder == 3
+                metrics = trainer.evaluate(data)
             assert metrics["eval_samples"] == 3
             assert abs(metrics["eval_bits_per_byte"] - 8.0) < 1e-6
             assert metrics["eval_count"] == 1.0

@@ -198,6 +198,13 @@ class TextImageProcessor(ProcessorMixin):
         tokenized = self.tokenize_words(words)  # Tokenized inputs
         tokenized_labels = self.tokenize_words(labels)  # Tokenized outputs
 
+        # Packed fixed-size chunks use PAD words as isolated sequences. Their
+        # empty labels would otherwise contribute synthetic EOS targets.
+        for index, word in enumerate(words):
+            if word == self.tokenizer.pad_token:
+                tokenized_labels.input_ids[index] = self.tokenizer.pad_token_id
+                tokenized_labels.attention_mask[index] = 0
+
         # Mask labels inside shift blocks (except for ShiftIn token)
         for start, end in get_shift_blocks(words):
             # Excludes end (ShiftIn token)

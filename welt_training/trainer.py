@@ -209,6 +209,7 @@ class WeLTTrainer(Trainer):
         # Check both torch and HF IterableDataset (they are unrelated classes;
         # CustomIterableDataset inherits from datasets.IterableDataset only)
         if isinstance(eval_dataset, TorchIterableDataset | datasets.IterableDataset):
+            self._eval_uses_padded_batches = False
             # Shard across ranks for distributed evaluation
             if self.accelerator.num_processes > 1:
                 from datasets.distributed import split_dataset_by_node
@@ -248,6 +249,7 @@ class WeLTTrainer(Trainer):
                 pin_memory=self.args.dataloader_pin_memory,
             )
 
+        self._eval_uses_padded_batches = True
         return super().get_eval_dataloader(eval_dataset)
 
     def create_optimizer(self):
@@ -375,6 +377,7 @@ class WeLTTrainer(Trainer):
         Returns ``nominal_count`` unchanged for single-GPU or non-last batches.
         """
         if (nominal_count > 0
+                and getattr(self, "_eval_uses_padded_batches", True)
                 and self.accelerator.num_processes > 1
                 and self.accelerator.gradient_state.end_of_dataloader):
             remainder = self.accelerator.gradient_state.remainder

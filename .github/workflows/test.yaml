@@ -31,6 +31,7 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WANDB_MODE: disabled
+          OMP_NUM_THREADS: "1"
         run: uv run --no-sync pytest -n auto --dist loadscope
 
       - name: Freeze working environment
@@ -45,4 +46,3 @@ jobs:
           git add working_environment.txt
           git diff --staged --quiet || git commit -m "chore: update working_environment.txt"
           git push
-
