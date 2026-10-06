@@ -68,7 +68,7 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils.versions import require_version
 
 from welt_training.data_utils import load_prepared_data
-from welt_training.metrics import compute_bits_per_byte
+from welt_training.metrics import compute_bits_per_byte, count_utf8_bytes
 from welt_training.streaming import take_streaming_dataset
 
 
@@ -737,7 +737,7 @@ def main():
                 logits = logits[0]
             preds = logits.argmax(dim=-1)
             # Compute per-token cross-entropy for BPB calculation
-            shift_logits = logits[..., :-1, :].contiguous()
+            shift_logits = logits[..., :-1, :].float().contiguous()
             shift_labels = labels[..., 1:].contiguous()
             per_token_loss = torch.nn.functional.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
@@ -760,9 +760,7 @@ def main():
             # distributed last-batch trimming. Decode without spacing cleanup.
             num_eval_tokens = int(valid.sum())
             num_eval_bytes = sum(
-                len(tokenizer.decode(row[1:][row[1:] != -100],
-                                     skip_special_tokens=False,
-                                     clean_up_tokenization_spaces=False).encode("utf-8"))
+                count_utf8_bytes(tokenizer, row[1:][row[1:] != -100])
                 for row in labels
             )
             # Trainer pads concatenated predictions with -100; exclude these sentinels.

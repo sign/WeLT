@@ -57,8 +57,8 @@ def test_clm_reports_exact_bpb(tmp_path, monkeypatch, streaming):
         for start in range(0, len(ids), 8):
             chunk = ids[start:start + 8]
             chunks += 1
-            total_bytes += len(tokenizer.decode(
-                chunk[1:], skip_special_tokens=False, clean_up_tokenization_spaces=False).encode("utf-8"))
+            # This tokenizer has no merges: each ordinary token is one original byte.
+            total_bytes += len(chunk) - 1
             if len(chunk) > 1:
                 with torch.no_grad():
                     logits = model(torch.tensor([chunk])).logits[0, :-1]

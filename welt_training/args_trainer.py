@@ -3,6 +3,7 @@ Training arguments for WeLT Trainer.
 
 Extends Seq2SeqTrainingArguments with additional parameters for generation-based evaluation.
 """
+import math
 from dataclasses import dataclass, field
 
 from transformers import Seq2SeqTrainingArguments
@@ -20,6 +21,18 @@ class WeLTTrainingArguments(Seq2SeqTrainingArguments):
     Extends Seq2SeqTrainingArguments with parameters specific to WeLT's
     generation-based evaluation.
     """
+
+    # Keep existing experiment YAMLs usable after Transformers 5 removed these fields.
+    overwrite_output_dir: bool = field(default=False)
+    include_tokens_per_second: bool = field(default=False)
+    warmup_ratio: float = field(default=0.0)
+
+    def get_warmup_steps(self, num_training_steps: int):
+        if not 0 <= self.warmup_ratio <= 1:
+            raise ValueError("warmup_ratio must be between 0 and 1")
+        if self.warmup_steps == 0 and self.warmup_ratio > 0:
+            return math.ceil(num_training_steps * self.warmup_ratio)
+        return super().get_warmup_steps(num_training_steps)
 
     eval_metrics: list[str] | None = field(
         default=None,

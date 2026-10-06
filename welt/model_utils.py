@@ -9,6 +9,7 @@ from transformers import (
     AutoConfig,
     AutoImageProcessor,
     AutoTokenizer,
+    BertConfig,
     PretrainedConfig,
     ViTImageProcessorFast,
     set_seed,
@@ -99,6 +100,12 @@ def get_model_config(model_name, config_path: str | None = None):
 
     if model_name in CUSTOM_MODELS:
         return CUSTOM_MODELS[model_name]
+    if model_name == "prajjwal1/bert-tiny":
+        # This legacy checkpoint has no model_type; Transformers 5 no longer
+        # infers BERT from the repository name. Preserve its existing architecture.
+        config = BertConfig.from_pretrained(model_name)
+        config._name_or_path = model_name
+        return config
     return AutoConfig.from_pretrained(model_name)
 
 

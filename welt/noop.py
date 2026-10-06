@@ -7,13 +7,13 @@ from transformers import (
     AutoConfig,
     AutoImageProcessor,
     AutoModel,
-    ImageProcessingMixin,
+    BaseImageProcessor,
     PretrainedConfig,
     PreTrainedModel,
 )
 
 
-class NoopImageProcessor(ImageProcessingMixin):
+class NoopImageProcessor(BaseImageProcessor):
     name = "noop-image-processor"
 
     def __init__(self, **kwargs):

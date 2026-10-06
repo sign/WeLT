@@ -10,7 +10,7 @@ from datasets import load_dataset
 from welt_training.data_utils import load_prepared_data
 from welt_training.prepare_data import get_shard_prefix, main
 
-WIKITEXT_DATASET = "wikitext"
+WIKITEXT_DATASET = "Salesforce/wikitext"
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
 
 

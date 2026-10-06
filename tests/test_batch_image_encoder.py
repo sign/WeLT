@@ -2,7 +2,7 @@ from functools import cache
 
 import pytest
 import torch
-from transformers import AutoConfig, AutoModel
+from transformers import AutoConfig, AutoModel, DINOv3ConvNextConfig, DINOv3ViTConfig
 
 from welt.collator import stack_pad_tensors_list
 from welt.vision.batch_image_encoder import (
@@ -40,6 +40,12 @@ def images_dimensions(images: list[list[torch.Tensor]]) -> torch.Tensor:
 def image_encoder(model_name):
     if model_name == "custom-navit":
         config = NaViTConfig()
+    elif model_name == "facebook/dinov3-vits16-pretrain-lvd1689m":
+        # We only test randomly initialized models. Local configs keep this
+        # architecture coverage independent of gated Hub access in fork CI.
+        config = DINOv3ViTConfig(hidden_size=384, num_hidden_layers=2, num_attention_heads=6)
+    elif model_name == "facebook/dinov3-convnext-tiny-pretrain-lvd1689m":
+        config = DINOv3ConvNextConfig(hidden_sizes=[96, 192, 384, 768], depths=[1, 1, 1, 1])
     else:
         config = AutoConfig.from_pretrained(model_name)
 

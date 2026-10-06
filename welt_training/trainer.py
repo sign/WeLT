@@ -451,14 +451,13 @@ class WeLTTrainer(Trainer):
 
             if model_encoding == "UTF-8":
                 batch_loss = torch.nn.functional.cross_entropy(
-                    flat_logits, flat_labels_content, ignore_index=pad_id
+                    flat_logits.float(), flat_labels_content, ignore_index=pad_id
                 )
             else:
-                batch_loss = model.bytes_decoder.compute_loss(flat_logits, flat_labels_content)
+                batch_loss = model.bytes_decoder.compute_loss(flat_logits.float(), flat_labels_content)
 
-            if torch.isfinite(batch_loss):
-                self._eval_total_nats += batch_loss.item() * loss_byte_count
-                self._eval_total_content_bytes += batch_content_bytes
+            self._eval_total_nats += batch_loss.item() * loss_byte_count
+            self._eval_total_content_bytes += batch_content_bytes
 
     def _generate_predictions(self, model, prefixes, completions):
         """Generate text predictions and store them for metric computation."""
