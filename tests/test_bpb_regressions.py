@@ -1,6 +1,11 @@
 """Numerical and dataloader regression checks without pretrained assets."""
 
 import math
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -124,3 +129,19 @@ def test_entropy_uses_character_tokens_and_separate_byte_distributions(encoding,
     byte_count = sum(len(word.encode(tokenizer.encoding)) for word in words)
     assert len(byte_labels) == byte_count
     assert entropies == pytest.approx([8.0] * byte_count)
+
+
+def test_ddp_evaluation_with_uneven_streaming_batches():
+    """Two real ranks must agree on metrics and finish without buffer-sync deadlocks."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    root = Path(__file__).parents[1]
+    env = dict(os.environ, OMP_NUM_THREADS="1", WANDB_MODE="disabled")
+    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run([
+        sys.executable, "-m", "torch.distributed.run", "--nnodes=1", "--nproc_per_node=2",
+        "--master_addr=127.0.0.1", f"--master_port={port}",
+        str(Path(__file__).with_name("distributed_bpb_worker.py")),
+    ], cwd=root, env=env, capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr

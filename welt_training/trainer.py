@@ -461,6 +461,7 @@ class WeLTTrainer(Trainer):
 
     def _generate_predictions(self, model, prefixes, completions):
         """Generate text predictions and store them for metric computation."""
+        model = self.accelerator.unwrap_model(model)
         with torch.no_grad():
             generation_inputs = self.processor(prefixes, collated=True)
             generation_inputs = {
@@ -519,11 +520,14 @@ class WeLTTrainer(Trainer):
         self._eval_sample_count += self._real_batch_count(batch_sample_count)
 
         # Create model inputs without custom fields
-        model_inputs = {
-            k: v.to(model.device) if isinstance(v, torch.Tensor) else v
-            for k, v in inputs.items()
+        model_inputs = self._prepare_inputs({
+            k: v for k, v in inputs.items()
             if k not in ("prefix", "completion", "text")
-        }
+        })
+        # Evaluation has no gradients; bypass DDP's per-forward buffer broadcasts.
+        # Manually sharded streams can have unequal batch counts across ranks.
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model = model.module
 
         # Compute loss and store logits for accuracy
         with torch.no_grad():
