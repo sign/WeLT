@@ -20,6 +20,8 @@ def evaluate(export_dir: str, max_samples: int = 256, max_generated_words: int =
     config = load_yaml(os.path.join(export_dir, CONFIG_FILE_NAME))
     data = {k: v for k, v in config["data"].items() if k in TextDataConfig.__dataclass_fields__}
     data = TextDataConfig(**{**data, "max_eval_samples": max_samples})
+    if not isinstance(data.dataset_text_template, list) or len(data.dataset_text_template) != 2:
+        raise ValueError("Generation evaluation needs data.dataset_text_template as [prefix, completion]")
     prefix_template, completion_template = data.dataset_text_template
     validation = load_raw_datasets(data)["validation"]
     validation = validation.select(range(min(max_samples, len(validation))))

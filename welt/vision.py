@@ -16,6 +16,14 @@ def unpatchify(patches: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     return images.permute(0, 5, 1, 3, 2, 4).reshape(n, 3, rows * PATCH_SIZE, cols * PATCH_SIZE)
 
 
+def initialize_patch_embeddings(model: nn.Module):
+    """Initialize patch embedding convolutions like linear layers (xavier uniform), as PIXEL and ViT-MAE do.
+    https://github.com/xplip/pixel/blob/main/src/pixel/models/pixel/modeling_pixel.py#L573"""
+    for module in model.modules():
+        if isinstance(module, nn.Conv2d):
+            nn.init.xavier_uniform_(module.weight.data.view(module.weight.size(0), -1))
+
+
 class HFImageEncoder(nn.Module):
     """Encodes each word image with a HF vision backbone, at the backbone's patch size, using its pooled output."""
 
@@ -27,6 +35,8 @@ class HFImageEncoder(nn.Module):
         else:
             model = AutoModel.from_config(config, trust_remote_code=trust_remote_code)
         self.model = getattr(model, "vision_model", model)  # e.g. the vision tower of CLIP / SigLIP
+        if not pretrained:
+            initialize_patch_embeddings(self.model)
         vision_config = getattr(config, "vision_config", config)
         self.hidden_size = vision_config.hidden_size
         self.patch_size = vision_config.patch_size

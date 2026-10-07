@@ -1,0 +1,88 @@
+"""Overfit a tiny WeLT on a few texts, and check it learned character, word, and byte level conditioning."""
+import pytest
+import torch
+from datasets import Dataset
+
+pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
+
+from tests.test_model import build_model  # noqa: E402
+from welt.processor import TextImageProcessor  # noqa: E402
+from welt_training.data_utils import pack_words  # noqa: E402
+
+TRAIN_TEXTS = ["a b", "b a", "a cat", "a dog"]
+
+
+def train(model, processor, packed: bool, steps: int = 300):
+    if packed:
+        words = Dataset.from_dict({"text": TRAIN_TEXTS}).map(lambda e: {"words": processor.pretokenize(e["text"])})
+        examples = pack_words({"words": words["words"]}, seq_length=7)
+        batch = processor({"words": examples["words"], "seq_lengths": examples["seq_lengths"]}, collated=True)
+    else:
+        batch = processor(TRAIN_TEXTS, collated=True)
+    batch = {k: v.cuda() for k, v in batch.items()}
+
+    torch.manual_seed(0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.0)
+    model.train()
+    for _ in range(steps):
+        losses, _, labels = model(**batch)
+        loss = (losses * (labels != 0)).sum() / (labels != 0).sum()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+    model.eval()
+
+
+def text_losses(model, processor, texts: list[str]) -> dict[str, float]:
+    """Mean byte loss of each text, on its own."""
+    results = {}
+    for text in texts:
+        batch = {k: v.cuda() for k, v in processor([text], collated=True).items()}
+        with torch.no_grad():
+            losses, _, labels = model(**batch)
+        mask = labels != 0
+        results[text] = ((losses * mask).sum() / mask.sum()).item()
+    return results
+
+
+@pytest.fixture(scope="module", params=["packed", "unpacked"])
+def trained(request, megatron, tiny_config):
+    torch.manual_seed(0)
+    model = build_model(tiny_config).float()
+    model.config.modality_dropout = 0.15
+    processor = TextImageProcessor.create(max_word_length=16, render_images=True)
+    train(model, processor, packed=request.param == "packed")
+    return model, processor
+
+
+@pytest.fixture(params=["full_model", "no_bytes_encoder", "no_image_encoder"])
+def configured(request, trained, monkeypatch):
+    """Drops a modality like modality dropout does: its embedding is zeroed and the other one is rescaled."""
+    model, processor = trained
+    keep = {"full_model": [1.0, 1.0], "no_bytes_encoder": [2.0, 0.0], "no_image_encoder": [0.0, 2.0]}[request.param]
+    monkeypatch.setattr(model, "_modality_scale", lambda num, device: torch.tensor(keep, device=device))
+    return model, processor, request.param
+
+
+def test_character_level_conditioning(configured):
+    model, processor, name = configured
+    if name == "no_bytes_encoder":
+        pytest.skip("A tiny image encoder cannot distinguish single-character renders ('a' vs 'b')")
+    losses = text_losses(model, processor, ["a b", "b a", "a a", "b b"])
+    assert losses["a b"] < losses["a a"]
+    assert losses["b a"] < losses["b b"]
+
+
+def test_word_level_conditioning(configured):
+    model, processor, _ = configured
+    losses = text_losses(model, processor, ["a cat", "a dog", "a dat", "a cog"])
+    assert losses["a cat"] < losses["a dat"]
+    assert losses["a dog"] < losses["a cog"]
+
+
+def test_byte_level_conditioning(configured):
+    """After 'c', 'cat' is more likely than 'cog', and after 'd', 'dog' than 'dat'."""
+    model, processor, _ = configured
+    losses = text_losses(model, processor, ["a cat", "a cog", "a dog", "a dat"])
+    assert losses["a cat"] < losses["a cog"]
+    assert losses["a dog"] < losses["a dat"]

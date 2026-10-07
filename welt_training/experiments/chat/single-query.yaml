@@ -24,6 +24,7 @@ train:
   global_batch_size: 32
 
 optimizer:
+  optimizer: muon
   lr: 1.0e-3
   min_lr: 1.0e-4
   weight_decay: 0.01

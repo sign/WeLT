@@ -61,3 +61,34 @@ def test_generate_with_vllm(trained):
     outputs = generator.generate(["number 4 is", "number \x0E7\x0F is od"], max_generated_words=3)
     assert len(outputs) == 2
     assert all(isinstance(output, str) for output in outputs)
+
+
+def test_vllm_matches_megatron(trained, megatron):
+    """The exported model, served by vLLM, computes the same word embeddings and latents as the Megatron model."""
+    from megatron.bridge.training.model_load_save import load_megatron_model
+
+    import welt.model  # noqa: F401 - registers WeLTModelProvider for checkpoint loading
+    from welt.inference import WeLTGenerator
+
+    model = load_megatron_model(str(trained / "run" / "checkpoints" / "iter_0000020"), skip_temp_dist_context=True)
+    model = model[0] if isinstance(model, list) else model
+    while hasattr(model, "module"):
+        model = model.module
+    model = model.cuda().eval()
+
+    generator = WeLTGenerator(str(trained / "export"), gpu_memory_utilization=0.05)
+    text = "number \x0e7 is\x0f odd"  # With a bidirectional shift block
+    words = generator.processor.pretokenize(text)
+    batch = {k: v.cuda() for k, v in generator.processor([text], collated=True).items()}
+    with torch.no_grad():
+        word_embeds = model.encode_words(batch["input_ids"], batch["input_attention_mask"],
+                                         batch["input_patches"], batch["input_patches_shape"])[0]
+        latents = model.latent(word_embeds[None], batch["attention_mask"])[0]
+
+    generator._encode_words(words)
+    vllm_embeds = torch.stack([generator.word_embeddings[w] for w in words]).cuda()
+    vllm_latent = generator._latents([words])[0]
+
+    similarity = torch.nn.functional.cosine_similarity
+    assert (similarity(word_embeds.float(), vllm_embeds.float(), dim=-1) > 0.99).all()
+    assert similarity(latents[-1].float(), vllm_latent.float(), dim=0) > 0.99

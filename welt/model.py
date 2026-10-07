@@ -4,6 +4,7 @@ WeLT on Megatron-Core.
 Up to four Megatron GPT transformers, built (and optionally initialized from HF checkpoints) by Megatron-Bridge:
 - bytes encoder: bidirectional transformer over the bytes of each word, BOS output is the word embedding
 - image encoder: bidirectional transformer over 16x16 patches of each rendered word, CLS output is the word embedding
+  (or a HF vision backbone, see welt/vision.py)
 - latent transformer: causal transformer over word embeddings (packed sequences, prefix-LM shift blocks)
 - bytes decoder: causal transformer generating each word's bytes from the latent vector of the previous word
 
@@ -21,7 +22,11 @@ from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.core.models.gpt import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
-from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.tensor_parallel import (
+    gather_from_sequence_parallel_region,
+    gather_from_tensor_model_parallel_region,
+    scatter_to_sequence_parallel_region,
+)
 from megatron.core.transformer.module import MegatronModule
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
@@ -120,7 +125,8 @@ class WeLTModelProvider(GPTModelProvider):
         def pretrained(name):
             return name if load_pretrained and name and not name.endswith(".json") else None
 
-        vision = image_encoder if image_encoder and is_vision_model(hf_config(image_encoder, trust_remote_code)) else None
+        is_vision = image_encoder and is_vision_model(hf_config(image_encoder, trust_remote_code))
+        vision = image_encoder if is_vision else None
         latent = provider(latent_transformer)
         fields = {f.name: getattr(latent, f.name) for f in dataclasses.fields(GPTModelProvider) if f.init}
         return cls(**fields,
@@ -231,7 +237,8 @@ class MaskedAttention(nn.Module):
 def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention: str,
                       keep_embedding=False, keep_output_layer=False) -> GPTModel:
     """Build a Megatron GPTModel, load HF weights, then drop the parts WeLT replaces.
-    attention: "arbitrary" (attention_mask, BSHD) or "causal"/"bidirectional" (packed short sequences, THD)"""
+    attention: "arbitrary" (an attention_mask, BSHD) or "causal"/"bidirectional" (packed short sequences, THD).
+    Attention is replaced by FlexAttention."""
     provider.share_embeddings_and_output_weights = False  # embeddings and output layers are replaced
     assert provider.position_embedding_type == "rope", "Only RoPE transformers are supported"
     model = GPTModelProvider.provide(provider, pre_process=True, post_process=True)
@@ -243,7 +250,6 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
 
     for layer in model.decoder.layers:
         if attention == "arbitrary":
-            layer.self_attention.attn_mask_type = AttnMaskType.arbitrary
             layer.self_attention.core_attention = MaskedAttention(provider)
         else:
             layer.self_attention.core_attention = PackedAttention(provider, causal=attention == "causal")
@@ -260,22 +266,42 @@ def run_transformer(model: GPTModel, hidden: torch.Tensor, attention_mask: torch
     """(B, S, H) -> (B, S, H), including the final layer norm. attention_mask: True = masked."""
     hidden = hidden.transpose(0, 1).contiguous()
     rotary_pos_emb = model.rotary_pos_emb(hidden.size(0))
+    if model.config.sequence_parallel:  # Each tensor parallel rank holds a part of the sequence
+        hidden = scatter_to_sequence_parallel_region(hidden)
     hidden = model.decoder(hidden_states=hidden, attention_mask=attention_mask, rotary_pos_emb=rotary_pos_emb)
+    if model.config.sequence_parallel:
+        hidden = gather_from_sequence_parallel_region(hidden, tensor_parallel_output_grad=False)
     return hidden.transpose(0, 1)
 
 
-def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Tensor,
+                           gather: bool = True) -> torch.Tensor:
     """Runs the valid positions of (N, S, H) right-padded sequences, packed without padding (THD format).
-    Returns (num_valid, H) outputs, including the final layer norm."""
+    Returns (num_valid, H) outputs, including the final layer norm. With sequence parallelism and gather=False,
+    returns this rank's part of the (padded) packed outputs instead."""
     lengths = mask.sum(dim=-1, dtype=torch.int32)
+    hidden = hidden[mask]
+    num_valid = len(hidden)
+    if model.config.sequence_parallel:
+        # Splitting the packed tokens across ranks needs a multiple of their number: pad with a dummy sequence
+        padding = -num_valid % model.config.tensor_model_parallel_size
+        hidden = F.pad(hidden, (0, 0, 0, padding))
+        lengths = F.pad(lengths, (0, 1), value=padding)
     cu_seqlens = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     max_length = mask.size(1)
     params = PackedSeqParams(qkv_format="thd", cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
                              max_seqlen_q=max_length, max_seqlen_kv=max_length)
     rotary_pos_emb = model.rotary_pos_emb(max_length, packed_seq=True)
-    hidden = model.decoder(hidden_states=hidden[mask].unsqueeze(1), attention_mask=None,
+    hidden = hidden.unsqueeze(1)
+    if model.config.sequence_parallel:
+        hidden = scatter_to_sequence_parallel_region(hidden)
+    hidden = model.decoder(hidden_states=hidden, attention_mask=None,
                            rotary_pos_emb=rotary_pos_emb, packed_seq_params=params)
-    return hidden.squeeze(1)
+    if not model.config.sequence_parallel:
+        return hidden.squeeze(1)
+    if not gather:
+        return hidden
+    return gather_from_sequence_parallel_region(hidden, tensor_parallel_output_grad=False)[:num_valid].squeeze(1)
 
 
 class WordEncoder(nn.Module):
@@ -314,6 +340,7 @@ class PatchEmbedding(nn.Module):
         super().__init__()
         self.proj = nn.Linear(PATCH_DIM, dim)
         self.cls = nn.Parameter(torch.randn(dim) * 0.02)
+        nn.init.xavier_uniform_(self.proj.weight)  # Like PIXEL / ViT-MAE patch embeddings
 
     def forward(self, patches: torch.Tensor) -> torch.Tensor:
         embeds = self.proj(patches.to(self.proj.weight.dtype) / 127.5 - 1)
@@ -410,9 +437,10 @@ class WeLTModel(MegatronModule):
         where the logits at each latent position are a prediction of the first input byte (which is BOS)."""
         embeds = torch.cat([latents[:, None], self.bytes_decoder_embedding(labels_input)], dim=1)
         mask = F.pad(labels_mask.bool(), (1, 0), value=True)
-        hidden = run_packed_transformer(self.bytes_decoder, embeds, mask)
-        logits, _ = self.bytes_decoder.output_layer(hidden)
-        return logits, mask
+        # With sequence parallelism, the output layer gathers the sequence itself
+        hidden = run_packed_transformer(self.bytes_decoder, embeds, mask, gather=False)
+        logits, _ = self.bytes_decoder.output_layer(hidden)  # Vocabulary split across tensor parallel ranks
+        return logits.reshape(-1, logits.size(-1))[:int(mask.sum())], mask  # Without sequence parallel padding
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -456,5 +484,6 @@ class WeLTModel(MegatronModule):
         losses = torch.zeros_like(targets, dtype=packed_losses.dtype)
         losses[mask] = packed_losses
         correct = torch.zeros_like(targets, dtype=torch.bool)
-        correct[mask] = logits.argmax(dim=-1) == packed_targets
+        full_logits = gather_from_tensor_model_parallel_region(logits.detach())
+        correct[mask] = full_logits.argmax(dim=-1) == packed_targets
         return losses[:, 1:], correct[:, 1:], labels_output

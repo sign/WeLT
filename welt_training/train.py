@@ -70,9 +70,9 @@ def _apply(config_object, values: dict | None):
     return config_object
 
 
-def build_config(config: dict) -> ConfigContainer:
+def build_config(config: dict, model_provider, dataset_provider, vocab_size: int) -> ConfigContainer:
+    """Megatron-Bridge config from the YAML's Megatron-Bridge sections, with the given model and dataset."""
     output_dir = config.get("output_dir", "./output")
-    model_provider = build_model_provider(config["model"], config["data"])
     model_provider.bf16 = True
 
     train = _apply(TrainingConfig(train_iters=1000, micro_batch_size=32, global_batch_size=32), config.get("train"))
@@ -90,13 +90,14 @@ def build_config(config: dict) -> ConfigContainer:
     logger = _apply(LoggerConfig(log_interval=10, tensorboard_dir=os.path.join(output_dir, "tensorboard")),
                     config.get("logger"))
     ddp = _apply(DistributedDataParallelConfig(use_distributed_optimizer=optimizer.use_distributed_optimizer,
-                                               grad_reduce_in_fp32=True, average_in_collective=False),
+                                               grad_reduce_in_fp32=True, average_in_collective=False,
+                                               overlap_grad_reduce=True, overlap_param_gather=True),
                  config.get("ddp"))
     rng = _apply(RNGConfig(seed=42), config.get("rng"))
 
     return ConfigContainer(
         model=model_provider,
-        dataset=build_dataset_provider(config["model"], config["data"]),
+        dataset=dataset_provider,
         train=train,
         optimizer=optimizer,
         scheduler=scheduler,
@@ -105,7 +106,8 @@ def build_config(config: dict) -> ConfigContainer:
         logger=logger,
         ddp=ddp,
         rng=rng,
-        tokenizer=TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=model_provider.num_tokens),
+        # Datasets tokenize on their own, Megatron only needs the vocabulary size
+        tokenizer=TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=vocab_size),
     )
 
 
@@ -140,22 +142,29 @@ def forward_step(state, data_iterator, model, return_schedule_plan: bool = False
     return losses, partial(loss_func, correct=correct, labels=labels)
 
 
-def train(args: list[str] | None = None):
-    args = sys.argv[1:] if args is None else args
-    config_path, overrides = args[0], args[1:]
-    config = load_yaml(config_path, overrides)
-    cfg = build_config(config)
-
+def run(config: dict, cfg: ConfigContainer, forward_step_func, save_artifacts=None):
+    """Save the YAML config (and other artifacts) to the output directory, then train."""
     output_dir = config.get("output_dir", "./output")
     if int(os.environ.get("RANK", 0)) == 0:
         os.makedirs(output_dir, exist_ok=True)
         with open(os.path.join(output_dir, CONFIG_FILE_NAME), "w") as f:
             yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
-        cfg.dataset.processor().save_pretrained(os.path.join(output_dir, "processor"))
+        if save_artifacts is not None:
+            save_artifacts(output_dir)
 
-    pretrain(config=cfg, forward_step_func=forward_step)
+    pretrain(config=cfg, forward_step_func=forward_step_func)
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
+
+
+def train(args: list[str] | None = None):
+    args = sys.argv[1:] if args is None else args
+    config = load_yaml(args[0], args[1:])
+    model = build_model_provider(config["model"], config["data"])
+    dataset = build_dataset_provider(config["model"], config["data"])
+    cfg = build_config(config, model, dataset, vocab_size=model.num_tokens)
+    run(config, cfg, forward_step,
+        save_artifacts=lambda output_dir: dataset.processor().save_pretrained(os.path.join(output_dir, "processor")))
 
 
 if __name__ == "__main__":

@@ -19,12 +19,12 @@ def pack_dataset(dataset, seq_length):
 
 @pytest.fixture(scope="module")
 def processor():
-    return TextImageProcessor.create(max_word_length=32, max_seq_length=128, render_images=True)
+    return TextImageProcessor.create(max_word_length=32, render_images=True)
 
 
 @pytest.fixture(scope="module")
 def text_processor():
-    return TextImageProcessor.create(max_word_length=32, max_seq_length=128, render_images=False)
+    return TextImageProcessor.create(max_word_length=32, render_images=False)
 
 
 expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask",

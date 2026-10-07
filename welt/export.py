@@ -4,9 +4,10 @@ Export a WeLT Megatron checkpoint for inference with vLLM.
     torchrun --nproc_per_node=1 -m welt.export <output_dir>/checkpoints [--iteration N] --output <export_dir>
 
 Writes a HuggingFace (Llama-like) model directory per transformer, which vLLM serves:
-- bytes_encoder/, image_encoder/: bidirectional, CLS pooling (LlamaBidirectionalModel),
+(in the transformer's original architecture, e.g. Llama or Qwen3):
+- bytes_encoder/, image_encoder/: bidirectional (is_causal: false), served with CLS pooling,
   or for HF vision backbones, image_encoder/ in their own format (run with transformers)
-- latent_transformer/: causal, last token pooling, bidirectional shift blocks (is_mm_prefix_lm)
+- latent_transformer/: causal, served with last token pooling, bidirectional shift blocks (is_mm_prefix_lm)
 - bytes_decoder/: causal LM over bytes
 and `welt.safetensors` with the remaining (small) layers, plus the processor.
 """
@@ -61,10 +62,10 @@ def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str
     config.tie_word_embeddings = False
     config.dtype = "bfloat16"
 
+    # The original architecture is kept, transformers with other roles than the decoder are served as pooling models
     if name == "bytes_decoder":
         weights["model.embed_tokens.weight"] = model.bytes_decoder_embedding.folded_weight().detach()
         weights["lm_head.weight"] = gpt.output_layer.weight.detach()
-        config.architectures = ["LlamaForCausalLM"]
     else:
         if name == "bytes_encoder":
             embeddings = model.bytes_encoder.embed.folded_weight().detach()
@@ -72,11 +73,9 @@ def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str
             embeddings = torch.zeros(num_tokens, hidden_size)
         weights["model.embed_tokens.weight"] = embeddings
         if name == "latent_transformer":
-            config.architectures = ["LlamaForCausalLM"]  # served as a pooling model
-            config.is_mm_prefix_lm = True  # bidirectional attention ranges, for shift blocks
+            config.is_mm_prefix_lm = True  # Bidirectional attention ranges, for shift blocks
         else:
-            config.architectures = ["LlamaBidirectionalModel"]
-            config.pooling = "cls"
+            config.is_causal = False  # Encoders are bidirectional
 
     weights = {k: v.to("cpu", torch.bfloat16).contiguous() for k, v in weights.items()}
     os.makedirs(path, exist_ok=True)

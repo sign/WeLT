@@ -27,7 +27,7 @@ def model(megatron, tiny_config):
 
 @pytest.fixture(scope="module")
 def processor():
-    return TextImageProcessor.create(max_word_length=16, max_seq_length=64, render_images=True)
+    return TextImageProcessor.create(max_word_length=16, render_images=True)
 
 
 def word_losses(model, processor, texts: list[str]) -> torch.Tensor:
@@ -133,7 +133,7 @@ def test_hf_image_encoder_matches_full_images(megatron):
     """Word images, rebuilt from processor patches, give the backbone's own output for each image."""
     from welt.vision import HFImageEncoder, unpatchify
 
-    processor = TextImageProcessor.create(max_word_length=16, max_seq_length=64, render_images=True)
+    processor = TextImageProcessor.create(max_word_length=16, render_images=True)
     encoder = HFImageEncoder("WinKawaks/vit-tiny-patch16-224", pretrained=True).cuda().eval()
     words = ["hello ", "a ", "world"]
     patches, shapes = processor.render_texts(words)

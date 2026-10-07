@@ -16,10 +16,8 @@ PAD_WORD = "\x00"
 
 @dataclass(kw_only=True)
 class TextDataConfig:
-    seq_length: int  # Maximum words per (packed) example
-    max_word_length: int = 128  # Maximum bytes per word, including BOS and EOS
-    render_images: bool = False
-    pretokenizer_name: str | None = None
+    """Where the texts come from, and how they are formatted."""
+    seq_length: int  # Words (WeLT) or tokens (baseline) per packed example
 
     dataset_name: str | None = None
     dataset_config_name: str | None = None
@@ -27,18 +25,13 @@ class TextDataConfig:
     dataset_text_template: str | list[str] | None = None
     train_file: str | None = None
     validation_file: str | None = None
-    prepared_data_path: str | None = None
+    prepared_data_path: str | None = None  # Shards made by welt-prepare-data
     validation_split_percentage: int = 5
     streaming: bool = False  # Streams the dataset, materializing max_train_samples / max_eval_samples
     max_train_samples: int | None = None
     max_eval_samples: int | None = None
     preprocessing_num_workers: int | None = None
     trust_remote_code: bool = False
-    def processor(self) -> TextImageProcessor:
-        return TextImageProcessor.create(max_word_length=self.max_word_length, max_seq_length=self.seq_length,
-                                         render_images=self.render_images, pretokenizer_name=self.pretokenizer_name,
-                                         trust_remote_code=self.trust_remote_code)
-
 
 
 def extract_text(example: dict, text_column: str = "text", text_template: str | None = None) -> str:

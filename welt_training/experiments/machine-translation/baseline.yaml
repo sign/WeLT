@@ -1,0 +1,35 @@
+# Subword causal LM baseline for machine-translation.yaml: the same data and latent transformer size,
+# with the Pythia tokenizer instead of words, to compare bits per byte.
+#   torchrun --nproc_per_node=1 -m welt_training.baseline welt_training/experiments/machine-translation/baseline.yaml
+output_dir: ./output/en-he-baseline
+
+model:
+  transformer: welt_training/experiments/models/latent-70m.json
+  tokenizer: EleutherAI/pythia-70m
+
+data:
+  dataset_name: Helsinki-NLP/opus-100
+  dataset_config_name: en-he
+  dataset_text_template:
+    - "<en>\x0E{translation[en]}\x0F<he> "
+    - "{translation[he]}"
+  seq_length: 320  # Tokens: as much text as 128 words of machine-translation.yaml (~2.4 tokens per word)
+  max_eval_samples: 256
+  num_workers: 8
+
+train:
+  train_iters: 10000
+  micro_batch_size: 64
+  global_batch_size: 64
+
+optimizer:
+  lr: 3.0e-4
+  min_lr: 3.0e-5
+
+validation:
+  eval_interval: 500
+  eval_iters: 4
+
+logger:
+  log_interval: 10
+  wandb_project: welt-machine-translation

@@ -39,16 +39,17 @@ class WeLTGenerator:
 
         engine_args = dict(gpu_memory_utilization=gpu_memory_utilization, dtype="bfloat16")
         # Context lengths default to each transformer's max_position_embeddings
-        embed_params = dict(runner="pooling", pooler_config=PoolerConfig(use_activation=False), **engine_args)
+        encoder_args = dict(runner="pooling", convert="embed", **engine_args,
+                            pooler_config=PoolerConfig(seq_pooling_type="CLS", use_activation=False))
         self.encoders = {}
         self.vision = None  # A HF vision backbone, which vLLM does not serve on its own
         image_encoder = os.path.join(path, "image_encoder")
         if os.path.isdir(image_encoder) and is_vision_model(AutoConfig.from_pretrained(image_encoder)):
             self.vision = HFImageEncoder(image_encoder, pretrained=True).to(device, torch.bfloat16).eval()
         elif os.path.isdir(image_encoder):
-            self.encoders["image_encoder"] = LLM(image_encoder, enable_prompt_embeds=True, **embed_params)
+            self.encoders["image_encoder"] = LLM(image_encoder, enable_prompt_embeds=True, **encoder_args)
         if os.path.isdir(os.path.join(path, "bytes_encoder")):
-            self.encoders["bytes_encoder"] = LLM(os.path.join(path, "bytes_encoder"), **embed_params)
+            self.encoders["bytes_encoder"] = LLM(os.path.join(path, "bytes_encoder"), **encoder_args)
         self.latent = LLM(os.path.join(path, "latent_transformer"), convert="embed", enable_prompt_embeds=True,
                           enable_prefix_caching=True, runner="pooling",
                           pooler_config=PoolerConfig(seq_pooling_type="LAST", use_activation=False), **engine_args)

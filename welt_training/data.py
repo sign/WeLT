@@ -1,5 +1,4 @@
-"""Megatron-Bridge dataset provider for WeLT: packed words, processed into model inputs."""
-import logging
+"""Megatron-Bridge dataset provider for WeLT: texts packed into examples of words, processed into model inputs."""
 from dataclasses import dataclass
 from functools import partial
 
@@ -11,25 +10,27 @@ from welt.collator import collate_fn
 from welt.processor import TextImageProcessor
 from welt_training.data_utils import TextDataConfig, load_text_datasets, pack_dataset
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass(kw_only=True)
 class WeLTDatasetProvider(TextDataConfig, DatasetProvider):
+    max_word_length: int = 128  # Bytes per word, including BOS and EOS
+    render_images: bool = False  # For an image encoder
+    pretokenizer_name: str | None = None  # A HF tokenizer splitting texts into words, defaults to words-segmentation
     dataloader_type: str = "cyclic"
+
+    def processor(self) -> TextImageProcessor:
+        return TextImageProcessor.create(max_word_length=self.max_word_length,
+                                         render_images=self.render_images, pretokenizer_name=self.pretokenizer_name,
+                                         trust_remote_code=self.trust_remote_code)
 
     def build_datasets(self, context: DatasetBuildContext):
         processor = self.processor()
         texts = load_text_datasets(self)
-        train = texts.get("train")
-        valid = texts.get("validation")
-        if train is not None:
-            train = WordsDataset(pack_dataset(processor, train, self.seq_length, self.preprocessing_num_workers),
-                                 processor, min_length=context.train_samples)
-        if valid is not None:
-            valid = WordsDataset(pack_dataset(processor, valid, self.seq_length, self.preprocessing_num_workers),
-                                 processor, min_length=context.valid_samples)
-        return train, valid, None
+        datasets = {split: WordsDataset(pack_dataset(processor, texts[split], self.seq_length,
+                                                     self.preprocessing_num_workers), processor, min_length=samples)
+                    for split, samples in (("train", context.train_samples), ("validation", context.valid_samples))
+                    if split in texts}
+        return datasets.get("train"), datasets.get("validation"), None
 
 
 class WordsDataset(torch.utils.data.Dataset):

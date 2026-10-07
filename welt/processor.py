@@ -1,7 +1,6 @@
 import json
 import os
 
-import datasets
 import torch
 from cachetools import LRUCache
 from datasets import Dataset
@@ -34,7 +33,6 @@ class TextImageProcessor:
                  pretokenizer: PreTrainedTokenizer,
                  tokenizer: UTF8Tokenizer,
                  renderer: PixelRendererProcessor | None,
-                 max_seq_length: int = 128,
                  max_word_length: int = 32,
                  cache_size: int = 10000):
         assert tokenizer.bos_token_id is not None, "Tokenizer must have a BOS token"
@@ -45,13 +43,12 @@ class TextImageProcessor:
         self.renderer = renderer
 
         self.max_word_length = max_word_length
-        self.max_seq_length = max_seq_length
         self.cache_size = cache_size
 
         self.patches_cache = LRUCache(maxsize=self.cache_size)
 
     @classmethod
-    def create(cls, max_word_length: int, max_seq_length: int, render_images: bool,
+    def create(cls, max_word_length: int, render_images: bool,
                pretokenizer_name: str | None = None, trust_remote_code: bool = False):
         if pretokenizer_name is not None:
             pretokenizer = AutoTokenizer.from_pretrained(pretokenizer_name, use_fast=True,
@@ -60,15 +57,14 @@ class TextImageProcessor:
             pretokenizer = WordsSegmentationTokenizer(max_bytes=max_word_length - 2)  # BOS and EOS
         renderer = PixelRendererProcessor(font=FontConfig(sources=FONTS_NOTO_SANS)) if render_images else None
         return cls(pretokenizer=pretokenizer, tokenizer=UTF8Tokenizer(), renderer=renderer,
-                   max_seq_length=max_seq_length, max_word_length=max_word_length)
+                   max_word_length=max_word_length)
 
     def save_pretrained(self, save_directory):
         os.makedirs(save_directory, exist_ok=True)
         self.pretokenizer.save_pretrained(os.path.join(save_directory, "pretokenizer"))
         if self.renderer is not None:
             self.renderer.save_pretrained(os.path.join(save_directory, "renderer"))
-        config = {"max_seq_length": self.max_seq_length, "max_word_length": self.max_word_length,
-                  "cache_size": self.cache_size}
+        config = {"max_word_length": self.max_word_length, "cache_size": self.cache_size}
         with open(os.path.join(save_directory, PROCESSOR_CONFIG_NAME), "w") as f:
             json.dump(config, f, indent=2, sort_keys=True)
 
@@ -98,23 +94,10 @@ class TextImageProcessor:
         # Add BOS token at the start
         return self.pretokenizer.tokenize(self.tokenizer.bos_token + text)
 
-    def pretokenize_dataset(self, dataset: Dataset, num_proc=4) -> Dataset:
-        """Pretokenize a dataset in place, adding a 'words' column."""
-
-        def tokenize_example(example):
-            example["words"] = self.pretokenize(example["text"])
-            return example
-
-        map_kwargs = {}
-        if isinstance(dataset, datasets.Dataset):
-            # these args are not available for IterableDataset
-            map_kwargs["num_proc"] = num_proc
-            map_kwargs["desc"] = "Pretokenizing texts into 'words'"
-
-        return dataset.map(tokenize_example,
-                           batched=False,
-                           remove_columns=["text"],
-                           **map_kwargs)
+    def pretokenize_dataset(self, dataset: Dataset, num_proc: int | None = None) -> Dataset:
+        """Replace the 'text' column with a 'words' column."""
+        return dataset.map(lambda example: {"words": self.pretokenize(example["text"])}, remove_columns=["text"],
+                           num_proc=num_proc, desc="Pretokenizing texts into words")
 
     def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None) -> list[str]:
         """
@@ -132,12 +115,11 @@ class TextImageProcessor:
 
         return labels
 
-    def tokenize_words(self, words: list[str], device=None):
+    def tokenize_words(self, words: list[str]):
         return self.tokenizer.torch(
             words,
             padding=True,
             add_special_tokens=True,
-            device=device,
             # Truncation happens mostly in pre-tokenization. This is just for additional safety.
             max_length=self.max_word_length,
             truncation=True,
