@@ -23,13 +23,14 @@ from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
 from welt.attention import get_shift_blocks  # noqa: E402
 from welt.processor import PATCH_SIZE, TextImageProcessor  # noqa: E402
-from welt.vllm_plugin import RANGES_KEY  # noqa: E402
+from welt.vllm_plugin import RANGES_KEY, restore_opentelemetry_context  # noqa: E402
 
 PATCH_DIM = PATCH_SIZE * PATCH_SIZE * 3
 
 
 class WeLTGenerator:
     def __init__(self, path: str, gpu_memory_utilization: float = 0.1, device: str = "cuda"):
+        restore_opentelemetry_context()
         self.processor = TextImageProcessor.from_pretrained(os.path.join(path, "processor"))
         self.tokenizer = self.processor.tokenizer
         self.device = device

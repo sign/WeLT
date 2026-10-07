@@ -2,3 +2,4 @@ task,train_iters,ms_per_step,val_loss,val_byte_accuracy,val_word_accuracy,gen_ex
 string-repetition,1500,116.2,0.0106,0.9977,0.9900,0.8633,96.60,990.2
 ocr,3000,94.7,0.0593,0.9853,0.9633,0.5938,89.26,828.9
 letter-count,3000,119.6,0.0082,0.9974,0.9893,0.8281,91.71,1328.3
+machine-translation,10000,166.6,0.4020,0.8850,0.6325,0.0508,39.19,389.2

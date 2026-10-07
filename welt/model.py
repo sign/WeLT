@@ -1,7 +1,7 @@
 """
 WeLT on Megatron-Core.
 
-Three Megatron GPT transformers, built and (optionally) initialized from HuggingFace checkpoints by Megatron-Bridge:
+Up to four Megatron GPT transformers, built and (optionally) initialized from HuggingFace checkpoints by Megatron-Bridge:
 - bytes encoder: bidirectional transformer over the bytes of each word, BOS output is the word embedding
 - image encoder: bidirectional transformer over 16x16 patches of each rendered word, CLS output is the word embedding
 - latent transformer: causal transformer over word embeddings (packed sequences, prefix-LM shift blocks)

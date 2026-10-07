@@ -11,10 +11,21 @@ from types import SimpleNamespace
 RANGES_KEY = "bidirectional_ranges"
 
 
+def restore_opentelemetry_context():
+    """sentry_sdk (imported by wandb, imported by Megatron-Bridge) replaces OpenTelemetry's runtime context with
+    one that raises in vLLM's tracing spans. Restore the default one."""
+    import opentelemetry.context as otel_context
+    from opentelemetry.context.contextvars_context import ContextVarsRuntimeContext
+
+    if type(otel_context._RUNTIME_CONTEXT).__module__.startswith("sentry_sdk"):
+        otel_context._RUNTIME_CONTEXT = ContextVarsRuntimeContext()
+
+
 def register():
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+    restore_opentelemetry_context()
     if getattr(GPUModelRunner, "_welt_patched", False):
         return
     update_states = GPUModelRunner._update_states

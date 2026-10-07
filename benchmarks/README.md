@@ -70,4 +70,12 @@ transformers, which GB10's bandwidth limits. Larger micro batches help a little 
 ([`welt_training/evaluate.py`](../welt_training/evaluate.py): exact match and chrF of completions generated from the
 validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 
-TASKS_TABLE
+| Task | Steps | ms / step | Train time | Val. byte acc. | Val. word acc. | Gen. exact match | Gen. chrF | Gen. words / s |
+|------|------:|----------:|-----------:|---------------:|---------------:|-----------------:|----------:|---------------:|
+| **string-repetition**: repeat an English sentence, pretrained tiny LMs * | 1500 | 116 | 3 min | 99.8% | 99.0% | 86.3% | 96.6 | 990 |
+| **ocr**: write a sentence seen only as rendered word images * | 3000 | 95 | 5 min | 98.5% | 96.3% | 59.4% | 89.3 | 829 |
+| **letter-count**: count the letters of a word | 3000 | 120 | 6 min | 99.7% | 98.9% | 82.8% | 91.7 | 1328 |
+| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 167 | 28 min | 88.5% | 63.2% | 5.1% | 39.2 | 389 |
+
+Generation is greedy, on 256 validation examples, with vLLM (batched over all examples).
+\* Trained before FlexAttention and unique-word encoding (iterations 7-9), so their ms / step is higher than current.
