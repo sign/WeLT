@@ -35,7 +35,8 @@ def evaluate(export_dir: str, max_samples: int = 256, max_generated_words: int =
     num_words = sum(len(generator.processor.pretokenize(p)) - 1 for p in predictions)
     return {
         "samples": len(references),
-        "exact_match": sum(p.strip() == r.strip() for p, r in zip(predictions, references, strict=True)) / len(references),
+        "exact_match": sum(p.strip() == r.strip()
+                           for p, r in zip(predictions, references, strict=True)) / len(references),
         "chrf": CHRF().corpus_score(predictions, [references]).score,
         "generation_seconds": elapsed,
         "generated_words_per_second": num_words / elapsed,

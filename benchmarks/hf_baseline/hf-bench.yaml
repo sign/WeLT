@@ -1,6 +1,6 @@
 image_encoder_model_name_or_path: null
-bytes_encoder_config: /bench/bert-tiny.json
-latent_transformer_config: /bench/latent-70m.json
+bytes_encoder_config: benchmarks/hf_baseline/bert-tiny.json
+latent_transformer_config: benchmarks/hf_baseline/latent-70m.json
 bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
 load_pretrained: false
 

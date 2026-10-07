@@ -8,6 +8,7 @@ import torch
 import yaml
 from datasets import Dataset
 
+pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Megatron and vLLM require a GPU")
 
 

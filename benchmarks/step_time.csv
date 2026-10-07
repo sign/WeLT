@@ -11,3 +11,4 @@ iteration,config,short,stack,change,ms_per_step,kept,notes
 9,machine-translation,+ encode unique words,Megatron-Bridge,"Encode each distinct word once per batch (~31% of words), sharing its embedding; exact",167,yes,
 10,machine-translation,micro batch 128 (option),Megatron-Bridge,"Micro/global batch 128 instead of 64: 302 ms per 128 samples = 151 ms per 64 samples",151,option,"10% more samples/s; changes the global batch, so not the default"
 11,machine-translation,FP8 (rejected),Megatron-Bridge,"Transformer Engine FP8 (tensorwise; MXFP8 is unsupported on SM12x)",,no,"needs packed token counts padded to multiples of 8; matmuls are a minority of the step on GB10"
+12,bench,+ FlexAttention + unique words,Megatron-Bridge,"Iterations 7-9 (FlexAttention for packed and latent attention, encode unique words once) on the bench config",127,yes,"9.7x faster than the HF Trainer; loss at step 300: 0.86 vs. 0.92 for HF"

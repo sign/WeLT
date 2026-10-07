@@ -1,7 +1,7 @@
+import pytest
 from datasets import Dataset
 
-from welt_training.data import WeLTDatasetProvider, WordsDataset
-from welt_training.data_utils import PAD_WORD, load_text_datasets, pack_words
+from welt_training.data_utils import PAD_WORD, TextDataConfig, load_text_datasets, pack_words
 
 
 def test_pack_words_fills_blocks_and_pads():
@@ -19,15 +19,19 @@ def test_pack_words_truncates_long_sequences():
 def test_load_text_datasets_with_template(tmp_path):
     path = tmp_path / "data.json"
     Dataset.from_dict({"src": [f"s{i}" for i in range(20)], "tgt": [f"t{i}" for i in range(20)]}).to_json(path)
-    args = WeLTDatasetProvider(seq_length=16, train_file=str(path), dataset_text_template=["<{src}> ", "{tgt}"],
+    args = TextDataConfig(seq_length=16, train_file=str(path), dataset_text_template=["<{src}> ", "{tgt}"],
                                validation_split_percentage=10)
     texts = load_text_datasets(args)
-    assert len(texts["train"]) == 18 and len(texts["validation"]) == 2
+    assert len(texts["train"]) == 18
+    assert len(texts["validation"]) == 2
     assert texts["train"].column_names == ["text"]
     assert all(t.startswith("<s") and " t" in t for t in texts["train"]["text"])
 
 
 def test_words_dataset_repeats_to_min_length():
+    pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
+    from welt_training.data import WeLTDatasetProvider, WordsDataset
+
     args = WeLTDatasetProvider(seq_length=8)
     processor = args.processor()
     dataset = Dataset.from_dict({"words": [["\x02", "a"]], "seq_lengths": [[2]]})

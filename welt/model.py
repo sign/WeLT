@@ -15,7 +15,7 @@ import os
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
@@ -138,8 +138,8 @@ class WeLTModelProvider(GPTModelProvider):
         super().finalize()
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> "WeLTModel":
-        assert self.pipeline_model_parallel_size == 1 and self.context_parallel_size == 1, \
-            "WeLT does not support pipeline or context parallelism"
+        assert self.pipeline_model_parallel_size == 1, "WeLT does not support pipeline parallelism"
+        assert self.context_parallel_size == 1, "WeLT does not support context parallelism"
         return WeLTModel(self)
 
 
@@ -159,7 +159,8 @@ def packed_block_mask(cu_seqlens: torch.Tensor, causal: bool) -> BlockMask:
     num_blocks = (total + FLEX_BLOCK_SIZE - 1) // FLEX_BLOCK_SIZE
     blocks = torch.arange(num_blocks, device=lengths.device)
     first_block = starts[blocks * FLEX_BLOCK_SIZE] // FLEX_BLOCK_SIZE
-    last_block = blocks if causal else ends[((blocks + 1) * FLEX_BLOCK_SIZE - 1).clamp(max=total - 1)] // FLEX_BLOCK_SIZE
+    last_tokens = ((blocks + 1) * FLEX_BLOCK_SIZE - 1).clamp(max=total - 1)
+    last_block = blocks if causal else ends[last_tokens] // FLEX_BLOCK_SIZE
     kv_num_blocks = (last_block - first_block + 1).int()
     kv_indices = (first_block[:, None] + blocks[None, :]).clamp(max=num_blocks - 1).int()
 

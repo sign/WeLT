@@ -4,7 +4,8 @@ Model FLOPs per training step for a WeLT config, counting each transformer on it
     python benchmarks/flops.py <config.yaml> [--batches 20]
 
 Per transformer: 6 * matmul params * tokens (forward + backward), plus attention 12 * layers * hidden * sum(len^2).
-"Model" FLOPs encode every word occurrence, "hardware" FLOPs encode each distinct word of a batch once (as WeLTModel does).
+"Model" FLOPs encode every word occurrence,
+"hardware" FLOPs encode each distinct word of a batch once (as WeLTModel does).
 """
 import argparse
 

@@ -177,7 +177,7 @@ def load_text_datasets(args: TextDataConfig) -> dict[str, Dataset]:
         if limits[split] is not None and limits[split] < len(dataset):
             dataset = dataset.select(range(limits[split]))
         text_column = "text" if "text" in dataset.column_names else dataset.column_names[0]
-        dataset = dataset.map(lambda example: {"text": extract_text(example, text_column, template)},
+        dataset = dataset.map(lambda example, column=text_column: {"text": extract_text(example, column, template)},
                               remove_columns=dataset.column_names, num_proc=args.preprocessing_num_workers,
                               desc=f"Formatting {split} split")
         texts[split] = dataset.filter(lambda example: len(example["text"]) > 0)

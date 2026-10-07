@@ -175,8 +175,11 @@ The bytes decoder supports vLLM's sampling parameters.
 
 ## Training Speed
 
-See [benchmarks](./benchmarks) for the time per training step of the HuggingFace Trainer implementation compared to
-Megatron-Bridge, and of each optimization along the way.
+On the same model and data, a training step takes 127 ms with Megatron-Bridge vs. 1227 ms with the previous
+HuggingFace Trainer implementation (9.7x faster, on a GB10). See [benchmarks](./benchmarks) for details,
+each optimization along the way, and the results of the example tasks.
+
+![Time per training step](benchmarks/step_time.png)
 
 ## Contributing
 

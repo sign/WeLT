@@ -1,7 +1,10 @@
 """Steady-state throughput of the HF Trainer WeLT stack (main branch)."""
-import json, sys, time
-from transformers import TrainerCallback
+import json
+import sys
+import time
+
 import welt_training.trainer as trainer_module
+from transformers import TrainerCallback
 
 START, END = 50, 300
 result = {}
@@ -26,5 +29,6 @@ def init(self, *a, **k):
     self.add_callback(Timer())
 trainer_module.WeLTTrainer.__init__ = init
 
-from welt_training.train import train
+from welt_training.train import train  # noqa: E402
+
 train(sys.argv[1])

@@ -1,9 +1,11 @@
 import pytest
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 
-from welt.model import PackedAttention, WeLTModelProvider
-from welt.processor import TextImageProcessor
+pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
+
+from welt.model import PackedAttention, WeLTModelProvider  # noqa: E402
+from welt.processor import TextImageProcessor  # noqa: E402
 
 
 def build_model(config_path: str, image_encoder=True, bytes_encoder=True):
