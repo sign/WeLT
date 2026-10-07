@@ -1,7 +1,13 @@
-iteration,short,stack,change,ms_per_step,kept,notes
-0,HF Trainer,HF Trainer (main),"Baseline: transformers Trainer + accelerate, padded words and bytes",1227,yes,steady-state steps 50-300
-1,Megatron-Bridge (padded),Megatron-Bridge,"Port to Megatron-Bridge pretrain(): TE transformer layers, distributed fused Adam; padded (BSHD) word/byte sequences",610,yes,
-2,+ packed bytes (TE flash),Megatron-Bridge,"Pack encoder/decoder byte sequences (THD) with TE flash attention: no compute on padding",250,yes,needs NVTE_FUSED_ATTN=0 on GB10 (cuDNN lacks THD backward on SM12x)
-3,packed + SDPA (rejected),Megatron-Bridge,"Unpack to padded per-word sequences for attention only, torch SDPA (mem-efficient kernel)",255,no,"fwd+bwd microbenchmark 231 ms vs 226 ms; no gain"
-4,packed + matmul attn (rejected),Megatron-Bridge,"Unpack to padded per-word sequences for attention only, plain batched matmul + softmax",310,no,"fwd+bwd microbenchmark 284 ms; elementwise ops are memory-bound on GB10, may differ on H100"
-5,+ flash_attn_varlen direct,Megatron-Bridge,"Packed attention calls flash_attn_varlen_func directly (drops the TE backend env workaround)",250,yes,
+iteration,config,short,stack,change,ms_per_step,kept,notes
+0,bench,HF Trainer,HF Trainer (main),"Baseline: transformers Trainer + accelerate, padded words and bytes",1227,yes,steady-state steps 50-300
+1,bench,Megatron-Bridge (padded),Megatron-Bridge,"Port to Megatron-Bridge pretrain(): TE transformer layers, distributed fused Adam; padded (BSHD) word/byte sequences",610,yes,
+2,bench,+ packed bytes (TE flash),Megatron-Bridge,"Pack encoder/decoder byte sequences (THD) with TE flash attention: no compute on padding",250,yes,needs NVTE_FUSED_ATTN=0 on GB10 (cuDNN lacks THD backward on SM12x)
+3,bench,packed + SDPA (rejected),Megatron-Bridge,"Unpack to padded per-word sequences for attention only, torch SDPA (mem-efficient kernel)",255,no,"fwd+bwd microbenchmark 231 ms vs 226 ms; no gain"
+4,bench,packed + matmul attn (rejected),Megatron-Bridge,"Unpack to padded per-word sequences for attention only, plain batched matmul + softmax",310,no,"fwd+bwd microbenchmark 284 ms; elementwise ops are memory-bound on GB10, may differ on H100"
+5,bench,+ flash_attn_varlen direct,Megatron-Bridge,"Packed attention calls flash_attn_varlen_func directly (drops the TE backend env workaround)",250,yes,
+6,machine-translation,MT config baseline (flash varlen),Megatron-Bridge,"Machine translation config (image + bytes encoders, 70m latent, micro batch 64) with iteration 5",315,yes,9.7 TFLOP/s
+7,machine-translation,+ FlexAttention packed,Megatron-Bridge,"Packed attention with FlexAttention and an O(tokens) block mask from cu_seqlens, shared across layers",229,yes,"13.4 TFLOP/s; varlen flash backward pads per sequence, slow for ~30k few-token sequences"
+8,machine-translation,+ FlexAttention latent,Megatron-Bridge,"Latent transformer attention (packed sequences + bidirectional shift blocks) with FlexAttention instead of TE unfused attention",213,yes,
+9,machine-translation,+ encode unique words,Megatron-Bridge,"Encode each distinct word once per batch (~31% of words), sharing its embedding; exact",167,yes,
+10,machine-translation,micro batch 128 (option),Megatron-Bridge,"Micro/global batch 128 instead of 64: 302 ms per 128 samples = 151 ms per 64 samples",151,option,"10% more samples/s; changes the global batch, so not the default"
+11,machine-translation,FP8 (rejected),Megatron-Bridge,"Transformer Engine FP8 (tensorwise; MXFP8 is unsupported on SM12x)",,no,"needs packed token counts padded to multiples of 8; matmuls are a minority of the step on GB10"

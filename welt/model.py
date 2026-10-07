@@ -16,7 +16,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from flash_attn import flash_attn_varlen_func
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
@@ -25,6 +24,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.module import MegatronModule
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 from transformers import AutoConfig
 
 PATCH_DIM = 16 * 16 * 3
@@ -143,24 +143,80 @@ class WeLTModelProvider(GPTModelProvider):
         return WeLTModel(self)
 
 
+FLEX_BLOCK_SIZE = 128
+compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
+
+
+def packed_block_mask(cu_seqlens: torch.Tensor, causal: bool) -> BlockMask:
+    """FlexAttention block mask over packed (THD) sequences, built in O(tokens) from cu_seqlens.
+    Each query block attends to the key blocks spanned by the sequences it overlaps."""
+    lengths = cu_seqlens.diff().long()
+    total = int(cu_seqlens[-1])
+    sequence = torch.repeat_interleave(torch.arange(len(lengths), device=lengths.device), lengths)
+    starts = torch.repeat_interleave(cu_seqlens[:-1].long(), lengths)
+    ends = torch.repeat_interleave(cu_seqlens[1:].long(), lengths) - 1
+
+    num_blocks = (total + FLEX_BLOCK_SIZE - 1) // FLEX_BLOCK_SIZE
+    blocks = torch.arange(num_blocks, device=lengths.device)
+    first_block = starts[blocks * FLEX_BLOCK_SIZE] // FLEX_BLOCK_SIZE
+    last_block = blocks if causal else ends[((blocks + 1) * FLEX_BLOCK_SIZE - 1).clamp(max=total - 1)] // FLEX_BLOCK_SIZE
+    kv_num_blocks = (last_block - first_block + 1).int()
+    kv_indices = (first_block[:, None] + blocks[None, :]).clamp(max=num_blocks - 1).int()
+
+    def mask_mod(batch, head, q_index, kv_index):
+        same_sequence = sequence[q_index] == sequence[kv_index]
+        return same_sequence & (kv_index <= q_index) if causal else same_sequence
+
+    return BlockMask.from_kv_blocks(kv_num_blocks[None, None], kv_indices[None, None], BLOCK_SIZE=FLEX_BLOCK_SIZE,
+                                    mask_mod=mask_mod, seq_lengths=(total, total))
+
+
 class PackedAttention(nn.Module):
-    """Core attention over packed (THD) short sequences, e.g. the bytes of each word, with varlen flash attention.
-    Replaces Transformer Engine's attention, whose cuDNN backend lacks THD backward on some GPUs (e.g. GB10)."""
+    """Core attention over packed (THD) short sequences, e.g. the bytes of each word, with FlexAttention.
+    Varlen flash attention is ~2x slower on thousands of few-token sequences (its backward pads per sequence)."""
 
     def __init__(self, config, causal: bool):
         super().__init__()
+        assert not config.attention_dropout, "Attention dropout is not supported"
         self.causal = causal
         self.softmax_scale = config.softmax_scale
-        self.dropout = config.attention_dropout
 
     def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None,
                 packed_seq_params: PackedSeqParams = None, **kwargs):
         """(T, heads, dim) packed query, key, value -> (T, heads, dim)"""
-        p = packed_seq_params
-        return flash_attn_varlen_func(query, key, value, p.cu_seqlens_q, p.cu_seqlens_kv,
-                                      p.max_seqlen_q, p.max_seqlen_kv, causal=self.causal,
-                                      softmax_scale=self.softmax_scale,
-                                      dropout_p=self.dropout if self.training else 0.0)
+        # The mask is shared by all layers of the transformer, cached on its packed_seq_params
+        cache_key = f"_welt_block_mask_{self.causal}"
+        block_mask = getattr(packed_seq_params, cache_key, None)
+        if block_mask is None:
+            block_mask = packed_block_mask(packed_seq_params.cu_seqlens_q, self.causal)
+            setattr(packed_seq_params, cache_key, block_mask)
+        query, key, value = (t.transpose(0, 1).unsqueeze(0) for t in (query, key, value))
+        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale,
+                                      enable_gqa=key.size(1) != query.size(1))
+        return out.squeeze(0).transpose(0, 1)
+
+
+class MaskedAttention(nn.Module):
+    """Core attention with an arbitrary (B, 1, S, S) mask (True = masked) in FlexAttention, e.g. the latent
+    transformer's packed sequences with bidirectional shift blocks."""
+    _cache: tuple[torch.Tensor, BlockMask] | None = None  # The mask is shared by all layers
+
+    def __init__(self, config):
+        super().__init__()
+        assert not config.attention_dropout, "Attention dropout is not supported"
+        self.softmax_scale = config.softmax_scale
+
+    def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None, **kwargs):
+        """(S, B, heads, dim) query, key, value -> (S, B, heads * dim)"""
+        if MaskedAttention._cache is None or MaskedAttention._cache[0] is not attention_mask:
+            allowed = ~attention_mask[:, 0]
+            block_mask = create_block_mask(lambda b, h, q, kv: allowed[b, q, kv], allowed.size(0), None,
+                                           allowed.size(1), allowed.size(2), device=allowed.device, _compile=True)
+            MaskedAttention._cache = (attention_mask, block_mask)
+        query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
+        out = compiled_flex_attention(query, key, value, block_mask=MaskedAttention._cache[1],
+                                      scale=self.softmax_scale, enable_gqa=key.size(1) != query.size(1))
+        return out.permute(2, 0, 1, 3).flatten(2)
 
 
 def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention: str,
@@ -179,6 +235,7 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
     for layer in model.decoder.layers:
         if attention == "arbitrary":
             layer.self_attention.attn_mask_type = AttnMaskType.arbitrary
+            layer.self_attention.core_attention = MaskedAttention(provider)
         else:
             layer.self_attention.core_attention = PackedAttention(provider, causal=attention == "causal")
 
@@ -294,22 +351,29 @@ class WeLTModel(MegatronModule):
                      input_patches_count: torch.Tensor | None = None) -> torch.Tensor:
         """Word embeddings in the latent space: (B, L, T) bytes [+ (B, L, P, 768) patches] -> (B, L, H)"""
         B, L, T = input_ids.shape  # noqa: N806
+        input_ids = input_ids.view(B * L, T)
         words_mask = input_attention_mask.view(B * L, T).bool()
         valid = words_mask[:, 0]  # Words have BOS, batch padding words do not
 
+        # Encode each distinct word once (about a third of the words in a batch), its embedding is shared
+        unique_words, inverse = torch.unique(input_ids[valid], dim=0, return_inverse=True)
+        positions = torch.arange(len(inverse), device=inverse.device)
+        first = positions.new_full((len(unique_words),), len(inverse)).scatter_reduce(0, inverse, positions, "amin")
+        rows = valid.nonzero().squeeze(1)[first]
+
         embeds = []
         if self.image_encoder is not None:
-            patches = input_patches.view(B * L, *input_patches.shape[2:])[valid]
-            counts = input_patches_count.view(B * L)[valid]
+            patches = input_patches.view(B * L, *input_patches.shape[2:])[rows]
+            counts = input_patches_count.view(B * L)[rows]
             patches_mask = torch.arange(patches.size(1) + 1, device=counts.device)[None, :] <= counts[:, None]
             embeds.append(self.image_encoder(patches, patches_mask))
         if self.bytes_encoder is not None:
-            embeds.append(self.bytes_encoder(input_ids.view(B * L, T)[valid], words_mask[valid]))
+            embeds.append(self.bytes_encoder(input_ids[rows], words_mask[rows]))
 
         scale = self._modality_scale(len(embeds), input_ids.device)
         embeds = torch.cat([e * s for e, s in zip(embeds, scale, strict=True)], dim=-1)
         word_embeds = embeds.new_zeros(B * L, embeds.size(-1))
-        word_embeds[valid] = embeds
+        word_embeds[valid] = embeds[inverse]
         return self.encoder_norm(self.encoder_mapping(word_embeds)).view(B, L, -1)
 
     def latent(self, word_embeds: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:

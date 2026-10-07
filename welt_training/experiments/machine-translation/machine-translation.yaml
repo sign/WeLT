@@ -9,7 +9,9 @@ model:
 data:
   dataset_name: Helsinki-NLP/opus-100
   dataset_config_name: en-he
-  dataset_text_template: "<en>\x0E{translation[en]}\x0F<he> {translation[he]}"
+  dataset_text_template:
+    - "<en>\x0E{translation[en]}\x0F<he> "
+    - "{translation[he]}"
   seq_length: 128
   max_word_length: 16
   max_eval_samples: 256

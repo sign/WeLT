@@ -108,3 +108,20 @@ def test_packed_attention_matches_padded_attention(megatron, causal):
         q, k, v = (t[start:end].transpose(0, 1) for t in (query, key, value))
         expected.append(F.scaled_dot_product_attention(q, k, v, is_causal=causal).transpose(0, 1))
     torch.testing.assert_close(packed, torch.cat(expected), atol=2e-2, rtol=2e-2)
+
+
+def test_masked_attention_matches_sdpa(megatron):
+    from welt.attention import get_attention_mask_for_packed_sequence
+    from welt.model import MaskedAttention
+
+    torch.manual_seed(0)
+    words = ["\x02", "<en>", "\x0e", "hello", "world", "\x0f", "<he>", "\x02", "x"]
+    allowed = torch.stack([get_attention_mask_for_packed_sequence([7, 2], words=words)] * 2).cuda()  # (B, 1, S, S)
+    seq, batch, heads, dim = allowed.size(-1), 2, 4, 16
+    query, key, value = (torch.randn(seq, batch, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3))
+    config = type("Config", (), {"softmax_scale": None, "attention_dropout": 0.0})()
+    out = MaskedAttention(config)(query, key, value, attention_mask=~allowed)
+
+    q, k, v = (t.permute(1, 2, 0, 3) for t in (query, key, value))
+    expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
+    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
