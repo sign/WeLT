@@ -13,6 +13,12 @@ runs:
     - name: Set up Pango and Cairo
       uses: sign/pixel-renderer/.github/actions/setup-pango-cairo@main
 
+    # ponytail: pixel-renderer 0.1.4 pins PyGObject<3.52, built against girepository-1.0 (the action installs 2.0).
+    # Remove once a pixel-renderer release allows modern PyGObject.
+    - name: Install girepository-1.0
+      shell: bash
+      run: sudo apt-get install -y libgirepository1.0-dev
+
     - name: Setup uv
       uses: astral-sh/setup-uv@v7
       with:
