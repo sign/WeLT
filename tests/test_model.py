@@ -154,3 +154,12 @@ def test_pretrained_vision_image_encoder(megatron, tiny_config, processor):
     model = provider.provide().cuda().bfloat16().eval()
     assert type(model.image_encoder).__name__ == "HFImageEncoder"
     assert torch.isfinite(word_losses(model, processor, ["hello world, how are you?"])).all()
+
+
+def test_checkpoint_shards_every_transformer(megatron, tiny_config):
+    """Every transformer's weights are saved as tensor parallel shards (by its own sharded_state_dict),
+    not as full tensors replicated across ranks."""
+    sharded = build_model(tiny_config).sharded_state_dict()
+    for name in ["bytes_encoder.transformer", "image_encoder.transformer", "latent_transformer", "bytes_decoder"]:
+        weight = sharded[f"{name}.decoder.layers.0.self_attention.linear_proj.weight"]
+        assert weight.key == f"{name}.decoder.layers.self_attention.linear_proj.weight"  # Megatron's layer stacking

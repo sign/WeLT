@@ -315,11 +315,11 @@ def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Te
     return gather_from_sequence_parallel_region(hidden, tensor_parallel_output_grad=False)[:num_valid].squeeze(1)
 
 
-class WordEncoder(nn.Module):
+class WordEncoder(MegatronModule):  # Its sharded_state_dict recurses into the (tensor parallel) transformer
     """Bidirectional transformer, whose first position output is the word embedding."""
 
     def __init__(self, provider: GPTModelProvider, hf_path: str | None, embed: type[nn.Module]):
-        super().__init__()
+        super().__init__(config=provider)
         self.transformer, embeddings = build_transformer(provider, hf_path, "bidirectional")
         self.embed = embed(embeddings)  # Initialized from the (possibly pretrained) input embeddings
         self.hidden_size = provider.hidden_size
