@@ -293,13 +293,14 @@ def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Te
     lengths = mask.sum(dim=-1, dtype=torch.int32)
     hidden = hidden[mask]
     num_valid = len(hidden)
+    max_length = mask.size(1)
     if model.config.sequence_parallel:
         # Splitting the packed tokens across ranks needs a multiple of their number: pad with a dummy sequence
         padding = -num_valid % model.config.tensor_model_parallel_size
         hidden = F.pad(hidden, (0, 0, 0, padding))
         lengths = F.pad(lengths, (0, 1), value=padding)
+        max_length = max(max_length, padding)  # RoPE covers the dummy sequence too
     cu_seqlens = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
-    max_length = mask.size(1)
     params = PackedSeqParams(qkv_format="thd", cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
                              max_seqlen_q=max_length, max_seqlen_kv=max_length)
     rotary_pos_emb = model.rotary_pos_emb(max_length, packed_seq=True)

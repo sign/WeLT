@@ -13,7 +13,8 @@ metrics = {k.strip(): v for k, v in re.findall(r"([a-z ]+) value: ([\d.E+-]+)", 
 evaluation = json.loads((output / "eval.json").read_text())
 print(",".join(str(v) for v in [
     Path(config).stem, iterations, f"{sum(step_times) / len(step_times):.1f}",
-    f"{float(metrics['lm loss']):.4f}", f"{float(metrics['bits per byte']):.4f}", f"{float(metrics['byte accuracy']):.4f}",
+    f"{float(metrics['lm loss']):.4f}", f"{float(metrics['bits per byte']):.4f}",
+    f"{float(metrics['byte accuracy']):.4f}",
     f"{float(metrics['word accuracy']):.4f}",
     f"{evaluation['exact_match']:.4f}", f"{evaluation['chrf']:.2f}", f"{evaluation['generated_words_per_second']:.1f}",
 ]))
