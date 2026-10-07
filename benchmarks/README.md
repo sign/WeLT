@@ -82,9 +82,12 @@ transformers, which GB10's bandwidth limits. Larger micro batches help a little 
 Data parallelism scales 1.9x. Tensor parallelism is slower for these narrow (128-512 wide) transformers: use it only
 for models that do not fit on one GPU. Its checkpoints export (resharded) to the same vLLM format.
 
-With micro batch 64, a step takes 103 ms on one H100 vs. 167 ms on the GB10: only 1.6x faster, as the many small
-kernels of these small models (and the host synchronizations of dynamic packed shapes) bound an H100 more than its
-compute or memory bandwidth. Larger models (or micro batches) would use it better.
+With micro batch 64, a step takes 103 ms on one H100 vs. 167 ms on the GB10: only 1.6x faster. A profile shows the
+H100 is host bound: its kernels take ~30 ms of a ~125 ms step, the rest is the CPU launching ~1500 small kernels
+(Transformer Engine modules cost 0.2-0.4 ms of CPU each for these narrow layers) and building the packed attention
+masks. So on H100s, use larger micro batches (128: 1.7x the samples per second, 256: ~2.9x).
+Follow-up: computing the packing metadata (lengths, unique words, block masks) in the dataloader and padding packed
+shapes to fixed buckets would remove the host synchronizations and allow CUDA graphs.
 
 ## Tasks
 
