@@ -63,12 +63,14 @@ def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str
     config.dtype = "bfloat16"
 
     # The original architecture is kept, transformers with other roles than the decoder are served as pooling models
+    # vLLM's Gemma models scale token embeddings by sqrt(hidden), while WeLT's byte embeddings replace Megatron's
+    embedding_scale = hidden_size ** -0.5 if config.model_type.startswith("gemma") else 1.0
     if name == "bytes_decoder":
-        weights["model.embed_tokens.weight"] = model.bytes_decoder_embedding.folded_weight().detach()
+        weights["model.embed_tokens.weight"] = model.bytes_decoder_embedding.folded_weight().detach() * embedding_scale
         weights["lm_head.weight"] = gpt.output_layer.weight.detach()
     else:
         if name == "bytes_encoder":
-            embeddings = model.bytes_encoder.embed.folded_weight().detach()
+            embeddings = model.bytes_encoder.embed.folded_weight().detach() * embedding_scale
         else:  # Inputs are given as embeddings
             embeddings = torch.zeros(num_tokens, hidden_size)
         weights["model.embed_tokens.weight"] = embeddings
@@ -102,9 +104,11 @@ def export(checkpoint: str, output: str):
 
     os.makedirs(output, exist_ok=True)
     transformer_prefixes = (*(path + "." for path, _ in TRANSFORMERS.values()), "image_encoder.model.")
-    others = {k: v.to("cpu", torch.bfloat16).contiguous() for k, v in model.state_dict().items()
+    others = {k: v for k, v in model.state_dict().items()
               if not k.startswith(transformer_prefixes) and isinstance(v, torch.Tensor) and "_extra_state" not in k}
-    save_file(others, os.path.join(output, "welt.safetensors"))
+    others["decoder_prompt_embeddings"] = model.bytes_decoder_embedding.folded_weight()  # Prompts are embeddings
+    save_file({k: v.detach().to("cpu", torch.bfloat16).contiguous() for k, v in others.items()},
+              os.path.join(output, "welt.safetensors"))
 
     for name in TRANSFORMERS:
         if isinstance(getattr(model, name, None), HFImageEncoder):

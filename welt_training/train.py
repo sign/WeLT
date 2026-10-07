@@ -13,6 +13,7 @@ import sys
 from functools import partial
 
 import torch
+import torch.nn.functional as F  # noqa: N812
 import yaml
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -39,6 +40,7 @@ TOKENIZER = UTF8Tokenizer()
 
 def build_model_provider(model: dict, data: dict) -> WeLTModelProvider:
     model = dict(model)
+    model.pop("pretokenizer", None)  # A data option
     provider = WeLTModelProvider.from_hf(
         bytes_encoder=model.pop("bytes_encoder", None),
         image_encoder=model.pop("image_encoder", None),
@@ -49,9 +51,8 @@ def build_model_provider(model: dict, data: dict) -> WeLTModelProvider:
     )
     provider.seq_length = data["seq_length"]
     provider.calculate_per_token_loss = True
-    for key, value in model.items():  # e.g. modality_dropout, recompute_granularity
-        setattr(provider, key, value)
-    return provider
+    provider.bf16 = True
+    return _apply(provider, model)  # Any other provider option, e.g. modality_dropout, tensor_model_parallel_size
 
 
 def build_dataset_provider(model: dict, data: dict) -> WeLTDatasetProvider:
@@ -73,7 +74,6 @@ def _apply(config_object, values: dict | None):
 def build_config(config: dict, model_provider, dataset_provider, vocab_size: int) -> ConfigContainer:
     """Megatron-Bridge config from the YAML's Megatron-Bridge sections, with the given model and dataset."""
     output_dir = config.get("output_dir", "./output")
-    model_provider.bf16 = True
 
     train = _apply(TrainingConfig(train_iters=1000, micro_batch_size=32, global_batch_size=32), config.get("train"))
     optimizer = _apply(OptimizerConfig(optimizer="adam", lr=3e-4, min_lr=3e-5, weight_decay=0.01, bf16=True,
@@ -94,6 +94,7 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
                                                overlap_grad_reduce=True, overlap_param_gather=True),
                  config.get("ddp"))
     rng = _apply(RNGConfig(seed=42), config.get("rng"))
+    dataset_provider.samples_per_eval = validation.eval_iters * train.global_batch_size
 
     return ConfigContainer(
         model=model_provider,
@@ -112,9 +113,12 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
 
 
 def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor):
-    """Per-byte cross entropy, plus bits-per-byte (without EOS) and byte/word accuracy for logging."""
+    """Per-byte cross entropy, plus bits per byte and byte/word accuracy for logging.
+    labels: (words, bytes). Bits per byte count every prediction (including the EOS ending each word) except the
+    EOS ending a document (a word with an empty label), per UTF-8 byte of text, like the causal LM baseline."""
     loss_mask = labels != TOKENIZER.pad_token_id
-    content_mask = loss_mask & (labels != TOKENIZER.eos_token_id)
+    eos = labels == TOKENIZER.eos_token_id
+    document_end = eos & F.pad(torch.ones_like(eos[:, :1]), (0, eos.size(1) - 1), value=False)
     losses = losses.float()
 
     loss = (losses * loss_mask).sum()
@@ -130,7 +134,7 @@ def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor)
     words_correct = (correct | ~loss_mask).all(dim=-1) & words
     return loss, num_tokens, {
         "lm loss": report(loss, num_tokens),
-        "bits per byte": report((losses * content_mask).sum() / math.log(2), content_mask.sum()),
+        "bits per byte": report((losses * (loss_mask & ~document_end)).sum() / math.log(2), (loss_mask & ~eos).sum()),
         "byte accuracy": report((correct & loss_mask).sum(), num_tokens),
         "word accuracy": report(words_correct.sum(), words.sum()),
     }

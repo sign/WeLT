@@ -32,6 +32,33 @@ class TextDataConfig:
     max_eval_samples: int | None = None
     preprocessing_num_workers: int | None = None
     trust_remote_code: bool = False
+    samples_per_eval: int | None = None  # Set from the validation config: each evaluation covers the dataset once
+
+
+def repeated_length(num_examples: int, min_length: int) -> int:
+    """The smallest number of samples >= min_length that repeats every example equally often."""
+    if num_examples == 0:
+        raise ValueError("Empty dataset (e.g. fewer texts than one packed example)")
+    return -(-max(min_length, 1) // num_examples) * num_examples
+
+
+def dataset_lengths(datasets: dict, context, samples_per_eval: int | None) -> dict[str, int]:
+    """Samples drawn from each split: train repeats examples equally up to the train samples. Validation has
+    samples_per_eval samples, so that every evaluation (one epoch of Megatron's sampler) covers the whole set."""
+    lengths = {}
+    if "train" in datasets:
+        lengths["train"] = repeated_length(len(datasets["train"]), context.train_samples)
+    if "validation" in datasets:
+        num_examples = len(datasets["validation"])
+        lengths["validation"] = samples_per_eval or repeated_length(num_examples, context.valid_samples)
+        if samples_per_eval is not None and samples_per_eval < num_examples:
+            logger.warning(f"Evaluations see {samples_per_eval} of {num_examples} validation examples, "
+                           "increase validation.eval_iters to see them all")
+    return lengths
+
+
+def _take(load_args: dict, split: str, skip: int, limit: int):
+    yield from islice(load_dataset(**load_args, split=split, streaming=True).skip(skip), limit)
 
 
 def extract_text(example: dict, text_column: str = "text", text_template: str | None = None) -> str:
@@ -135,16 +162,16 @@ def load_raw_datasets(args: TextDataConfig) -> dict:
         load_args = dict(path="text" if extension == "txt" else extension, data_files=data_files)
 
     if args.streaming:
-        streams = load_dataset(**load_args, streaming=True)
-        limits = {"train": args.max_train_samples, "validation": args.max_eval_samples}
-        if "validation" not in streams:
-            # Hold out the first examples of the stream for validation
-            num_valid = args.max_eval_samples or 1000
-            streams = {"validation": streams["train"].take(num_valid), "train": streams["train"].skip(num_valid)}
-        for split, limit in limits.items():
-            if limit is None:
-                raise ValueError(f"streaming requires max_{'train' if split == 'train' else 'eval'}_samples")
-        return {split: Dataset.from_list(list(islice(streams[split], limits[split]))) for split in limits}
+        if args.max_train_samples is None or args.max_eval_samples is None:
+            raise ValueError("streaming requires max_train_samples and max_eval_samples")
+        # Without a validation split, the first examples of the train stream are held out for validation
+        has_validation = "validation" in load_dataset(**load_args, streaming=True)
+        splits = {"train": ("train", 0 if has_validation else args.max_eval_samples, args.max_train_samples),
+                  "validation": ("validation" if has_validation else "train", 0, args.max_eval_samples)}
+        # Materialized to (cached, memory-mapped) arrow files
+        return {name: Dataset.from_generator(_take, gen_kwargs=dict(load_args=load_args, split=split, skip=skip,
+                                                                    limit=limit))
+                for name, (split, skip, limit) in splits.items()}
 
     raw = load_dataset(**load_args)
     if "validation" not in raw:

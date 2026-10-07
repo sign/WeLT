@@ -8,7 +8,7 @@ from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
 
 from welt.collator import collate_fn
 from welt.processor import TextImageProcessor
-from welt_training.data_utils import TextDataConfig, load_text_datasets, pack_dataset
+from welt_training.data_utils import TextDataConfig, dataset_lengths, load_text_datasets, pack_dataset
 
 
 @dataclass(kw_only=True)
@@ -26,21 +26,21 @@ class WeLTDatasetProvider(TextDataConfig, DatasetProvider):
     def build_datasets(self, context: DatasetBuildContext):
         processor = self.processor()
         texts = load_text_datasets(self)
-        datasets = {split: WordsDataset(pack_dataset(processor, texts[split], self.seq_length,
-                                                     self.preprocessing_num_workers), processor, min_length=samples)
-                    for split, samples in (("train", context.train_samples), ("validation", context.valid_samples))
-                    if split in texts}
-        return datasets.get("train"), datasets.get("validation"), None
+        datasets = {split: pack_dataset(processor, texts[split], self.seq_length, self.preprocessing_num_workers)
+                    for split in texts}
+        lengths = dataset_lengths(datasets, context, self.samples_per_eval)
+        return (*(WordsDataset(datasets[split], processor, lengths[split]) if split in datasets else None
+                  for split in ("train", "validation")), None)
 
 
 class WordsDataset(torch.utils.data.Dataset):
     """Packed words examples, processed lazily (in the dataloader workers) into model inputs.
-    Repeats the examples up to min_length, as Megatron samplers need at least a global batch."""
+    Repeats the examples up to length, as Megatron samplers draw a fixed number of samples."""
 
-    def __init__(self, dataset: Dataset, processor: TextImageProcessor, min_length: int = 0):
+    def __init__(self, dataset: Dataset, processor: TextImageProcessor, length: int):
         self.dataset = dataset
         self.processor = processor
-        self.length = max(len(dataset), min_length)
+        self.length = length
         self.collate_fn = partial(collate_fn, pad_value=processor.tokenizer.pad_token_id)
 
     def __len__(self):

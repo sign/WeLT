@@ -91,8 +91,14 @@ class TextImageProcessor:
         return stack_pad_tensors(patches), torch.tensor(shapes, dtype=torch.long)
 
     def pretokenize(self, text: str) -> list[str]:
-        # Add BOS token at the start
-        return self.pretokenizer.tokenize(self.tokenizer.bos_token + text)
+        """Split a text (prefixed with BOS) into words."""
+        text = self.tokenizer.bos_token + text
+        if isinstance(self.pretokenizer, WordsSegmentationTokenizer):
+            return self.pretokenizer.tokenize(text)
+        # Other tokenizers' tokens can be encoded (e.g. byte-level BPE "Ġworld"), words are spans of the text instead
+        offsets = self.pretokenizer(text, add_special_tokens=False, return_offsets_mapping=True).offset_mapping
+        starts = sorted({0, *(start for start, _ in offsets)})
+        return [text[start:end] for start, end in zip(starts, [*starts[1:], len(text)], strict=True) if end > start]
 
     def pretokenize_dataset(self, dataset: Dataset, num_proc: int | None = None) -> Dataset:
         """Replace the 'text' column with a 'words' column."""

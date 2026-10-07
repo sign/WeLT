@@ -72,5 +72,5 @@ class HFImageEncoder(nn.Module):
 
 
 def is_vision_model(config) -> bool:
-    """Whether a HF config is a vision backbone (rather than a causal LM, used as a patch transformer)."""
-    return not any(a.endswith("ForCausalLM") for a in (config.architectures or []))
+    """Whether a HF config is a vision backbone (rather than a language model, used as a patch transformer)."""
+    return hasattr(getattr(config, "vision_config", config), "patch_size")

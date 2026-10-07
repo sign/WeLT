@@ -28,14 +28,25 @@ def test_load_text_datasets_with_template(tmp_path):
     assert all(t.startswith("<s") and " t" in t for t in texts["train"]["text"])
 
 
-def test_words_dataset_repeats_to_min_length():
+def test_dataset_lengths_repeat_examples_equally():
+    from types import SimpleNamespace
+
+    from welt_training.data_utils import dataset_lengths
+
+    datasets = {"train": [0] * 10, "validation": [0] * 4}
+    context = SimpleNamespace(train_samples=15, valid_samples=100)
+    assert dataset_lengths(datasets, context, samples_per_eval=None) == {"train": 20, "validation": 100}
+    # Each evaluation (one epoch of the sampler) covers the validation set
+    assert dataset_lengths(datasets, context, samples_per_eval=8) == {"train": 20, "validation": 8}
+
+
+def test_words_dataset_collates_examples():
     pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
     from welt_training.data import WeLTDatasetProvider, WordsDataset
 
-    args = WeLTDatasetProvider(seq_length=8)
-    processor = args.processor()
+    processor = WeLTDatasetProvider(seq_length=8).processor()
     dataset = Dataset.from_dict({"words": [["\x02", "a"]], "seq_lengths": [[2]]})
-    words = WordsDataset(dataset, processor, min_length=5)
+    words = WordsDataset(dataset, processor, length=5)
     assert len(words) == 5
     batch = words.collate_fn([words[i] for i in range(3)])
     assert batch["input_ids"].shape[0] == 3

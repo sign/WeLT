@@ -185,7 +185,3 @@ def test_get_shift_blocks_no_blocks():
     blocks = list(get_shift_blocks(words))
 
     assert len(blocks) == 0
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

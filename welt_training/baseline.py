@@ -22,7 +22,7 @@ from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
 from transformers import AutoTokenizer
 
 from welt.model import hf_config, safetensors_checkpoint
-from welt_training.data_utils import TextDataConfig, load_text_datasets
+from welt_training.data_utils import TextDataConfig, dataset_lengths, load_text_datasets
 from welt_training.extendable_yaml import load_yaml
 from welt_training.train import build_config, run
 
@@ -52,12 +52,12 @@ def chunk_tokens(batch: dict[str, list], tokenizer, length: int) -> dict[str, li
 
 
 class TokensDataset(torch.utils.data.Dataset):
-    """Token chunks as inputs, labels, and the UTF-8 bytes of each label. Repeats up to min_length examples."""
+    """Token chunks as inputs, labels, and the UTF-8 bytes of each label. Repeats the examples up to length."""
 
-    def __init__(self, dataset: Dataset, byte_lengths: torch.Tensor, min_length: int = 0):
+    def __init__(self, dataset: Dataset, byte_lengths: torch.Tensor, length: int):
         self.dataset = dataset
         self.byte_lengths = byte_lengths
-        self.length = max(len(dataset), min_length)
+        self.length = length
 
     def __len__(self):
         return self.length
@@ -76,14 +76,13 @@ class TokensDatasetProvider(TextDataConfig, DatasetProvider):
         tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name, trust_remote_code=self.trust_remote_code)
         byte_lengths = token_byte_lengths(tokenizer)
         texts = load_text_datasets(self)
-        datasets = {}
-        for split, samples in (("train", context.train_samples), ("validation", context.valid_samples)):
-            if split in texts:
-                chunks = texts[split].map(chunk_tokens, batched=True, remove_columns=["text"],
-                                          fn_kwargs={"tokenizer": tokenizer, "length": self.seq_length + 1},
-                                          num_proc=self.preprocessing_num_workers, desc=f"Tokenizing {split}")
-                datasets[split] = TokensDataset(chunks, byte_lengths, min_length=samples)
-        return datasets.get("train"), datasets.get("validation"), None
+        datasets = {split: texts[split].map(chunk_tokens, batched=True, remove_columns=["text"],
+                                            fn_kwargs={"tokenizer": tokenizer, "length": self.seq_length + 1},
+                                            num_proc=self.preprocessing_num_workers, desc=f"Tokenizing {split}")
+                    for split in texts}
+        lengths = dataset_lengths(datasets, context, self.samples_per_eval)
+        return (*(TokensDataset(datasets[split], byte_lengths, lengths[split]) if split in datasets else None
+                  for split in ("train", "validation")), None)
 
 
 def loss_func(losses: torch.Tensor, label_bytes: torch.Tensor):
@@ -108,27 +107,33 @@ def forward_step(state, data_iterator, model, return_schedule_plan: bool = False
     return losses, partial(loss_func, label_bytes=batch["label_bytes"])
 
 
-def train(args: list[str] | None = None):
-    args = sys.argv[1:] if args is None else args
-    config = load_yaml(args[0], args[1:])
+def build(config: dict):
+    """The Megatron-Bridge config of a baseline YAML config."""
     model_config = config["model"]
     trust_remote_code = model_config.get("trust_remote_code", False)
     tokenizer = AutoTokenizer.from_pretrained(model_config["tokenizer"], trust_remote_code=trust_remote_code)
 
     transformer = model_config["transformer"]
-    if model_config.get("load_pretrained", False):
+    load_pretrained = model_config.get("load_pretrained", False)
+    if load_pretrained:
         bridge = AutoBridge.from_hf_pretrained(safetensors_checkpoint(transformer), trust_remote_code=trust_remote_code)
     else:
         bridge = AutoBridge.from_hf_config(hf_config(transformer, trust_remote_code))
-    model = bridge.to_megatron_provider(load_weights=model_config.get("load_pretrained", False))
+    model = bridge.to_megatron_provider(load_weights=load_pretrained)
     model.vocab_size = len(tokenizer)
     model.seq_length = config["data"]["seq_length"]
     model.calculate_per_token_loss = True
+    model.bf16 = True
 
     dataset = TokensDatasetProvider(tokenizer_name=model_config["tokenizer"], trust_remote_code=trust_remote_code,
                                     **config["data"])
-    cfg = build_config(config, model, dataset, vocab_size=len(tokenizer))
-    run(config, cfg, forward_step)
+    return build_config(config, model, dataset, vocab_size=len(tokenizer))
+
+
+def train(args: list[str] | None = None):
+    args = sys.argv[1:] if args is None else args
+    config = load_yaml(args[0], args[1:])
+    run(config, build(config), forward_step)
 
 
 if __name__ == "__main__":

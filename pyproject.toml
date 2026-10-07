@@ -6,10 +6,15 @@ authors = [
     { name = "Amit Moryossef", email = "amit@sign.mt" },
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 # Megatron-Bridge, Megatron-Core, Transformer Engine, vLLM, torch and transformers come from the
 # NeMo container (nvcr.io/nvidia/nemo:26.08.01), see the Dockerfile.
 dependencies = [
+    "torch",
+    "transformers",
+    "tokenizers",
+    "safetensors",
+    "huggingface_hub",
     "datasets",
     "pyyaml",
     "cachetools", # For LRU cache in processor
@@ -24,6 +29,7 @@ dependencies = [
 dev = [
     "ruff",
     "pytest",
+    "matplotlib", # For benchmarks/plot.py
 ]
 
 [tool.setuptools]
@@ -61,7 +67,6 @@ testpaths = [
 ]
 
 [project.scripts]
-welt-train = "welt_training.train:train"
 welt-export = "welt.export:main"
 welt-generate = "welt.inference:main"
 welt-evaluate = "welt_training.evaluate:main"

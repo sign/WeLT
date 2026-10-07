@@ -4,19 +4,9 @@ import torch.nn.functional as F  # noqa: N812
 
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
+from tests.conftest import build_model  # noqa: E402
 from welt.model import PackedAttention, WeLTModelProvider  # noqa: E402
 from welt.processor import TextImageProcessor  # noqa: E402
-
-
-def build_model(config_path: str, image_encoder=True, bytes_encoder=True):
-    provider = WeLTModelProvider.from_hf(latent_transformer=config_path, bytes_decoder=config_path,
-                                         bytes_encoder=config_path if bytes_encoder else None,
-                                         image_encoder=config_path if image_encoder else None)
-    provider.bf16 = True
-    provider.seq_length = 64
-    provider.gradient_accumulation_fusion = False  # Requires Megatron DDP
-    provider.finalize()
-    return provider.provide().cuda().bfloat16().eval()
 
 
 @pytest.fixture(scope="module")

@@ -22,10 +22,13 @@ def restore_opentelemetry_context():
 
 
 def register():
+    from vllm import envs
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
     restore_opentelemetry_context()
+    if envs.VLLM_USE_V2_MODEL_RUNNER:  # It would silently ignore the ranges
+        raise RuntimeError("WeLT's shift blocks need vLLM's V1 model runner, unset VLLM_USE_V2_MODEL_RUNNER")
     if getattr(GPUModelRunner, "_welt_patched", False):
         return
     update_states = GPUModelRunner._update_states

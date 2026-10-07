@@ -30,7 +30,6 @@ def text_processor():
 expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask",
                         "labels_input", "labels_attention_mask", "labels_output",
                         "input_patches", "input_patches_shape"]
-expected_keys = expected_tensor_keys
 
 
 def test_processor_multiprocessing_pickle(processor):
@@ -42,14 +41,14 @@ def test_processor_single_text_collated(processor):
     text = "example text for testing"
     inputs = processor(text, collated=True)
 
-    assert all(key in inputs for key in expected_keys)
+    assert all(key in inputs for key in expected_tensor_keys)
     assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
 
 
 def test_processor_single_text_not_collated(processor):
     text = "example text for testing"
     inputs = processor(text)
-    assert all(key in inputs for key in expected_keys)
+    assert all(key in inputs for key in expected_tensor_keys)
     assert all(isinstance(inputs[key], list) and len(inputs[key]) == 1 for key in expected_tensor_keys)
 
 
@@ -77,21 +76,21 @@ def test_processor_single_text_value(processor):
 def test_processor_list_format_collated(processor):
     text = "example text for testing"
     inputs = processor([text], collated=True)
-    assert all(key in inputs for key in expected_keys)
+    assert all(key in inputs for key in expected_tensor_keys)
     assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
 
 
 def test_processor_object_format_collated(processor):
     text = "example text for testing"
     inputs = processor({"text": text}, collated=True)
-    assert all(key in inputs for key in expected_keys)
+    assert all(key in inputs for key in expected_tensor_keys)
     assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
 
 
 def test_processor_multiple_strings_collated_attention_mask(processor):
     texts = ["one", "two words", "three word test"]
     inputs = processor(texts, collated=True)
-    assert all(key in inputs for key in expected_keys)
+    assert all(key in inputs for key in expected_tensor_keys)
     assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
 
     assert inputs["attention_mask"].shape == (3, 1, 4, 4)
@@ -258,7 +257,7 @@ def test_processor_works_on_packed_sequence(processor):
 
     for datum in packed_dataset:
         inputs = processor.process_single_example(datum["words"], datum["seq_lengths"])
-        assert all(key in inputs for key in expected_keys)
+        assert all(key in inputs for key in expected_tensor_keys)
         assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
         assert inputs["input_ids"].shape[0] == 8
 
@@ -341,5 +340,12 @@ def test_multiple_shift_blocks():
         assert result["labels_attention_mask"][idx].sum() != 0
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_bpe_pretokenizer_words_are_text_spans():
+    """Byte-level BPE tokens ("Ġworld") are encoded, words are the spans of text they cover."""
+    processor = TextImageProcessor.create(max_word_length=32, render_images=False,
+                                          pretokenizer_name="EleutherAI/pythia-14m")
+    text = f"<text>{ControlTokens.ShiftOut}héllo world{ControlTokens.ShiftIn} שלום"
+    words = processor.pretokenize(text)
+    assert "".join(words) == ControlTokens.StartOfText + text
+    assert ControlTokens.ShiftOut in words
+    assert ControlTokens.ShiftIn in words

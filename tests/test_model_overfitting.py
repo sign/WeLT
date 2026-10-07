@@ -5,14 +5,14 @@ from datasets import Dataset
 
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
-from tests.test_model import build_model  # noqa: E402
+from tests.conftest import build_model  # noqa: E402
 from welt.processor import TextImageProcessor  # noqa: E402
 from welt_training.data_utils import pack_words  # noqa: E402
 
 TRAIN_TEXTS = ["a b", "b a", "a cat", "a dog"]
 
 
-def train(model, processor, packed: bool, steps: int = 300):
+def train(model, processor, packed: bool, steps: int = 600):
     if packed:
         words = Dataset.from_dict({"text": TRAIN_TEXTS}).map(lambda e: {"words": processor.pretokenize(e["text"])})
         examples = pack_words({"words": words["words"]}, seq_length=7)

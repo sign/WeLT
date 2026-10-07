@@ -106,6 +106,8 @@ def load_yaml(path: str, overrides: list[str] = ()) -> dict:
     """Load a YAML config (supporting `$extends`), applying `section.key=value` overrides."""
     config = load_yaml_with_extends(path)
     for override in overrides:
+        if "=" not in override:
+            raise ValueError(f"Expected an override as section.key=value (a YAML value), got {override!r}")
         key, value = override.split("=", 1)
         *sections, name = key.split(".")
         target = config

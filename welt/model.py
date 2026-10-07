@@ -78,9 +78,10 @@ def safetensors_checkpoint(name_or_path: str) -> str:
 class ByteEmbedding(nn.Module):
     """Embedding table plus an additive (zero-initialized) projection of each token's 8 bits."""
 
-    def __init__(self, num_embeddings: int, dim: int, init_std: float = 0.02):
+    def __init__(self, weight: torch.Tensor):
         super().__init__()
-        self.weight = nn.Parameter(torch.randn(num_embeddings, dim) * init_std)
+        num_embeddings, dim = weight.shape
+        self.weight = nn.Parameter(weight.detach().clone())
         self.bit_proj = nn.Parameter(torch.zeros(dim, 8))
         shifts = torch.arange(7, -1, -1)
         self.register_buffer("bits", (torch.arange(num_embeddings)[:, None] >> shifts & 1).float(), persistent=False)
@@ -161,6 +162,12 @@ FLEX_BLOCK_SIZE = 128
 compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
 
 
+def repeat_kv(tensor: torch.Tensor, heads: int) -> torch.Tensor:
+    """(B, kv_heads, S, D) -> (B, heads, S, D) for grouped query attention.
+    FlexAttention's enable_gqa fails to compile for some small inputs."""
+    return tensor.repeat_interleave(heads // tensor.size(1), dim=1)
+
+
 def packed_block_mask(cu_seqlens: torch.Tensor, causal: bool) -> BlockMask:
     """FlexAttention block mask over packed (THD) sequences, built in O(tokens) from cu_seqlens.
     Each query block attends to the key blocks spanned by the sequences it overlaps."""
@@ -206,8 +213,8 @@ class PackedAttention(nn.Module):
             block_mask = packed_block_mask(packed_seq_params.cu_seqlens_q, self.causal)
             setattr(packed_seq_params, cache_key, block_mask)
         query, key, value = (t.transpose(0, 1).unsqueeze(0) for t in (query, key, value))
-        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale,
-                                      enable_gqa=key.size(1) != query.size(1))
+        key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
+        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale)
         return out.squeeze(0).transpose(0, 1)
 
 
@@ -229,18 +236,22 @@ class MaskedAttention(nn.Module):
                                            allowed.size(1), allowed.size(2), device=allowed.device, _compile=True)
             MaskedAttention._cache = (attention_mask, block_mask)
         query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
+        key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
         out = compiled_flex_attention(query, key, value, block_mask=MaskedAttention._cache[1],
-                                      scale=self.softmax_scale, enable_gqa=key.size(1) != query.size(1))
+                                      scale=self.softmax_scale)
         return out.permute(2, 0, 1, 3).flatten(2)
 
 
 def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention: str,
-                      keep_embedding=False, keep_output_layer=False) -> GPTModel:
+                      keep_output_layer=False) -> tuple[GPTModel, torch.Tensor]:
     """Build a Megatron GPTModel, load HF weights, then drop the parts WeLT replaces.
     attention: "arbitrary" (an attention_mask, BSHD) or "causal"/"bidirectional" (packed short sequences, THD).
-    Attention is replaced by FlexAttention."""
+    Attention is replaced by FlexAttention.
+    Returns the model, and its (vocab, hidden) input embeddings table, removed from it."""
     provider.share_embeddings_and_output_weights = False  # embeddings and output layers are replaced
     assert provider.position_embedding_type == "rope", "Only RoPE transformers are supported"
+    assert provider.window_size is None, "Sliding window attention is not supported"
+    assert not getattr(provider, "attn_logit_softcapping", None), "Attention logit softcapping is not supported"
     model = GPTModelProvider.provide(provider, pre_process=True, post_process=True)
 
     if hf_path is not None and provider.perform_initialization:  # Otherwise, weights come from a checkpoint
@@ -254,12 +265,14 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
         else:
             layer.self_attention.core_attention = PackedAttention(provider, causal=attention == "causal")
 
-    if not keep_embedding:
-        del model.embedding
+    # The vocabulary is split across tensor parallel ranks
+    embeddings = gather_from_sequence_parallel_region(model.embedding.word_embeddings.weight.detach(),
+                                                      tensor_parallel_output_grad=False)
+    del model.embedding
     if not keep_output_layer:
         del model.output_layer
         model.post_process = False  # Only affects the (unused) forward and output layer checkpointing
-    return model
+    return model, embeddings
 
 
 def run_transformer(model: GPTModel, hidden: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
@@ -307,10 +320,10 @@ def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Te
 class WordEncoder(nn.Module):
     """Bidirectional transformer, whose first position output is the word embedding."""
 
-    def __init__(self, provider: GPTModelProvider, hf_path: str | None, embed: nn.Module):
+    def __init__(self, provider: GPTModelProvider, hf_path: str | None, embed: type[nn.Module]):
         super().__init__()
-        self.transformer = build_transformer(provider, hf_path, "bidirectional")
-        self.embed = embed
+        self.transformer, embeddings = build_transformer(provider, hf_path, "bidirectional")
+        self.embed = embed(embeddings)  # Initialized from the (possibly pretrained) input embeddings
         self.hidden_size = provider.hidden_size
 
     def forward(self, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -324,7 +337,7 @@ class PatchImageEncoder(WordEncoder):
     """Bidirectional transformer over each word image's 16x16 patches (NaViT-style, native sizes), and a CLS."""
 
     def __init__(self, provider: GPTModelProvider, hf_path: str | None):
-        super().__init__(provider, hf_path, PatchEmbedding(provider.hidden_size))
+        super().__init__(provider, hf_path, lambda embeddings: PatchEmbedding(embeddings.size(1)))
 
     def forward(self, patches: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
         """(N, P, 768) uint8 patches, (N, 2) patch rows and columns of each image -> (N, H)"""
@@ -354,8 +367,8 @@ class WeLTModel(MegatronModule):
 
         self.bytes_encoder = None
         if config.bytes_encoder is not None:
-            self.bytes_encoder = WordEncoder(config.bytes_encoder, config.bytes_encoder_hf_path,
-                                             ByteEmbedding(config.num_tokens, config.bytes_encoder.hidden_size))
+            config.bytes_encoder.vocab_size = config.num_tokens
+            self.bytes_encoder = WordEncoder(config.bytes_encoder, config.bytes_encoder_hf_path, ByteEmbedding)
 
         self.image_encoder = None
         if config.image_encoder is not None:
@@ -364,25 +377,21 @@ class WeLTModel(MegatronModule):
             pretrained = config.image_encoder_hf_path is not None and config.perform_initialization
             self.image_encoder = HFImageEncoder(config.image_encoder_vision, pretrained, config.trust_remote_code)
 
-        self.latent_transformer = build_transformer(config, config.latent_transformer_hf_path, "arbitrary")
+        self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path, "arbitrary")
 
         decoder_config = config.bytes_decoder
         decoder_config.vocab_size = config.num_tokens
-        self.bytes_decoder = build_transformer(decoder_config, config.bytes_decoder_hf_path, "causal",
-                                               keep_embedding=True, keep_output_layer=True)
-        # Byte embeddings replace the decoder's embedding, initialized from it
-        self.bytes_decoder_embedding = ByteEmbedding(config.num_tokens, decoder_config.hidden_size)
-        with torch.no_grad():
-            self.bytes_decoder_embedding.weight.copy_(self.bytes_decoder.embedding.word_embeddings.weight)
-        del self.bytes_decoder.embedding
+        self.bytes_decoder, embeddings = build_transformer(decoder_config, config.bytes_decoder_hf_path, "causal",
+                                                           keep_output_layer=True)
+        self.bytes_decoder_embedding = ByteEmbedding(embeddings)
 
         # Mapping layers
         encoders = [e for e in (self.image_encoder, self.bytes_encoder) if e is not None]
         encoder_dim = sum(e.hidden_size for e in encoders)
         self.encoder_mapping = nn.Linear(encoder_dim, config.hidden_size)
-        self.encoder_norm = nn.RMSNorm(config.hidden_size)
+        self.encoder_norm = nn.RMSNorm(config.hidden_size, eps=1e-6)
         self.decoder_mapping = nn.Linear(config.hidden_size, decoder_config.hidden_size)
-        self.decoder_norm = nn.RMSNorm(decoder_config.hidden_size)
+        self.decoder_norm = nn.RMSNorm(decoder_config.hidden_size, eps=1e-6)
 
     def set_input_tensor(self, input_tensor):
         pass  # No pipeline parallelism
