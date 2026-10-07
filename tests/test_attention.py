@@ -5,7 +5,6 @@ from utf8_tokenizer.control import ControlTokens
 from welt.attention import (
     add_self_attention_blocks,
     get_attention_mask_for_packed_sequence,
-    get_position_ids_for_packed_sequence,
     get_shift_blocks,
 )
 
@@ -37,26 +36,6 @@ def test_get_attention_mask_for_packed_sequence_two_sequences():
 
     assert torch.equal(mask, expected)
     assert mask.shape == (1, 4, 4)
-
-
-def test_get_position_ids_for_packed_sequence_single_sequence():
-    seq_lengths = [3]
-    position_ids = get_position_ids_for_packed_sequence(seq_lengths)
-
-    expected = torch.tensor([0, 1, 2])
-
-    assert torch.equal(position_ids, expected)
-    assert position_ids.shape == (3,)
-
-
-def test_get_position_ids_for_packed_sequence_two_sequences():
-    seq_lengths = [2, 2]
-    position_ids = get_position_ids_for_packed_sequence(seq_lengths)
-
-    expected = torch.tensor([0, 1, 0, 1])
-
-    assert torch.equal(position_ids, expected)
-    assert position_ids.shape == (4,)
 
 
 def test_add_self_attention_blocks_basic_shift_block():

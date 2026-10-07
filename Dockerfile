@@ -15,6 +15,9 @@ RUN mkdir -p /app/welt /app/welt_training && touch /app/README.md
 WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
 RUN pip install ".[dev]"
+# Download the rendering fonts at build time, not in every training run
+RUN python -c "from font_download import FontConfig; from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS; \
+    FontConfig(sources=FONTS_NOTO_SANS).get_font_dir()"
 
 COPY welt /app/welt
 COPY welt_training /app/welt_training

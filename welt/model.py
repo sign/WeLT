@@ -11,6 +11,7 @@ Only the transformer blocks of each GPTModel are used: embeddings are replaced b
 and output layers by the mapping layers. Unused HF modules are deleted after loading.
 """
 import dataclasses
+import os
 from dataclasses import dataclass
 
 import torch
@@ -18,6 +19,7 @@ import torch.nn.functional as F
 from flash_attn import flash_attn_varlen_func
 from megatron.bridge import AutoBridge
 from megatron.bridge.models.gpt_provider import GPTModelProvider
+from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
 from megatron.core.models.gpt import GPTModel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.transformer.enums import AttnMaskType
@@ -26,6 +28,8 @@ from torch import nn
 from transformers import AutoConfig
 
 PATCH_DIM = 16 * 16 * 3
+
+register_allowed_target_prefix("welt")  # Checkpoints' run_config.yaml instantiate WeLTModelProvider
 
 # Fields copied from the WeLT (latent) config to every sub-transformer config
 SHARED_CONFIG_FIELDS = (
@@ -48,6 +52,20 @@ def hf_config(name_or_path: str, trust_remote_code: bool = False):
 def transformer_provider(name_or_path: str, trust_remote_code: bool = False) -> GPTModelProvider:
     return AutoBridge.from_hf_config(hf_config(name_or_path, trust_remote_code)).to_megatron_provider(
         load_weights=False)
+
+
+def safetensors_checkpoint(name_or_path: str) -> str:
+    """Megatron-Bridge reads safetensors only, convert (once) checkpoints that only have pytorch_model.bin."""
+    from huggingface_hub import list_repo_files
+    from transformers import AutoModelForCausalLM
+
+    if os.path.isdir(name_or_path) or any(f.endswith(".safetensors") for f in list_repo_files(name_or_path)):
+        return name_or_path
+    path = os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
+                        "safetensors", name_or_path)
+    if not os.path.isdir(path):
+        AutoModelForCausalLM.from_pretrained(name_or_path).save_pretrained(path)
+    return path
 
 
 class ByteEmbedding(nn.Module):
@@ -153,9 +171,9 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
     assert provider.position_embedding_type == "rope", "Only RoPE transformers are supported"
     model = GPTModelProvider.provide(provider, pre_process=True, post_process=True)
 
-    if hf_path is not None:
+    if hf_path is not None and provider.perform_initialization:  # Otherwise, weights come from a checkpoint
         # HF vocabularies differ from bytes, skip mismatched embedding & lm_head
-        AutoBridge.from_hf_pretrained(hf_path).load_hf_weights(
+        AutoBridge.from_hf_pretrained(safetensors_checkpoint(hf_path)).load_hf_weights(
             [model], allowed_mismatched_params=["embedding.word_embeddings.weight", "output_layer.weight"])
 
     for layer in model.decoder.layers:
@@ -168,6 +186,7 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
         del model.embedding
     if not keep_output_layer:
         del model.output_layer
+        model.post_process = False  # Only affects the (unused) forward and output layer checkpointing
     return model
 
 

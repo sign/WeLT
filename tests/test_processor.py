@@ -4,34 +4,32 @@ import tempfile
 import pytest
 import torch
 from datasets import Dataset
-from font_download import FontConfig
-from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
-from pixel_renderer import PixelRendererProcessor
-from trl.data_utils import pack_dataset
 from utf8_tokenizer.control import ControlTokens
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
-from tests.test_model import setup_tiny_model
-from welt.noop import NoopImageProcessor
 from welt.processor import TextImageProcessor
+
+
+def pack_dataset(dataset, seq_length):
+    from welt_training.data import pack_words
+    return dataset.map(pack_words, batched=True, remove_columns=dataset.column_names,
+                       fn_kwargs={"seq_length": seq_length})
 
 
 @pytest.fixture(scope="module")
 def processor():
-    model, processor, collator = setup_tiny_model()
-    return processor
+    return TextImageProcessor.create(max_word_length=32, max_seq_length=128, render_images=True)
 
 
 @pytest.fixture(scope="module")
-def renderer():
-    font_config = FontConfig(sources=FONTS_NOTO_SANS)
-    return PixelRendererProcessor(font=font_config)
+def text_processor():
+    return TextImageProcessor.create(max_word_length=32, max_seq_length=128, render_images=False)
 
 
-expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask", "position_ids",
+expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask",
                         "labels_input", "labels_attention_mask", "labels_output",
-                        "input_images", "input_images_dimensions"]
+                        "input_patches", "input_patches_count"]
 expected_keys = expected_tensor_keys
 
 
@@ -71,7 +69,6 @@ def test_processor_single_text_value(processor):
     assert torch.equal(inputs["input_ids"][0], torch.tensor([[2, 2, 3, 0], [2, 97, 32, 3], [2, 98, 3, 0]]))
     assert inputs["input_attention_mask"][0].shape == (3, 4)
     assert inputs["attention_mask"][0].shape == (1, 3, 3)
-    assert torch.equal(inputs["position_ids"][0], torch.tensor([0, 1, 2]))
     # Unpacked mode: labels are shorter (only next token, not all remaining)
     assert torch.equal(inputs["labels_input"][0], torch.tensor([[2, 97, 32], [2, 98, 3], [2, 3, 0]]))
     assert torch.equal(inputs["labels_output"][0], torch.tensor([[97, 32, 3], [98, 3, 0], [3, 0, 0]]))
@@ -136,10 +133,11 @@ def test_get_words_and_labels(processor):
 
 def test_render_images_shape(processor):
     texts = ["short", "a bit longer text"]
-    renders, dimensions = processor.render_texts(texts)
-
-    assert renders.shape == (2, 3, 16, 112)
-    assert torch.equal(dimensions, torch.tensor([[16, 48], [16, 112]]))
+    patches, counts = processor.render_texts(texts)
+    # 16px high renders, split into 16x16 RGB patches
+    assert patches.shape == (2, 7, 16 * 16 * 3)
+    assert patches.dtype == torch.uint8
+    assert torch.equal(counts, torch.tensor([3, 7]))
 
 
 def test_pretokenize_splits_control_tokens(processor):
@@ -162,14 +160,13 @@ def test_pretokenize_multiple_whitespace(processor):
     assert words == [ControlTokens.StartOfText, "def ", "foo():\n", " " * 8, 'return ', '"bar"']
 
 
-def test_get_words_and_labels_respect_max_word_length(processor, renderer):
+def test_get_words_and_labels_respect_max_word_length(processor):
     text = "this is a long-test"
 
     new_processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(max_bytes=3),
         tokenizer=processor.tokenizer,
-        renderer=renderer,
-        image_processor=processor.image_processor,
+        renderer=processor.renderer,
     )
 
     words = new_processor.pretokenize(text)
@@ -208,19 +205,20 @@ def test_packed_dataset(processor):
     dataset = processor.pretokenize_dataset(dataset)
     packed_dataset = pack_dataset(dataset, seq_length=7)
 
+    pad = "\x00"
     assert packed_dataset[:] == {
         'seq_lengths': [
-            [4, 3],
-            [2, 2],
+            [2, 3, 2],
+            [4, 1, 1, 1],
         ],
         'words': [
             [
-                ControlTokens.StartOfText, 'a ', 'b ', 'c',
+                ControlTokens.StartOfText, 'hi!',
                 ControlTokens.StartOfText, 'hello ', 'world',
+                ControlTokens.StartOfText, 'yes.',
             ],
             [
-                ControlTokens.StartOfText, 'hi!',
-                ControlTokens.StartOfText, 'yes.',
+                ControlTokens.StartOfText, 'a ', 'b ', 'c', pad, pad, pad,
             ],
         ],
     }
@@ -239,9 +237,11 @@ def test_packed_dataset_labels_independent(processor):
     labels = processor.get_sequence_labels(datum["words"], datum["seq_lengths"])
 
     # Unpacked mode: each token predicts only the next token, respecting sequence boundaries
+    # Packing pads with PAD words, each an isolated sequence with an empty label
     assert labels == [
         'a ', 'b', '',
-        'c ', 'd', ''
+        'c ', 'd', '',
+        '', '',
     ]
 
 
@@ -256,42 +256,36 @@ def test_processor_works_on_packed_sequence(processor):
     dataset = processor.pretokenize_dataset(dataset)
     packed_dataset = pack_dataset(dataset, seq_length=8)
 
-    transformed_dataset = packed_dataset.with_transform(processor)
-    for inputs in transformed_dataset:
+    for datum in packed_dataset:
+        inputs = processor.process_single_example(datum["words"], datum["seq_lengths"])
         assert all(key in inputs for key in expected_keys)
         assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
+        assert inputs["input_ids"].shape[0] == 8
 
 
 def test_processor_save_and_load_works(processor):
     with tempfile.TemporaryDirectory() as temp_dir:
-        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
+        processor.save_pretrained(temp_dir)
         new_processor = TextImageProcessor.from_pretrained(temp_dir)
+        assert new_processor.renderer is not None
+        assert new_processor.max_word_length == processor.max_word_length
+        assert new_processor.pretokenize("hello world") == processor.pretokenize("hello world")
 
-        for attr in processor.attributes:
-            assert getattr(new_processor, attr) is not None
-            assert getattr(new_processor, attr).__class__.__name__ == getattr(processor, attr).__class__.__name__
 
-
-def test_processor_save_and_load_works_without_image_processor(renderer):
-    processor = TextImageProcessor(
-        pretokenizer=WordsSegmentationTokenizer(),
-        tokenizer=UTF8Tokenizer(),
-        renderer=renderer,
-        image_processor=NoopImageProcessor())
-
-    with tempfile.TemporaryDirectory(delete=False) as temp_dir:
-        processor.save_pretrained(save_directory=temp_dir, push_to_hub=False)
+def test_processor_save_and_load_works_without_renderer(text_processor):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        text_processor.save_pretrained(temp_dir)
         new_processor = TextImageProcessor.from_pretrained(temp_dir)
-        assert isinstance(new_processor.image_processor, NoopImageProcessor)
+        assert new_processor.renderer is None
+        assert "input_patches" not in new_processor("hello", collated=True)
 
 
-def test_labels_masked_in_shift_blocks(renderer):
+def test_labels_masked_in_shift_blocks():
     """Test that labels are zeroed for tokens inside shift blocks (except ShiftIn itself)."""
     processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(),
         tokenizer=UTF8Tokenizer(),
-        renderer=renderer,
-        image_processor=NoopImageProcessor())
+        renderer=None)
 
     # Use f-string template and let processor segment into words
     text = f"<en>{ControlTokens.ShiftOut}hello{ControlTokens.ShiftIn}<he> שלום"
@@ -315,13 +309,12 @@ def test_labels_masked_in_shift_blocks(renderer):
         assert result["labels_attention_mask"][idx].sum() != 0
 
 
-def test_multiple_shift_blocks(renderer):
+def test_multiple_shift_blocks():
     """Test handling of multiple shift blocks in a sequence."""
     processor = TextImageProcessor(
         pretokenizer=WordsSegmentationTokenizer(),
         tokenizer=UTF8Tokenizer(),
-        renderer=renderer,
-        image_processor=NoopImageProcessor())
+        renderer=None)
 
     words = [
         ControlTokens.StartOfText,

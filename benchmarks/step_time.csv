@@ -1,0 +1,7 @@
+iteration,short,stack,change,ms_per_step,kept,notes
+0,HF Trainer,HF Trainer (main),"Baseline: transformers Trainer + accelerate, padded words and bytes",1227,yes,steady-state steps 50-300
+1,Megatron-Bridge (padded),Megatron-Bridge,"Port to Megatron-Bridge pretrain(): TE transformer layers, distributed fused Adam; padded (BSHD) word/byte sequences",610,yes,
+2,+ packed bytes (TE flash),Megatron-Bridge,"Pack encoder/decoder byte sequences (THD) with TE flash attention: no compute on padding",250,yes,needs NVTE_FUSED_ATTN=0 on GB10 (cuDNN lacks THD backward on SM12x)
+3,packed + SDPA (rejected),Megatron-Bridge,"Unpack to padded per-word sequences for attention only, torch SDPA (mem-efficient kernel)",255,no,"fwd+bwd microbenchmark 231 ms vs 226 ms; no gain"
+4,packed + matmul attn (rejected),Megatron-Bridge,"Unpack to padded per-word sequences for attention only, plain batched matmul + softmax",310,no,"fwd+bwd microbenchmark 284 ms; elementwise ops are memory-bound on GB10, may differ on H100"
+5,+ flash_attn_varlen direct,Megatron-Bridge,"Packed attention calls flash_attn_varlen_func directly (drops the TE backend env workaround)",250,yes,
