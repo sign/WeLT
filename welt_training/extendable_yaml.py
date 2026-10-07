@@ -17,7 +17,6 @@ Example:
 """
 
 import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -100,54 +99,12 @@ def load_yaml_with_extends(yaml_path: str | Path) -> dict[str, Any]:
     return _load_recursive(yaml_path, set())
 
 
-def resolve_yaml_file(yaml_path: str | Path) -> str:
-    """
-    Resolve a YAML file that may contain $extends directives.
-
-    If the YAML file contains $extends, this function creates a temporary
-    merged YAML file and returns its path. Otherwise, returns the original path.
-
-    Args:
-        yaml_path: Path to the YAML file
-
-    Returns:
-        Path to the resolved YAML file (either original or temporary merged file)
-    """
-    yaml_path = Path(yaml_path)
-
-    # Quick check: does the file contain $extends?
-    with open(yaml_path) as f:
-        first_line = f.readline().strip()
-        if not first_line.startswith("$extends:"):
-            # No extension, return original path
-            return str(yaml_path.resolve())
-
-    # Load and merge configurations
-    merged_config = load_yaml_with_extends(yaml_path)
-
-    # Create a temporary YAML file with the merged configuration
-    temp_file = tempfile.NamedTemporaryFile(
-        mode='w',
-        suffix='.yaml',
-        prefix='merged_config_',
-        delete=False
-    )
-
-    try:
-        yaml.dump(merged_config, temp_file, default_flow_style=False, sort_keys=False)
-        temp_file.flush()
-        return temp_file.name
-    finally:
-        temp_file.close()
-
-
 CONFIG_FILE_NAME = "welt.yaml"  # The training config, saved with runs and exports
 
 
 def load_yaml(path: str, overrides: list[str] = ()) -> dict:
     """Load a YAML config (supporting `$extends`), applying `section.key=value` overrides."""
-    with open(resolve_yaml_file(os.path.abspath(path))) as f:
-        config = yaml.safe_load(f)
+    config = load_yaml_with_extends(path)
     for override in overrides:
         key, value = override.split("=", 1)
         *sections, name = key.split(".")

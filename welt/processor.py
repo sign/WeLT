@@ -82,16 +82,17 @@ class TextImageProcessor:
                    tokenizer=UTF8Tokenizer(), renderer=renderer, **config)
 
     def render_texts(self, texts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Render words into (num_words, max_patches, 768) uint8 patches and their per-word counts."""
-        patches = []
+        """Render words into (num_words, max_patches, 768) uint8 patches, and each word's (rows, columns) of patches."""
+        patches, shapes = [], []
         for text in texts:
-            word_patches = self.patches_cache.get(text)
-            if word_patches is None:
-                word_patches = patchify(self.renderer.render_text(text))
-                self.patches_cache[text] = word_patches
-            patches.append(word_patches)
-        counts = torch.tensor([len(p) for p in patches], dtype=torch.long)
-        return stack_pad_tensors(patches), counts
+            rendered = self.patches_cache.get(text)
+            if rendered is None:
+                image = self.renderer.render_text(text)
+                rendered = patchify(image), (image.shape[0] // PATCH_SIZE, image.shape[1] // PATCH_SIZE)
+                self.patches_cache[text] = rendered
+            patches.append(rendered[0])
+            shapes.append(rendered[1])
+        return stack_pad_tensors(patches), torch.tensor(shapes, dtype=torch.long)
 
     def pretokenize(self, text: str) -> list[str]:
         # Add BOS token at the start
@@ -172,7 +173,7 @@ class TextImageProcessor:
             "labels_output": tokenized_labels.input_ids[:, 1:]  # Remove BOS token from output labels
         }
         if self.renderer is not None:
-            example["input_patches"], example["input_patches_count"] = self.render_texts(words)
+            example["input_patches"], example["input_patches_shape"] = self.render_texts(words)
         return example
 
     def __call__(self,

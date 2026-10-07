@@ -41,7 +41,7 @@ def evaluate(export_dir: str, max_samples: int = 256, max_generated_words: int =
         "generation_seconds": elapsed,
         "generated_words_per_second": num_words / elapsed,
         "examples": [{"prefix": p, "reference": r, "prediction": o}
-                     for p, r, o in list(zip(prefixes, references, predictions, strict=True))[:5]],
+                     for p, r, o in zip(prefixes, references, predictions, strict=True)],
     }
 
 

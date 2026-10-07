@@ -29,7 +29,7 @@ def text_processor():
 
 expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask",
                         "labels_input", "labels_attention_mask", "labels_output",
-                        "input_patches", "input_patches_count"]
+                        "input_patches", "input_patches_shape"]
 expected_keys = expected_tensor_keys
 
 
@@ -133,11 +133,11 @@ def test_get_words_and_labels(processor):
 
 def test_render_images_shape(processor):
     texts = ["short", "a bit longer text"]
-    patches, counts = processor.render_texts(texts)
+    patches, shapes = processor.render_texts(texts)
     # 16px high renders, split into 16x16 RGB patches
     assert patches.shape == (2, 7, 16 * 16 * 3)
     assert patches.dtype == torch.uint8
-    assert torch.equal(counts, torch.tensor([3, 7]))
+    assert torch.equal(shapes, torch.tensor([[1, 3], [1, 7]]))  # (rows, columns) of patches
 
 
 def test_pretokenize_splits_control_tokens(processor):

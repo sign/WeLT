@@ -4,7 +4,8 @@ Export a WeLT Megatron checkpoint for inference with vLLM.
     torchrun --nproc_per_node=1 -m welt.export <output_dir>/checkpoints [--iteration N] --output <export_dir>
 
 Writes a HuggingFace (Llama-like) model directory per transformer, which vLLM serves:
-- bytes_encoder/, image_encoder/: bidirectional, CLS pooling (LlamaBidirectionalModel)
+- bytes_encoder/, image_encoder/: bidirectional, CLS pooling (LlamaBidirectionalModel),
+  or for HF vision backbones, image_encoder/ in their own format (run with transformers)
 - latent_transformer/: causal, last token pooling, bidirectional shift blocks (is_mm_prefix_lm)
 - bytes_decoder/: causal LM over bytes
 and `welt.safetensors` with the remaining (small) layers, plus the processor.
@@ -19,6 +20,7 @@ from megatron.bridge.training.model_load_save import load_megatron_model
 from safetensors.torch import save_file
 
 from welt.model import WeLTModel, hf_config
+from welt.vision import HFImageEncoder
 
 TRANSFORMERS = {
     # module name in WeLTModel: (attribute path to the GPTModel, config key in welt.yaml)
@@ -100,13 +102,15 @@ def export(checkpoint: str, output: str):
     model.eval()
 
     os.makedirs(output, exist_ok=True)
-    transformer_prefixes = tuple(path + "." for path, _ in TRANSFORMERS.values())
+    transformer_prefixes = (*(path + "." for path, _ in TRANSFORMERS.values()), "image_encoder.model.")
     others = {k: v.to("cpu", torch.bfloat16).contiguous() for k, v in model.state_dict().items()
               if not k.startswith(transformer_prefixes) and isinstance(v, torch.Tensor) and "_extra_state" not in k}
     save_file(others, os.path.join(output, "welt.safetensors"))
 
     for name in TRANSFORMERS:
-        if config["model"].get(name):
+        if isinstance(getattr(model, name, None), HFImageEncoder):
+            model.image_encoder.save_pretrained(os.path.join(output, name), config["model"][name])
+        elif config["model"].get(name):
             _save_transformer(model, name, config["model"], os.path.join(output, name),
                               config["model"].get("trust_remote_code", False))
 

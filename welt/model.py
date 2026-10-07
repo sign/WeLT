@@ -27,6 +27,8 @@ from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 from transformers import AutoConfig
 
+from welt.vision import HFImageEncoder, is_vision_model
+
 PATCH_DIM = 16 * 16 * 3
 
 register_allowed_target_prefix("welt")  # Checkpoints' run_config.yaml instantiate WeLTModelProvider
@@ -94,6 +96,9 @@ class WeLTModelProvider(GPTModelProvider):
     bytes_decoder: GPTModelProvider | None = None
 
     # HF checkpoints to initialize each transformer from (None = random init)
+    # A HF vision backbone (e.g. "facebook/dinov2-small") as image encoder, instead of a patch transformer
+    image_encoder_vision: str | None = None
+    trust_remote_code: bool = False
     bytes_encoder_hf_path: str | None = None
     image_encoder_hf_path: str | None = None
     latent_transformer_hf_path: str | None = None
@@ -115,11 +120,14 @@ class WeLTModelProvider(GPTModelProvider):
         def pretrained(name):
             return name if load_pretrained and name and not name.endswith(".json") else None
 
+        vision = image_encoder if image_encoder and is_vision_model(hf_config(image_encoder, trust_remote_code)) else None
         latent = provider(latent_transformer)
         fields = {f.name: getattr(latent, f.name) for f in dataclasses.fields(GPTModelProvider) if f.init}
         return cls(**fields,
                    bytes_encoder=provider(bytes_encoder),
-                   image_encoder=provider(image_encoder),
+                   image_encoder=None if vision else provider(image_encoder),
+                   image_encoder_vision=vision,
+                   trust_remote_code=trust_remote_code,
                    bytes_decoder=provider(bytes_decoder),
                    bytes_encoder_hf_path=pretrained(bytes_encoder),
                    image_encoder_hf_path=pretrained(image_encoder),
@@ -277,12 +285,26 @@ class WordEncoder(nn.Module):
         super().__init__()
         self.transformer = build_transformer(provider, hf_path, "bidirectional")
         self.embed = embed
+        self.hidden_size = provider.hidden_size
 
     def forward(self, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """inputs: (N, T, ...), mask: (N, T) True = valid, right padded -> (N, H)"""
         hidden = run_packed_transformer(self.transformer, self.embed(inputs), mask)
         first_positions = F.pad(mask.sum(dim=-1).cumsum(0), (1, 0))[:-1]
         return hidden[first_positions]
+
+
+class PatchImageEncoder(WordEncoder):
+    """Bidirectional transformer over each word image's 16x16 patches (NaViT-style, native sizes), and a CLS."""
+
+    def __init__(self, provider: GPTModelProvider, hf_path: str | None):
+        super().__init__(provider, hf_path, PatchEmbedding(provider.hidden_size))
+
+    def forward(self, patches: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
+        """(N, P, 768) uint8 patches, (N, 2) patch rows and columns of each image -> (N, H)"""
+        counts = shapes.prod(dim=-1)
+        mask = torch.arange(patches.size(1) + 1, device=counts.device)[None, :] <= counts[:, None]  # With CLS
+        return super().forward(patches, mask)
 
 
 class PatchEmbedding(nn.Module):
@@ -310,8 +332,10 @@ class WeLTModel(MegatronModule):
 
         self.image_encoder = None
         if config.image_encoder is not None:
-            self.image_encoder = WordEncoder(config.image_encoder, config.image_encoder_hf_path,
-                                             PatchEmbedding(config.image_encoder.hidden_size))
+            self.image_encoder = PatchImageEncoder(config.image_encoder, config.image_encoder_hf_path)
+        elif config.image_encoder_vision is not None:
+            pretrained = config.image_encoder_hf_path is not None and config.perform_initialization
+            self.image_encoder = HFImageEncoder(config.image_encoder_vision, pretrained, config.trust_remote_code)
 
         self.latent_transformer = build_transformer(config, config.latent_transformer_hf_path, "arbitrary")
 
@@ -327,7 +351,7 @@ class WeLTModel(MegatronModule):
 
         # Mapping layers
         encoders = [e for e in (self.image_encoder, self.bytes_encoder) if e is not None]
-        encoder_dim = sum(e.transformer.config.hidden_size for e in encoders)
+        encoder_dim = sum(e.hidden_size for e in encoders)
         self.encoder_mapping = nn.Linear(encoder_dim, config.hidden_size)
         self.encoder_norm = nn.RMSNorm(config.hidden_size)
         self.decoder_mapping = nn.Linear(config.hidden_size, decoder_config.hidden_size)
@@ -349,7 +373,7 @@ class WeLTModel(MegatronModule):
                      input_ids: torch.Tensor,
                      input_attention_mask: torch.Tensor,
                      input_patches: torch.Tensor | None = None,
-                     input_patches_count: torch.Tensor | None = None) -> torch.Tensor:
+                     input_patches_shape: torch.Tensor | None = None) -> torch.Tensor:
         """Word embeddings in the latent space: (B, L, T) bytes [+ (B, L, P, 768) patches] -> (B, L, H)"""
         B, L, T = input_ids.shape  # noqa: N806
         input_ids = input_ids.view(B * L, T)
@@ -365,9 +389,7 @@ class WeLTModel(MegatronModule):
         embeds = []
         if self.image_encoder is not None:
             patches = input_patches.view(B * L, *input_patches.shape[2:])[rows]
-            counts = input_patches_count.view(B * L)[rows]
-            patches_mask = torch.arange(patches.size(1) + 1, device=counts.device)[None, :] <= counts[:, None]
-            embeds.append(self.image_encoder(patches, patches_mask))
+            embeds.append(self.image_encoder(patches, input_patches_shape.view(B * L, 2)[rows]))
         if self.bytes_encoder is not None:
             embeds.append(self.bytes_encoder(input_ids[rows], words_mask[rows]))
 
@@ -400,7 +422,7 @@ class WeLTModel(MegatronModule):
                 labels_attention_mask: torch.Tensor,
                 labels_output: torch.Tensor,
                 input_patches: torch.Tensor | None = None,
-                input_patches_count: torch.Tensor | None = None):
+                input_patches_shape: torch.Tensor | None = None):
         """
         Args:
             input_ids: (B, L, T) bytes of each word
@@ -410,12 +432,12 @@ class WeLTModel(MegatronModule):
             labels_attention_mask: (B, L, T')
             labels_output: (B, L, T') bytes decoder targets (next word, without BOS)
             input_patches: (B, L, P, 768) uint8 patches of the rendered words
-            input_patches_count: (B, L) number of patches per word
+            input_patches_shape: (B, L, 2) rows and columns of patches of each word
 
         Returns:
             (N, T') per-byte losses and (N, T') per-byte correctness, for the N words with labels
         """
-        word_embeds = self.encode_words(input_ids, input_attention_mask, input_patches, input_patches_count)
+        word_embeds = self.encode_words(input_ids, input_attention_mask, input_patches, input_patches_shape)
         latents = self.latent(word_embeds, attention_mask)
 
         # Only decode words that have a label

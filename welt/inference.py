@@ -17,12 +17,14 @@ os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 import torch  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402
 from torch import nn  # noqa: E402
+from transformers import AutoConfig  # noqa: E402
 from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
 from vllm.config import PoolerConfig  # noqa: E402
 from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
 from welt.attention import get_shift_blocks  # noqa: E402
 from welt.processor import PATCH_SIZE, TextImageProcessor  # noqa: E402
+from welt.vision import HFImageEncoder, is_vision_model  # noqa: E402
 from welt.vllm_plugin import RANGES_KEY, restore_opentelemetry_context  # noqa: E402
 
 PATCH_DIM = PATCH_SIZE * PATCH_SIZE * 3
@@ -39,9 +41,12 @@ class WeLTGenerator:
         # Context lengths default to each transformer's max_position_embeddings
         embed_params = dict(runner="pooling", pooler_config=PoolerConfig(use_activation=False), **engine_args)
         self.encoders = {}
-        if os.path.isdir(os.path.join(path, "image_encoder")):
-            self.encoders["image_encoder"] = LLM(os.path.join(path, "image_encoder"), enable_prompt_embeds=True,
-                                                 **embed_params)
+        self.vision = None  # A HF vision backbone, which vLLM does not serve on its own
+        image_encoder = os.path.join(path, "image_encoder")
+        if os.path.isdir(image_encoder) and is_vision_model(AutoConfig.from_pretrained(image_encoder)):
+            self.vision = HFImageEncoder(image_encoder, pretrained=True).to(device, torch.bfloat16).eval()
+        elif os.path.isdir(image_encoder):
+            self.encoders["image_encoder"] = LLM(image_encoder, enable_prompt_embeds=True, **embed_params)
         if os.path.isdir(os.path.join(path, "bytes_encoder")):
             self.encoders["bytes_encoder"] = LLM(os.path.join(path, "bytes_encoder"), **embed_params)
         self.latent = LLM(os.path.join(path, "latent_transformer"), convert="embed", enable_prompt_embeds=True,
@@ -97,10 +102,13 @@ class WeLTGenerator:
             return
         params = PoolingParams(use_activation=False)
         embeds = []
+        if self.vision is not None:
+            patches, shapes = self.processor.render_texts(words)
+            embeds.append(self.vision(patches.to(self.device), shapes.to(self.device)).float().cpu())
         if self.has("image_encoder"):
-            patches, counts = self.processor.render_texts(words)
+            patches, shapes = self.processor.render_texts(words)
             prompts = []
-            for word_patches, count in zip(patches.to(self.device), counts, strict=True):
+            for word_patches, count in zip(patches.to(self.device), shapes.prod(dim=-1), strict=True):
                 projected = self.patch_proj(word_patches[:count].to(self.patch_proj.weight.dtype) / 127.5 - 1)
                 prompts.append({"prompt_embeds": torch.cat([self.patch_cls[None], projected]).cpu()})
             embeds.append(self._pooled(self.encoders["image_encoder"].embed(prompts, pooling_params=params,

@@ -17,12 +17,13 @@ from welt_training.extendable_yaml import load_yaml
 
 
 def matmul_params(config) -> tuple[int, int, int]:
-    """(params in matmuls per token, layers, attention width) of a Llama-like config."""
+    """(params in matmuls per token, layers, attention width) of a transformer config (Llama-like or ViT-like)."""
+    config = getattr(config, "vision_config", config)
     hidden, layers = config.hidden_size, config.num_hidden_layers
     head_dim = getattr(config, "head_dim", None) or hidden // config.num_attention_heads
-    kv = config.num_key_value_heads * head_dim
+    kv = getattr(config, "num_key_value_heads", config.num_attention_heads) * head_dim
     attention = hidden * (config.num_attention_heads * head_dim) * 2 + hidden * kv * 2
-    mlp = 3 * hidden * config.intermediate_size
+    mlp = (3 if config.hidden_act == "silu" else 2) * hidden * config.intermediate_size  # Gated (SwiGLU) or not
     return layers * (attention + mlp), layers, config.num_attention_heads * head_dim
 
 
@@ -46,7 +47,8 @@ def step_flops(config: dict, batches: int = 20) -> tuple[float, float]:
         examples = [train[(b * micro_batch + i) % len(train)] for i in range(micro_batch)]
         words = [(tuple(ids[:n].tolist()), n, int(p)) for e in examples
                  for ids, n, p in zip(e["input_ids"], e["input_attention_mask"].sum(-1).tolist(),
-                                      e.get("input_patches_count", e["input_attention_mask"].sum(-1)).tolist(),
+                                      e["input_patches_shape"].prod(-1).tolist() if "input_patches_shape" in e
+                                      else e["input_attention_mask"].sum(-1).tolist(),
                                       strict=True) if n > 0]
         common = transformer_flops(configs["latent_transformer"], [len(e["input_ids"]) for e in examples])
         decoded = [n + 1 for e in examples for n in e["labels_attention_mask"].sum(-1).tolist() if n > 0]
