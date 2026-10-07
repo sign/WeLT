@@ -70,23 +70,18 @@ def test_generate_with_vllm(trained):
 
 def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     """The exported model, served by vLLM, computes what the Megatron model computes."""
-    from megatron.bridge.training.model_load_save import load_megatron_model
     from vllm import SamplingParams
 
     import welt.inference
-    import welt.model  # noqa: F401 - registers WeLTModelProvider for checkpoint loading
+    from welt.export import load_model
 
-    model = load_megatron_model(str(trained / "run" / "checkpoints" / "iter_0000020"), skip_temp_dist_context=True)
-    model = model[0] if isinstance(model, list) else model
-    while hasattr(model, "module"):
-        model = model.module
-    model = model.cuda().eval()
+    model = load_model(str(trained / "run" / "checkpoints" / "iter_0000020")).cuda()
 
     generator = welt.inference.WeLTGenerator(str(trained / "export"), kv_cache_gib=0.5)
     # With a long bidirectional shift block, for a measurable effect on the last word's latent
     text = "number \x0e7 is the number after six and before eight, which is even\x0f odd"
     words = generator.processor.pretokenize(text)
-    batch = {k: v.cuda() for k, v in generator.processor([text], collated=True).items()}
+    batch = {k: v.cuda() for k, v in generator.processor([text]).items()}
     with torch.no_grad():
         word_embeds = model.encode_words(batch["input_ids"], batch["input_attention_mask"],
                                          batch["input_patches"], batch["input_patches_shape"])

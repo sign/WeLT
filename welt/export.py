@@ -1,10 +1,10 @@
 """
 Export a WeLT Megatron checkpoint for inference with vLLM.
 
-    torchrun --nproc_per_node=1 -m welt.export <output_dir>/checkpoints [--iteration N] --output <export_dir>
+    welt-export <output_dir>/checkpoints[/iter_N] --output <export_dir>
 
-Writes a HuggingFace (Llama-like) model directory per transformer, which vLLM serves:
-(in the transformer's original architecture, e.g. Llama or Qwen3):
+Writes a HuggingFace model directory per transformer, in its original architecture (e.g. Llama or Qwen3),
+which vLLM serves:
 - bytes_encoder/, image_encoder/: bidirectional (is_causal: false), served with CLS pooling,
   or for HF vision backbones, image_encoder/ in their own format (run with transformers)
 - latent_transformer/: causal, served with last token pooling, bidirectional shift blocks (is_mm_prefix_lm)
@@ -23,19 +23,21 @@ from safetensors.torch import save_file
 from welt.model import WeLTModel, hf_config
 from welt.vision import HFImageEncoder
 
-TRANSFORMERS = {
-    # module name in WeLTModel: (attribute path to the GPTModel, config key in welt.yaml)
-    "bytes_encoder": ("bytes_encoder.transformer", "bytes_encoder"),
-    "image_encoder": ("image_encoder.transformer", "image_encoder"),
-    "latent_transformer": ("latent_transformer", "latent_transformer"),
-    "bytes_decoder": ("bytes_decoder", "bytes_decoder"),
+TRANSFORMERS = {  # Config key in welt.yaml: the GPTModel in WeLTModel
+    "bytes_encoder": "bytes_encoder.transformer",
+    "image_encoder": "image_encoder.transformer",
+    "latent_transformer": "latent_transformer",
+    "bytes_decoder": "bytes_decoder",
 }
 
 
-def _unwrap(model):
-    while hasattr(model, "module"):
+def load_model(checkpoint: str) -> WeLTModel:
+    """A WeLTModel from a Megatron iter_* checkpoint directory, in eval mode."""
+    model = load_megatron_model(checkpoint, skip_temp_dist_context=True)
+    model = model[0] if isinstance(model, list) else model
+    while hasattr(model, "module"):  # DDP / Float16Module wrappers
         model = model.module
-    return model
+    return model.eval()
 
 
 def _save_placeholder_tokenizer(path: str, num_tokens: int):
@@ -50,12 +52,9 @@ def _save_placeholder_tokenizer(path: str, num_tokens: int):
 
 
 def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str, trust_remote_code=False):
-    module_path, config_key = TRANSFORMERS[name]
-    gpt = model.get_submodule(module_path)
-    config = hf_config(model_config[config_key], trust_remote_code)
-
-    weights = {name: tensor.to(torch.bfloat16).contiguous() for name, tensor in
-               AutoBridge.from_hf_config(config).export_hf_weights([gpt], cpu=True, show_progress=False)}
+    gpt = model.get_submodule(TRANSFORMERS[name])
+    config = hf_config(model_config[name], trust_remote_code)
+    weights = dict(AutoBridge.from_hf_config(config).export_hf_weights([gpt], cpu=True, show_progress=False))
     hidden_size = config.hidden_size
     num_tokens = model.config.num_tokens
     config.vocab_size = num_tokens
@@ -98,12 +97,10 @@ def export(checkpoint: str, output: str):
     from welt_training.extendable_yaml import CONFIG_FILE_NAME, load_yaml
     config = load_yaml(os.path.join(run_dir, CONFIG_FILE_NAME))
 
-    model = load_megatron_model(checkpoint, skip_temp_dist_context=True)
-    model: WeLTModel = _unwrap(model[0] if isinstance(model, list) else model)
-    model.eval()
+    model = load_model(checkpoint)
 
     os.makedirs(output, exist_ok=True)
-    transformer_prefixes = (*(path + "." for path, _ in TRANSFORMERS.values()), "image_encoder.model.")
+    transformer_prefixes = (*(path + "." for path in TRANSFORMERS.values()), "image_encoder.model.")
     others = {k: v for k, v in model.state_dict().items()
               if not k.startswith(transformer_prefixes) and isinstance(v, torch.Tensor) and "_extra_state" not in k}
     others["decoder_prompt_embeddings"] = model.bytes_decoder_embedding.folded_weight()  # Prompts are embeddings

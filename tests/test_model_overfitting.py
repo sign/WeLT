@@ -6,6 +6,7 @@ from datasets import Dataset
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
 from tests.conftest import build_model  # noqa: E402
+from welt.collator import collate_fn  # noqa: E402
 from welt.processor import TextImageProcessor  # noqa: E402
 from welt_training.data_utils import pack_words  # noqa: E402
 
@@ -16,9 +17,10 @@ def train(model, processor, packed: bool, steps: int = 600):
     if packed:
         words = Dataset.from_dict({"text": TRAIN_TEXTS}).map(lambda e: {"words": processor.pretokenize(e["text"])})
         examples = pack_words({"words": words["words"]}, seq_length=7)
-        batch = processor({"words": examples["words"], "seq_lengths": examples["seq_lengths"]}, collated=True)
+        batch = collate_fn([processor.process_single_example(w, lengths)
+                            for w, lengths in zip(examples["words"], examples["seq_lengths"], strict=True)])
     else:
-        batch = processor(TRAIN_TEXTS, collated=True)
+        batch = processor(TRAIN_TEXTS)
     batch = {k: v.cuda() for k, v in batch.items()}
 
     torch.manual_seed(0)
@@ -37,7 +39,7 @@ def text_losses(model, processor, texts: list[str]) -> dict[str, float]:
     """Mean byte loss of each text, on its own."""
     results = {}
     for text in texts:
-        batch = {k: v.cuda() for k, v in processor([text], collated=True).items()}
+        batch = {k: v.cuda() for k, v in processor([text]).items()}
         with torch.no_grad():
             losses, _, labels = model(**batch)
         mask = labels != 0

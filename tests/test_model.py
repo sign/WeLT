@@ -22,7 +22,7 @@ def processor():
 
 def word_losses(model, processor, texts: list[str]) -> torch.Tensor:
     """Per word (B, L) summed byte losses."""
-    batch = {k: v.cuda() for k, v in processor(texts, collated=True).items()}
+    batch = {k: v.cuda() for k, v in processor(texts).items()}
     with torch.no_grad():
         losses, _, labels = model(**batch)
     has_label = batch["labels_attention_mask"].flatten(0, 1).any(dim=-1)
@@ -70,7 +70,7 @@ def test_text_only_model(megatron, tiny_config, processor):
 def test_backward_reaches_all_parameters(model, processor):
     model.train()
     try:
-        batch = {k: v.cuda() for k, v in processor(["hello world, how are you?"], collated=True).items()}
+        batch = {k: v.cuda() for k, v in processor(["hello world, how are you?"]).items()}
         losses, _, labels = model(**batch)
         (losses * (labels != 0)).sum().backward()
         missing = [name for name, p in model.named_parameters() if p.grad is None]
@@ -112,9 +112,16 @@ def test_masked_attention_matches_sdpa(megatron):
     seq, batch, heads, dim = allowed.size(-1), 2, 4, 16
     query, key, value = (torch.randn(seq, batch, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3))
     config = type("Config", (), {"softmax_scale": None, "attention_dropout": 0.0})()
-    out = MaskedAttention(config)(query, key, value, attention_mask=~allowed)
+    attention = MaskedAttention(config)
+    out = attention(query, key, value, attention_mask=~allowed)
 
     q, k, v = (t.permute(1, 2, 0, 3) for t in (query, key, value))
+    expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
+    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
+
+    # Another mask: the block mask cached for the first one must not be reused
+    allowed = torch.stack([get_attention_mask_for_packed_sequence([seq], words=["x"] * seq)] * 2).cuda()
+    out = attention(query, key, value, attention_mask=~allowed)
     expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
     torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
 

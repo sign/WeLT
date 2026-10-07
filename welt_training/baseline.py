@@ -11,7 +11,6 @@ The YAML is like WeLT's (see `experiments/machine-translation/baseline.yaml`), w
 and `data.seq_length` counting tokens. Documents are concatenated (separated by EOS) and split into chunks.
 """
 import math
-import sys
 from dataclasses import dataclass
 from functools import partial
 
@@ -23,8 +22,7 @@ from transformers import AutoTokenizer
 
 from welt.model import hf_config, safetensors_checkpoint
 from welt_training.data_utils import TextDataConfig, dataset_lengths, load_text_datasets
-from welt_training.extendable_yaml import load_yaml
-from welt_training.train import build_config, run
+from welt_training.train import build_config, main, report, to_cuda
 
 
 def token_byte_lengths(tokenizer) -> torch.Tensor:
@@ -92,9 +90,6 @@ def loss_func(losses: torch.Tensor, label_bytes: torch.Tensor):
     num_tokens = torch.tensor(losses.numel(), device=losses.device, dtype=torch.int)
     content = label_bytes > 0
 
-    def report(value, count):
-        return torch.stack([value.detach().float(), count.float()])
-
     return loss, num_tokens, {
         "lm loss": report(loss, num_tokens),
         "bits per byte": report((losses * content).sum() / math.log(2), label_bytes.sum()),
@@ -102,7 +97,7 @@ def loss_func(losses: torch.Tensor, label_bytes: torch.Tensor):
 
 
 def forward_step(state, data_iterator, model, return_schedule_plan: bool = False):
-    batch = {key: value.cuda(non_blocking=True) for key, value in next(data_iterator).items()}
+    batch = to_cuda(next(data_iterator))
     losses = model(input_ids=batch["input_ids"], position_ids=None, attention_mask=None, labels=batch["labels"])
     return losses, partial(loss_func, label_bytes=batch["label_bytes"])
 
@@ -121,20 +116,11 @@ def build(config: dict):
         bridge = AutoBridge.from_hf_config(hf_config(transformer, trust_remote_code))
     model = bridge.to_megatron_provider(load_weights=load_pretrained)
     model.vocab_size = len(tokenizer)
-    model.seq_length = config["data"]["seq_length"]
-    model.calculate_per_token_loss = True
-    model.bf16 = True
 
     dataset = TokensDatasetProvider(tokenizer_name=model_config["tokenizer"], trust_remote_code=trust_remote_code,
                                     **config["data"])
-    return build_config(config, model, dataset, vocab_size=len(tokenizer))
-
-
-def train(args: list[str] | None = None):
-    args = sys.argv[1:] if args is None else args
-    config = load_yaml(args[0], args[1:])
-    run(config, build(config), forward_step)
+    return build_config(config, model, dataset, vocab_size=len(tokenizer)), None
 
 
 if __name__ == "__main__":
-    train()
+    main(build, forward_step)

@@ -24,9 +24,16 @@ def test_experiment_configs_build(path):
     from welt_training import baseline, train
 
     config = load_yaml(path)
-    if "transformer" in config["model"]:  # A causal LM baseline
-        baseline.build(config)
-    else:
-        model = train.build_model_provider(config["model"], config["data"])
-        dataset = train.build_dataset_provider(config["model"], config["data"])
-        train.build_config(config, model, dataset, vocab_size=model.num_tokens)
+    (baseline if "transformer" in config["model"] else train).build(config)  # baseline: a causal LM
+
+
+def test_null_sections_and_model_overrides():
+    pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
+    from welt_training import train
+
+    config = load_yaml("welt_training/experiments/easy-tasks/string-repetition.yaml",
+                       ["optimizer=null", "model.tensor_model_parallel_size=2"])
+    cfg, _ = train.build(config)
+    assert cfg.model.tensor_model_parallel_size == 2
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        train.build(load_yaml("welt_training/experiments/easy-tasks/string-repetition.yaml", ["train.typo=1"]))

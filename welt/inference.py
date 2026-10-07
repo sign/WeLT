@@ -15,9 +15,9 @@ import os
 os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
 import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402, N812
 from cachetools import LRUCache  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402
-from torch import nn  # noqa: E402
 from transformers import AutoConfig  # noqa: E402
 from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
 from vllm.config import PoolerConfig  # noqa: E402
@@ -58,18 +58,18 @@ class WeLTGenerator:
         self.decoder = LLM(os.path.join(path, "bytes_decoder"), enable_prompt_embeds=True,
                            max_model_len=self.processor.max_word_length + 1, **engine)
 
-        # The small layers around the transformers
-        weights = load_file(os.path.join(path, "welt.safetensors"), device=device)
-        self.encoder_mapping = load_linear(weights, "encoder_mapping")
-        self.encoder_norm = load_norm(weights, "encoder_norm")
-        self.decoder_mapping = load_linear(weights, "decoder_mapping")
-        self.decoder_norm = load_norm(weights, "decoder_norm")
-        self.decoder_embedding = weights["decoder_prompt_embeddings"]
-        if self.image_encoder is not None:
-            self.patch_proj = load_linear(weights, "image_encoder.embed.proj")
-            self.patch_cls = weights["image_encoder.embed.cls"]
+        self.weights = load_file(os.path.join(path, "welt.safetensors"), device=device)  # The layers around them
 
         self.word_embeddings = LRUCache(maxsize=100_000)
+
+    def _linear(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        weight = self.weights[f"{name}.weight"]
+        return F.linear(x.to(weight.dtype), weight, self.weights[f"{name}.bias"])
+
+    def _map(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        """WeLTModel's {encoder,decoder}_mapping and _norm, between the transformers."""
+        x = self._linear(x, f"{name}_mapping")
+        return F.rms_norm(x, x.shape[-1:], self.weights[f"{name}_norm.weight"], eps=1e-6)
 
     @staticmethod
     def _pooled(llm: LLM, prompts: list[dict], params: PoolingParams | list[PoolingParams]) -> torch.Tensor:
@@ -92,16 +92,16 @@ class WeLTGenerator:
             else:
                 prompts = []
                 for word_patches, count in zip(patches, shapes.prod(dim=-1), strict=True):
-                    projected = self.patch_proj(word_patches[:count].to(self.patch_proj.weight.dtype) / 127.5 - 1)
-                    prompts.append({"prompt_embeds": torch.cat([self.patch_cls[None], projected]).cpu()})
+                    projected = self._linear(word_patches[:count] / 127.5 - 1, "image_encoder.embed.proj")
+                    cls = self.weights["image_encoder.embed.cls"]
+                    prompts.append({"prompt_embeds": torch.cat([cls[None], projected]).cpu()})
                 embeds.append(self._pooled(self.image_encoder, prompts, params))
         if self.bytes_encoder is not None:
             tokenized = self.processor.tokenize_words(words)
             prompts = [{"prompt_token_ids": ids[mask.bool()].tolist()}
                        for ids, mask in zip(tokenized.input_ids, tokenized.attention_mask, strict=True)]
             embeds.append(self._pooled(self.bytes_encoder, prompts, params))
-        embeds = torch.cat(embeds, dim=-1).to(self.device, self.encoder_mapping.weight.dtype)
-        embeds = self.encoder_norm(self.encoder_mapping(embeds)).cpu()
+        embeds = self._map(torch.cat(embeds, dim=-1).to(self.device), "encoder").cpu()
         self.word_embeddings.update(zip(words, embeds, strict=True))
 
     @torch.inference_mode()
@@ -115,15 +115,15 @@ class WeLTGenerator:
             prompts.append({"prompt_embeds": torch.stack([self.word_embeddings[w] for w in words]),
                             "cache_salt": repr(ranges)})
             params.append(PoolingParams(use_activation=False, extra_kwargs={RANGES_KEY: ranges}))
-        hidden = self._pooled(self.latent, prompts, params).to(self.device, self.decoder_mapping.weight.dtype)
-        return self.decoder_norm(self.decoder_mapping(hidden))
+        return self._map(self._pooled(self.latent, prompts, params).to(self.device), "decoder")
 
     @torch.inference_mode()
     def _next_words(self, latents: torch.Tensor, prefixes: list[bytes], sampling: SamplingParams) -> list[bytes]:
         prompts = []
         for latent, prefix in zip(latents, prefixes, strict=True):
             byte_ids = torch.tensor([self.tokenizer.bos_token_id, *prefix], device=self.device)
-            prompts.append({"prompt_embeds": torch.cat([latent[None], self.decoder_embedding[byte_ids]]).cpu()})
+            embeddings = self.weights["decoder_prompt_embeddings"][byte_ids]
+            prompts.append({"prompt_embeds": torch.cat([latent[None], embeddings]).cpu()})
         outputs = self.decoder.generate(prompts, sampling, use_tqdm=False)
         eos = self.tokenizer.eos_token_id
         return [prefix + bytes(t for t in o.outputs[0].token_ids if t != eos)
@@ -161,20 +161,6 @@ class WeLTGenerator:
                 still_active.append(i)
             active = still_active
         return ["".join(words) for words in generated]
-
-
-def load_linear(weights: dict[str, torch.Tensor], prefix: str) -> nn.Linear:
-    weight, bias = weights[f"{prefix}.weight"], weights[f"{prefix}.bias"]
-    layer = nn.Linear(weight.size(1), weight.size(0), device="meta")
-    layer.load_state_dict({"weight": weight, "bias": bias}, assign=True)
-    return layer
-
-
-def load_norm(weights: dict[str, torch.Tensor], prefix: str) -> nn.RMSNorm:
-    weight = weights[f"{prefix}.weight"]
-    norm = nn.RMSNorm(weight.size(0), eps=1e-6, device="meta")  # As in WeLTModel
-    norm.load_state_dict({"weight": weight}, assign=True)
-    return norm
 
 
 def main():

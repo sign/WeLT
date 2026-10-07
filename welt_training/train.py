@@ -38,62 +38,38 @@ from welt_training.extendable_yaml import CONFIG_FILE_NAME, load_yaml
 TOKENIZER = UTF8Tokenizer()
 
 
-def build_model_provider(model: dict, data: dict) -> WeLTModelProvider:
-    model = dict(model)
-    model.pop("pretokenizer", None)  # A data option
-    provider = WeLTModelProvider.from_hf(
-        bytes_encoder=model.pop("bytes_encoder", None),
-        image_encoder=model.pop("image_encoder", None),
-        latent_transformer=model.pop("latent_transformer"),
-        bytes_decoder=model.pop("bytes_decoder"),
-        load_pretrained=model.pop("load_pretrained", False),
-        trust_remote_code=model.pop("trust_remote_code", False),
-    )
-    provider.seq_length = data["seq_length"]
-    provider.calculate_per_token_loss = True
-    provider.bf16 = True
-    return _apply(provider, model)  # Any other provider option, e.g. modality_dropout, tensor_model_parallel_size
-
-
 def build_dataset_provider(model: dict, data: dict) -> WeLTDatasetProvider:
-    data = dict(data)
     return WeLTDatasetProvider(render_images=model.get("image_encoder") is not None,
                                pretokenizer_name=model.get("pretokenizer"),
                                trust_remote_code=model.get("trust_remote_code", False),
                                **data)
 
 
-def _apply(config_object, values: dict | None):
-    for key, value in (values or {}).items():
-        if not hasattr(config_object, key):
-            raise ValueError(f"Unknown {type(config_object).__name__} option: {key}")
-        setattr(config_object, key, value)
-    return config_object
-
-
 def build_config(config: dict, model_provider, dataset_provider, vocab_size: int) -> ConfigContainer:
     """Megatron-Bridge config from the YAML's Megatron-Bridge sections, with the given model and dataset."""
     output_dir = config.get("output_dir", "./output")
 
-    train = _apply(TrainingConfig(train_iters=1000, micro_batch_size=32, global_batch_size=32), config.get("train"))
-    optimizer = _apply(OptimizerConfig(optimizer="adam", lr=3e-4, min_lr=3e-5, weight_decay=0.01, bf16=True,
-                                       adam_beta1=0.9, adam_beta2=0.95, clip_grad=1.0,
-                                       use_distributed_optimizer=True), config.get("optimizer"))
-    scheduler = _apply(SchedulerConfig(lr_decay_style="cosine", lr_warmup_iters=0, lr_decay_iters=train.train_iters,
-                                       start_weight_decay=optimizer.weight_decay,
-                                       end_weight_decay=optimizer.weight_decay,
-                                       weight_decay_incr_style="constant"), config.get("scheduler"))
-    validation = _apply(ValidationConfig(eval_interval=500, eval_iters=10), config.get("validation"))
-    checkpoint = _apply(CheckpointConfig(save=os.path.join(output_dir, "checkpoints"),
-                                         load=os.path.join(output_dir, "checkpoints"),
-                                         save_interval=1000, ckpt_format="torch_dist"), config.get("checkpoint"))
-    logger = _apply(LoggerConfig(log_interval=10, tensorboard_dir=os.path.join(output_dir, "tensorboard")),
-                    config.get("logger"))
-    ddp = _apply(DistributedDataParallelConfig(use_distributed_optimizer=optimizer.use_distributed_optimizer,
-                                               grad_reduce_in_fp32=True, average_in_collective=False,
-                                               overlap_grad_reduce=True, overlap_param_gather=True),
-                 config.get("ddp"))
-    rng = _apply(RNGConfig(seed=42), config.get("rng"))
+    def section(cls, name: str, **defaults):
+        return cls(**defaults | (config.get(name) or {}))  # Unknown keys raise a TypeError
+
+    train = section(TrainingConfig, "train", train_iters=1000, micro_batch_size=32, global_batch_size=32)
+    optimizer = section(OptimizerConfig, "optimizer", optimizer="adam", lr=3e-4, min_lr=3e-5, weight_decay=0.01,
+                        bf16=True, adam_beta1=0.9, adam_beta2=0.95, clip_grad=1.0, use_distributed_optimizer=True)
+    scheduler = section(SchedulerConfig, "scheduler", lr_decay_style="cosine", lr_warmup_iters=0,
+                        lr_decay_iters=train.train_iters, start_weight_decay=optimizer.weight_decay,
+                        end_weight_decay=optimizer.weight_decay, weight_decay_incr_style="constant")
+    validation = section(ValidationConfig, "validation", eval_interval=500, eval_iters=10)
+    checkpoint = section(CheckpointConfig, "checkpoint", save=os.path.join(output_dir, "checkpoints"),
+                         load=os.path.join(output_dir, "checkpoints"), save_interval=1000, ckpt_format="torch_dist")
+    logger = section(LoggerConfig, "logger", log_interval=10, tensorboard_dir=os.path.join(output_dir, "tensorboard"))
+    ddp = section(DistributedDataParallelConfig, "ddp", use_distributed_optimizer=optimizer.use_distributed_optimizer,
+                  grad_reduce_in_fp32=True, average_in_collective=False, overlap_grad_reduce=True,
+                  overlap_param_gather=True)
+    rng = section(RNGConfig, "rng", seed=42)
+
+    model_provider.seq_length = dataset_provider.seq_length
+    model_provider.calculate_per_token_loss = True
+    model_provider.bf16 = optimizer.bf16
     dataset_provider.samples_per_eval = validation.eval_iters * train.global_batch_size
 
     return ConfigContainer(
@@ -112,6 +88,15 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
     )
 
 
+def report(value: torch.Tensor, count: torch.Tensor) -> torch.Tensor:
+    """A logged metric: Megatron sums both over micro batches and data parallel ranks, and logs their ratio."""
+    return torch.stack([value.detach().float(), count.float()])
+
+
+def to_cuda(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {key: value.cuda(non_blocking=True) for key, value in batch.items()}
+
+
 def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor):
     """Per-byte cross entropy, plus bits per byte and byte/word accuracy for logging.
     labels: (words, bytes). Bits per byte count every prediction (including the EOS ending each word) except the
@@ -127,9 +112,6 @@ def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor)
                                               message="found NaN in local forward loss calculation",
                                               tolerance=0.0, fatal=True)
 
-    def report(value, count):
-        return torch.stack([value.detach().float(), count.float()])
-
     words = loss_mask.any(dim=-1)
     words_correct = (correct | ~loss_mask).all(dim=-1) & words
     return loss, num_tokens, {
@@ -141,7 +123,7 @@ def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor)
 
 
 def forward_step(state, data_iterator, model, return_schedule_plan: bool = False):
-    batch = {key: value.cuda(non_blocking=True) for key, value in next(data_iterator).items()}
+    batch = to_cuda(next(data_iterator))
     losses, correct, labels = model(**batch)
     return losses, partial(loss_func, correct=correct, labels=labels)
 
@@ -161,15 +143,23 @@ def run(config: dict, cfg: ConfigContainer, forward_step_func, save_artifacts=No
         torch.distributed.barrier()
 
 
-def train(args: list[str] | None = None):
-    args = sys.argv[1:] if args is None else args
-    config = load_yaml(args[0], args[1:])
-    model = build_model_provider(config["model"], config["data"])
+def main(build, forward_step_func):
+    """Train from a YAML config and overrides on the command line, with build(config) -> (ConfigContainer, artifacts
+    saving function)."""
+    if len(sys.argv) < 2:
+        sys.exit(f"Usage: {sys.argv[0]} <config.yaml> [section.key=value ...]")
+    config = load_yaml(sys.argv[1], sys.argv[2:])
+    cfg, save_artifacts = build(config)
+    run(config, cfg, forward_step_func, save_artifacts)
+
+
+def build(config: dict):
+    # Model options other than the transformers (and the pretokenizer, a data option) are provider fields
+    model = WeLTModelProvider.from_hf(**{key: value for key, value in config["model"].items() if key != "pretokenizer"})
     dataset = build_dataset_provider(config["model"], config["data"])
     cfg = build_config(config, model, dataset, vocab_size=model.num_tokens)
-    run(config, cfg, forward_step,
-        save_artifacts=lambda output_dir: dataset.processor().save_pretrained(os.path.join(output_dir, "processor")))
+    return cfg, lambda output_dir: dataset.processor().save_pretrained(os.path.join(output_dir, "processor"))
 
 
 if __name__ == "__main__":
-    train()
+    main(build, forward_step)

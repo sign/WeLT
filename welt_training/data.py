@@ -1,6 +1,5 @@
 """Megatron-Bridge dataset provider for WeLT: texts packed into examples of words, processed into model inputs."""
 from dataclasses import dataclass
-from functools import partial
 
 import torch
 from datasets import Dataset
@@ -41,7 +40,7 @@ class WordsDataset(torch.utils.data.Dataset):
         self.dataset = dataset
         self.processor = processor
         self.length = length
-        self.collate_fn = partial(collate_fn, pad_value=processor.tokenizer.pad_token_id)
+        self.collate_fn = collate_fn
 
     def __len__(self):
         return self.length

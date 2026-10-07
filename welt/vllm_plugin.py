@@ -29,8 +29,6 @@ def register():
     restore_opentelemetry_context()
     if envs.VLLM_USE_V2_MODEL_RUNNER:  # It would silently ignore the ranges
         raise RuntimeError("WeLT's shift blocks need vLLM's V1 model runner, unset VLLM_USE_V2_MODEL_RUNNER")
-    if getattr(GPUModelRunner, "_welt_patched", False):
-        return
     update_states = GPUModelRunner._update_states
 
     def _update_states(self, scheduler_output):
@@ -48,4 +46,3 @@ def register():
         return result
 
     GPUModelRunner._update_states = _update_states
-    GPUModelRunner._welt_patched = True

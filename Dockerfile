@@ -22,5 +22,3 @@ RUN python -c "from font_download import FontConfig; from font_download.example_
 # Editable install: the commands (and the vLLM plugin) use /app, also when a checkout is mounted there
 COPY . /app
 RUN python -m pip install --no-deps -e .
-
-CMD ["bash", "-c", "torchrun --nproc_per_node=${NPROC_PER_NODE:-1} -m welt_training.train $CONFIG"]

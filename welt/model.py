@@ -130,17 +130,15 @@ class WeLTModelProvider(GPTModelProvider):
         vision = image_encoder if is_vision else None
         latent = provider(latent_transformer)
         fields = {f.name: getattr(latent, f.name) for f in dataclasses.fields(GPTModelProvider) if f.init}
-        return cls(**fields,
-                   bytes_encoder=provider(bytes_encoder),
-                   image_encoder=None if vision else provider(image_encoder),
-                   image_encoder_vision=vision,
-                   trust_remote_code=trust_remote_code,
-                   bytes_decoder=provider(bytes_decoder),
-                   bytes_encoder_hf_path=pretrained(bytes_encoder),
-                   image_encoder_hf_path=pretrained(image_encoder),
-                   latent_transformer_hf_path=pretrained(latent_transformer),
-                   bytes_decoder_hf_path=pretrained(bytes_decoder),
-                   **kwargs)
+        return cls(**fields | dict(bytes_encoder=provider(bytes_encoder),
+                                   image_encoder=None if vision else provider(image_encoder),
+                                   image_encoder_vision=vision,
+                                   trust_remote_code=trust_remote_code,
+                                   bytes_decoder=provider(bytes_decoder),
+                                   bytes_encoder_hf_path=pretrained(bytes_encoder),
+                                   image_encoder_hf_path=pretrained(image_encoder),
+                                   latent_transformer_hf_path=pretrained(latent_transformer),
+                                   bytes_decoder_hf_path=pretrained(bytes_decoder)) | kwargs)
 
     def sub_providers(self):
         return [p for p in (self.bytes_encoder, self.image_encoder, self.bytes_decoder) if p is not None]
@@ -221,7 +219,6 @@ class PackedAttention(nn.Module):
 class MaskedAttention(nn.Module):
     """Core attention with an arbitrary (B, 1, S, S) mask (True = masked) in FlexAttention, e.g. the latent
     transformer's packed sequences with bidirectional shift blocks."""
-    _cache: tuple[torch.Tensor, BlockMask] | None = None  # The mask is shared by all layers
 
     def __init__(self, config):
         super().__init__()
@@ -230,15 +227,16 @@ class MaskedAttention(nn.Module):
 
     def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None, **kwargs):
         """(S, B, heads, dim) query, key, value -> (S, B, heads * dim)"""
-        if MaskedAttention._cache is None or MaskedAttention._cache[0] is not attention_mask:
+        # The mask is shared by all layers of the transformer, cached on it
+        block_mask = getattr(attention_mask, "_welt_block_mask", None)
+        if block_mask is None:
             allowed = ~attention_mask[:, 0]
             block_mask = create_block_mask(lambda b, h, q, kv: allowed[b, q, kv], allowed.size(0), None,
                                            allowed.size(1), allowed.size(2), device=allowed.device, _compile=True)
-            MaskedAttention._cache = (attention_mask, block_mask)
+            attention_mask._welt_block_mask = block_mask
         query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
         key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
-        out = compiled_flex_attention(query, key, value, block_mask=MaskedAttention._cache[1],
-                                      scale=self.softmax_scale)
+        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale)
         return out.permute(2, 0, 1, 3).flatten(2)
 
 

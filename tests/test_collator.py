@@ -6,12 +6,12 @@ from welt.collator import collate_fn, stack_pad_tensors
 def test_stack_pad_tensors_pads_every_dimension():
     a = torch.ones(2, 3, dtype=torch.long)
     b = torch.ones(3, 1, dtype=torch.long) * 2
-    stacked = stack_pad_tensors([a, b], pad_value=-1)
+    stacked = stack_pad_tensors([a, b])
     assert stacked.shape == (2, 3, 3)
     assert torch.equal(stacked[0, :2], a)
-    assert (stacked[0, 2] == -1).all()
+    assert (stacked[0, 2] == 0).all()
     assert torch.equal(stacked[1, :, :1], b)
-    assert (stacked[1, :, 1:] == -1).all()
+    assert (stacked[1, :, 1:] == 0).all()
 
 
 def test_collate_fn_keeps_dtypes():

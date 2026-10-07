@@ -3,7 +3,6 @@ import os
 
 import torch
 from cachetools import LRUCache
-from datasets import Dataset
 from font_download import FontConfig
 from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
 from pixel_renderer import PixelRendererProcessor
@@ -29,23 +28,13 @@ def patchify(image, patch_size: int = PATCH_SIZE) -> torch.Tensor:
 class TextImageProcessor:
     """Turns text into word-level byte tensors, rendered word patches, and labels."""
 
-    def __init__(self,
-                 pretokenizer: PreTrainedTokenizer,
-                 tokenizer: UTF8Tokenizer,
-                 renderer: PixelRendererProcessor | None,
-                 max_word_length: int = 32,
-                 cache_size: int = 10000):
-        assert tokenizer.bos_token_id is not None, "Tokenizer must have a BOS token"
-        assert tokenizer.eos_token_id is not None, "Tokenizer must have an EOS token"
-
+    def __init__(self, pretokenizer: PreTrainedTokenizer, renderer: PixelRendererProcessor | None,
+                 max_word_length: int = 32):
         self.pretokenizer = pretokenizer
-        self.tokenizer = tokenizer
+        self.tokenizer = UTF8Tokenizer()
         self.renderer = renderer
-
         self.max_word_length = max_word_length
-        self.cache_size = cache_size
-
-        self.patches_cache = LRUCache(maxsize=self.cache_size)
+        self.patches_cache = LRUCache(maxsize=10_000)  # Rendering a word takes ~30µs
 
     @classmethod
     def create(cls, max_word_length: int, render_images: bool,
@@ -56,15 +45,14 @@ class TextImageProcessor:
         else:
             pretokenizer = WordsSegmentationTokenizer(max_bytes=max_word_length - 2)  # BOS and EOS
         renderer = PixelRendererProcessor(font=FontConfig(sources=FONTS_NOTO_SANS)) if render_images else None
-        return cls(pretokenizer=pretokenizer, tokenizer=UTF8Tokenizer(), renderer=renderer,
-                   max_word_length=max_word_length)
+        return cls(pretokenizer=pretokenizer, renderer=renderer, max_word_length=max_word_length)
 
     def save_pretrained(self, save_directory):
         os.makedirs(save_directory, exist_ok=True)
         self.pretokenizer.save_pretrained(os.path.join(save_directory, "pretokenizer"))
         if self.renderer is not None:
             self.renderer.save_pretrained(os.path.join(save_directory, "renderer"))
-        config = {"max_word_length": self.max_word_length, "cache_size": self.cache_size}
+        config = {"max_word_length": self.max_word_length}
         with open(os.path.join(save_directory, PROCESSOR_CONFIG_NAME), "w") as f:
             json.dump(config, f, indent=2, sort_keys=True)
 
@@ -74,8 +62,8 @@ class TextImageProcessor:
             config = json.load(f)
         renderer_dir = os.path.join(path, "renderer")
         renderer = PixelRendererProcessor.from_pretrained(renderer_dir) if os.path.isdir(renderer_dir) else None
-        return cls(pretokenizer=AutoTokenizer.from_pretrained(os.path.join(path, "pretokenizer")),
-                   tokenizer=UTF8Tokenizer(), renderer=renderer, **config)
+        return cls(pretokenizer=AutoTokenizer.from_pretrained(os.path.join(path, "pretokenizer")), renderer=renderer,
+                   max_word_length=config["max_word_length"])
 
     def render_texts(self, texts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         """Render words into (num_words, max_patches, 768) uint8 patches, and each word's (rows, columns) of patches."""
@@ -100,25 +88,14 @@ class TextImageProcessor:
         starts = sorted({0, *(start for start, _ in offsets)})
         return [text[start:end] for start, end in zip(starts, [*starts[1:], len(text)], strict=True) if end > start]
 
-    def pretokenize_dataset(self, dataset: Dataset, num_proc: int | None = None) -> Dataset:
-        """Replace the 'text' column with a 'words' column."""
-        return dataset.map(lambda example: {"words": self.pretokenize(example["text"])}, remove_columns=["text"],
-                           num_proc=num_proc, desc="Pretokenizing texts into words")
-
-    def get_sequence_labels(self, words: list[str], seq_lengths: list[int] = None) -> list[str]:
-        """
-        Generate labels for word-level sequences: the next word, per packed sequence.
-        The last word of each sequence has an empty label.
-        """
-        if seq_lengths is None:
-            seq_lengths = [len(words)]
-
+    @staticmethod
+    def get_sequence_labels(words: list[str], seq_lengths: list[int]) -> list[str]:
+        """The next word of each word, per packed sequence. The last word of each sequence has an empty label."""
         labels = []
         offset = 0
         for length in seq_lengths:
             labels += words[offset + 1:offset + length] + [""]
             offset += length
-
         return labels
 
     def tokenize_words(self, words: list[str]):
@@ -164,29 +141,7 @@ class TextImageProcessor:
             example["input_patches"], example["input_patches_shape"] = self.render_texts(words)
         return example
 
-    def __call__(self,
-                 batch: dict[str, list[str]] | str | list[str],
-                 collated=False) -> dict[str, torch.Tensor]:
-        if isinstance(batch, str):
-            batch = {"text": [batch]}
-
-        if isinstance(batch, list):
-            batch = {"text": batch}
-
-        if "text" in batch and isinstance(batch["text"], str):
-            batch["text"] = [batch["text"]]
-
-        # Copy batch before modifying to avoid mutating the input
-        if "text" in batch and "words" not in batch:
-            batch = batch.copy()
-            words = [self.pretokenize(t) for t in batch["text"]]
-            batch["words"] = words
-            batch["seq_lengths"] = [[len(w)] for w in words]
-
-        dicts = [self.process_single_example(words=words, seq_lengths=seq_lengths)
-                 for words, seq_lengths in zip(batch["words"], batch["seq_lengths"], strict=True)]
-
-        if collated:
-            return collate_fn(dicts, pad_value=self.tokenizer.pad_token_id)
-
-        return {key: [d[key] for d in dicts] for key in dicts[0]}
+    def __call__(self, texts: list[str]) -> dict[str, torch.Tensor]:
+        """A collated batch of texts, each its own sequence."""
+        words = [self.pretokenize(text) for text in texts]
+        return collate_fn([self.process_single_example(w, [len(w)]) for w in words])

@@ -139,7 +139,8 @@ def pack_words(batch: dict[str, list], seq_length: int) -> dict[str, list]:
 
 
 def pack_dataset(processor: TextImageProcessor, dataset: Dataset, seq_length: int, num_proc: int | None = None):
-    dataset = processor.pretokenize_dataset(dataset.select_columns(["text"]), num_proc=num_proc)
+    dataset = dataset.map(lambda example: {"words": processor.pretokenize(example["text"])},
+                          remove_columns=dataset.column_names, num_proc=num_proc, desc="Pretokenizing texts into words")
     # ponytail: greedy in-order packing; best-fit-decreasing would waste fewer PAD words
     return dataset.map(pack_words, batched=True, batch_size=1000, remove_columns=dataset.column_names,
                        fn_kwargs={"seq_length": seq_length}, num_proc=num_proc, desc="Packing words")

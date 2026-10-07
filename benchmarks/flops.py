@@ -12,8 +12,8 @@ import argparse
 from megatron.bridge.training.config import DatasetBuildContext
 
 from welt.model import hf_config
-from welt_training.data import WeLTDatasetProvider
 from welt_training.extendable_yaml import load_yaml
+from welt_training.train import build_dataset_provider
 
 
 def matmul_params(config) -> tuple[int, int, int]:
@@ -35,11 +35,11 @@ def transformer_flops(config, lengths) -> float:
 
 def step_flops(config: dict, batches: int = 20) -> tuple[float, float]:
     model, data = config["model"], config["data"]
-    provider = WeLTDatasetProvider(render_images=model.get("image_encoder") is not None, **data)
+    provider = build_dataset_provider(model, data)
     train, _, _ = provider.build_datasets(DatasetBuildContext(0, 0, 0))
-    micro_batch = config.get("train", {}).get("micro_batch_size", 32)
-    global_batch = config.get("train", {}).get("global_batch_size", micro_batch)
-    configs = {name: hf_config(model[name]) for name in
+    micro_batch = (config.get("train") or {}).get("micro_batch_size", 32)
+    global_batch = (config.get("train") or {}).get("global_batch_size", micro_batch)
+    configs = {name: hf_config(model[name], model.get("trust_remote_code", False)) for name in
                ["bytes_encoder", "image_encoder", "latent_transformer", "bytes_decoder"] if model.get(name)}
 
     totals = {"model": 0.0, "hardware": 0.0}

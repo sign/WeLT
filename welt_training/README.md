@@ -65,7 +65,8 @@ checkpoints every 1000 to `<output_dir>/checkpoints` (also loaded from there, to
 the `WeLTModelProvider` ([`welt/model.py`](../welt/model.py)), the latent transformer's Megatron config, e.g.
 `modality_dropout` (default 0.15: with both encoders, each one's embeddings are dropped with this probability per
 step, rescaling the other), `tensor_model_parallel_size`, `sequence_parallel`, or `recompute_granularity`.
-Parallelism and recomputation settings are shared with the other transformers.
+Parallelism, precision and recomputation settings are shared with the other transformers
+(`SHARED_CONFIG_FIELDS`); other fields, e.g. `hidden_dropout`, only apply to the latent transformer.
 
 Image encoders:
 - **Patch transformer**: a causal LM config or model (e.g. [`models/image-encoder-tiny.json`](experiments/models/image-encoder-tiny.json)),
@@ -108,6 +109,9 @@ the validation set small, and raise `eval_iters` to cover it.
 - **Tensor parallel**: `model.tensor_model_parallel_size=T`, optionally with `model.sequence_parallel=true`.
   Data parallel size is then `N / T`.
 - Pipeline and context parallelism are not supported.
+
+[`benchmarks/parity.sh`](../benchmarks/parity.sh) checks that 1 GPU, DP=2 and TP=2 (with sequence parallelism)
+train alike, on 2 GPUs.
 
 ## Optimizers
 
