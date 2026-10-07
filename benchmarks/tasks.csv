@@ -1,5 +1,6 @@
-task,train_iters,ms_per_step,val_loss,val_byte_accuracy,val_word_accuracy,gen_exact_match,gen_chrf,gen_words_per_second
-string-repetition,1500,116.2,0.0106,0.9977,0.9900,0.8633,96.60,990.2
-ocr,3000,94.7,0.0593,0.9853,0.9633,0.5938,89.26,828.9
-letter-count,3000,119.6,0.0082,0.9974,0.9893,0.8281,91.71,1328.3
-machine-translation,10000,166.6,0.4020,0.8850,0.6325,0.0508,39.19,389.2
+task,train_iters,ms_per_step,val_loss,val_bits_per_byte,val_byte_accuracy,val_word_accuracy,gen_exact_match,gen_chrf,gen_words_per_second
+string-repetition,1500,50.4,0.0099,0.0173,0.9982,0.9921,0.9336,98.53,776.2
+ocr,3000,61.8,0.0220,0.0383,0.9935,0.9773,0.8047,95.36,866.5
+ocr-vit,3000,104.7,0.0143,0.0250,0.9963,0.9857,0.8398,96.73,893.6
+letter-count,3000,67.1,0.0000,0.0001,1.0000,1.0000,0.9922,99.69,1335.9
+machine-translation,10000,171.9,0.3744,0.6257,0.8922,0.6480,0.0586,41.03,440.6

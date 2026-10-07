@@ -63,10 +63,28 @@ occurrence, "hardware" FLOPs encode each distinct word once.
 | Config | ms / step | Model TFLOPs / step | Model TFLOP/s | Hardware TFLOP/s |
 |--------|----------:|-------------------:|--------------:|-----------------:|
 | Bench | 127 | 2.76 | 21.8 | - |
-| Machine translation | 167 | 3.06 | 18.4 | 15.0 |
+| Machine translation | 172 | 3.06 | 17.8 | 14.5 |
 
 The remaining time is dominated by memory-bound kernels (SwiGLU, RoPE, norms) of the narrow (128-512 wide)
 transformers, which GB10's bandwidth limits. Larger micro batches help a little (batch 128: 10% more samples/s).
+
+### Multiple GPUs
+
+[`parity.sh`](parity.sh) trains the machine translation config for 200 steps on the same global batches
+(64 examples, micro batch 32, modality dropout off), on 2 H100s (on Modal, 16 CPUs):
+
+| Parallelism | ms / step | Val. loss after 200 steps |
+|-------------|----------:|--------------------------:|
+| 1 GPU (2 micro batches) | 189 | 0.933 |
+| Data parallel (DP=2) | 101 | 0.933 |
+| Tensor + sequence parallel (TP=2) | 254 | 0.938 |
+
+Data parallelism scales 1.9x. Tensor parallelism is slower for these narrow (128-512 wide) transformers: use it only
+for models that do not fit on one GPU. Its checkpoints export (resharded) to the same vLLM format.
+
+With micro batch 64, a step takes 103 ms on one H100 vs. 167 ms on the GB10: only 1.6x faster, as the many small
+kernels of these small models (and the host synchronizations of dynamic packed shapes) bound an H100 more than its
+compute or memory bandwidth. Larger models (or micro batches) would use it better.
 
 ## Tasks
 
@@ -74,12 +92,12 @@ transformers, which GB10's bandwidth limits. Larger micro batches help a little 
 ([`welt_training/evaluate.py`](../welt_training/evaluate.py): exact match and chrF of completions generated from the
 validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 
-| Task | Steps | ms / step | Train time | Val. byte acc. | Val. word acc. | Gen. exact match | Gen. chrF | Gen. words / s |
-|------|------:|----------:|-----------:|---------------:|---------------:|-----------------:|----------:|---------------:|
-| **string-repetition**: repeat an English sentence, pretrained tiny LMs * | 1500 | 116 | 3 min | 99.8% | 99.0% | 86.3% | 96.6 | 990 |
-| **ocr**: write a sentence seen only as rendered word images * | 3000 | 95 | 5 min | 98.5% | 96.3% | 59.4% | 89.3 | 829 |
-| **letter-count**: count the letters of a word | 3000 | 120 | 6 min | 99.7% | 98.9% | 82.8% | 91.7 | 1328 |
-| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 167 | 28 min | 88.5% | 63.2% | 5.1% | 39.2 | 389 |
+| Task | Steps | ms / step | Train time | Val. bits / byte | Val. word acc. | Gen. exact match | Gen. chrF | Gen. words / s |
+|------|------:|----------:|-----------:|-----------------:|---------------:|-----------------:|----------:|---------------:|
+| **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 50 | 1.3 min | 0.017 | 99.2% | 93.4% | 98.5 | 776 |
+| **ocr**: write a sentence seen only as rendered word images | 3000 | 62 | 3.1 min | 0.038 | 97.7% | 80.5% | 95.4 | 867 |
+| **ocr-vit**: the same, with a pretrained ViT-Tiny image encoder | 3000 | 105 | 5.2 min | 0.025 | 98.6% | 84.0% | 96.7 | 894 |
+| **letter-count**: count the letters of a word (Muon) | 3000 | 67 | 3.4 min | 0.0001 | 100% | 99.2% | 99.7 | 1336 |
+| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 172 | 29 min | 0.626 | 64.8% | 5.9% | 41.0 | 441 |
 
 Generation is greedy, on 256 validation examples, with vLLM (batched over all examples).
-\* Trained before FlexAttention and unique-word encoding (iterations 7-9), so their ms / step is higher than current.
