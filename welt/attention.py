@@ -5,7 +5,6 @@ from utf8_tokenizer.control import ControlTokens
 
 # Module-level caches that grow as needed
 _tril_cache: torch.Tensor | None = None
-_arange_cache: torch.Tensor | None = None
 
 
 def _get_tril(size: int) -> torch.Tensor:
@@ -14,14 +13,6 @@ def _get_tril(size: int) -> torch.Tensor:
     if _tril_cache is None or len(_tril_cache) < size:
         _tril_cache = torch.tril(torch.ones((size, size), dtype=torch.bool))
     return _tril_cache
-
-
-def _get_arange(size: int) -> torch.Tensor:
-    """Get an arange tensor of at least the given size, using cached version if possible."""
-    global _arange_cache
-    if _arange_cache is None or len(_arange_cache) < size:
-        _arange_cache = torch.arange(size, dtype=torch.long)
-    return _arange_cache
 
 
 def get_shift_blocks(words: list[str]):
@@ -93,10 +84,3 @@ def get_attention_mask_for_packed_sequence(seq_lengths: list[int], words: list[s
         add_self_attention_blocks(mask, words)
 
     return mask
-
-
-def get_position_ids_for_packed_sequence(seq_lengths: list[int]) -> torch.Tensor:
-    # Use module-level cached arange and slice
-    max_len = max(seq_lengths)
-    arange = _get_arange(max_len)
-    return torch.cat([arange[:length] for length in seq_lengths])

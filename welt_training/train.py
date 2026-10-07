@@ -1,549 +1,176 @@
-# Heavily adapted from
-# https://github.com/huggingface/transformers/edit/main/examples/pytorch/language-modeling/run_clm.py
-import logging
+"""
+Train WeLT with Megatron-Bridge.
+
+    torchrun --nproc_per_node=<gpus> -m welt_training.train config.yaml [section.key=value ...]
+
+The YAML has a `model` and a `data` section (see `welt_training/experiments`), and optionally any of the
+Megatron-Bridge config sections (`train`, `optimizer`, `scheduler`, `validation`, `checkpoint`, `logger`, `ddp`,
+`rng`), whose keys are set as-is on the corresponding Megatron-Bridge config.
+"""
 import math
 import os
 import sys
+from functools import partial
 
-import datasets
-import transformers
-from datasets import IterableDataset, IterableDatasetDict, load_dataset
-from safetensors.torch import load_model
-from transformers import (
-    HfArgumentParser,
-    TrainingArguments,
-    set_seed,
+import torch
+import yaml
+from megatron.bridge.training.config import (
+    CheckpointConfig,
+    ConfigContainer,
+    DistributedDataParallelConfig,
+    LoggerConfig,
+    OptimizerConfig,
+    RNGConfig,
+    SchedulerConfig,
+    TrainingConfig,
+    ValidationConfig,
 )
-from transformers.trainer_utils import get_last_checkpoint
-from trl import pack_dataset
+from megatron.bridge.training.pretrain import pretrain
+from megatron.bridge.training.tokenizers.config import TokenizerConfig
+from megatron.core.rerun_state_machine import get_rerun_state_machine
+from utf8_tokenizer.tokenizer import UTF8Tokenizer
 
-from welt.model_utils import setup_model
-from welt_training.args_data import DataTrainingArguments
-from welt_training.args_model import ModelArguments
-from welt_training.args_trainer import WeLTTrainingArguments
-from welt_training.data_utils import extract_text, load_prepared_data
+from welt.model import WeLTModelProvider
+from welt_training.data import WeLTDatasetProvider
 from welt_training.extendable_yaml import resolve_yaml_file
-from welt_training.flops_callback import FlopsCallback
-from welt_training.freeze_callback import FreezeWarmupCallback
-from welt_training.streaming import CustomIterableDataset, take_streaming_dataset
-from welt_training.trainer import WeLTTrainer
 
-logger = logging.getLogger(__name__)
+CONFIG_FILE_NAME = "welt.yaml"
+TOKENIZER = UTF8Tokenizer()
 
-def split_streaming_dataset(
-        full_streaming_dataset,
-        validation_percentage: int = 5,
-) -> IterableDatasetDict:
-    """
-    Splits a streaming dataset into
-    training and validation IterableDatasets, and supports methods like .map(), .filter(),
-    .take() and properties like .features on the resulting streams.
 
-    Args:
-        full_streaming_dataset (Dataset): The name of the dataset to load (e.g., "HuggingFaceFW/fineweb").
-        validation_percentage (int): The proportion of the dataset to be used for validation split.
+def load_yaml(path: str, overrides: list[str] = ()) -> dict:
+    """Load a YAML config (supporting `$extends`), applying `section.key=value` overrides."""
+    with open(resolve_yaml_file(os.path.abspath(path))) as f:
+        config = yaml.safe_load(f)
+    for override in overrides:
+        key, value = override.split("=", 1)
+        *sections, name = key.split(".")
+        target = config
+        for section in sections:
+            target = target.setdefault(section, {})
+        target[name] = yaml.safe_load(value)
+    return config
 
-    Returns:
-        IterableDatasetDict: An IterableDatasetDict containing
-            two IterableDataset objects: (train_stream, validation_stream).
-    """
-    if not (0 < validation_percentage < 100):
-        raise ValueError(
-            f"validation_percentage must be between 0 and 100 (exclusive). Passed: {validation_percentage}"
-        )
 
-    def split_generator(is_train: bool):
-        for i, example in enumerate(full_streaming_dataset):
-            if is_train:
-                if i % 100 > validation_percentage:
-                    yield example
-            else:
-                if i % 100 < validation_percentage:
-                    yield example
+def build_model_provider(model: dict, data: dict) -> WeLTModelProvider:
+    model = dict(model)
+    provider = WeLTModelProvider.from_hf(
+        bytes_encoder=model.pop("bytes_encoder", None),
+        image_encoder=model.pop("image_encoder", None),
+        latent_transformer=model.pop("latent_transformer"),
+        bytes_decoder=model.pop("bytes_decoder"),
+        load_pretrained=model.pop("load_pretrained", False),
+        trust_remote_code=model.pop("trust_remote_code", False),
+    )
+    provider.seq_length = data["seq_length"]
+    provider.calculate_per_token_loss = True
+    for key, value in model.items():  # e.g. modality_dropout, recompute_granularity
+        setattr(provider, key, value)
+    return provider
 
-    features = full_streaming_dataset.features
-    train_stream = IterableDataset.from_generator(split_generator, gen_kwargs={"is_train": True}, features=features)
-    validation_stream = IterableDataset.from_generator(
-        split_generator, gen_kwargs={"is_train": False}, features=features
+
+def build_dataset_provider(model: dict, data: dict) -> WeLTDatasetProvider:
+    data = dict(data)
+    return WeLTDatasetProvider(render_images=model.get("image_encoder") is not None,
+                               pretokenizer_name=model.get("pretokenizer"),
+                               trust_remote_code=model.get("trust_remote_code", False),
+                               **data)
+
+
+def _apply(config_object, values: dict | None):
+    for key, value in (values or {}).items():
+        if not hasattr(config_object, key):
+            raise ValueError(f"Unknown {type(config_object).__name__} option: {key}")
+        setattr(config_object, key, value)
+    return config_object
+
+
+def build_config(config: dict) -> ConfigContainer:
+    output_dir = config.get("output_dir", "./output")
+    model_provider = build_model_provider(config["model"], config["data"])
+    model_provider.bf16 = True
+
+    train = _apply(TrainingConfig(train_iters=1000, micro_batch_size=32, global_batch_size=32), config.get("train"))
+    optimizer = _apply(OptimizerConfig(optimizer="adam", lr=3e-4, min_lr=3e-5, weight_decay=0.01, bf16=True,
+                                       adam_beta1=0.9, adam_beta2=0.95, clip_grad=1.0,
+                                       use_distributed_optimizer=True), config.get("optimizer"))
+    scheduler = _apply(SchedulerConfig(lr_decay_style="cosine", lr_warmup_iters=0, lr_decay_iters=train.train_iters,
+                                       start_weight_decay=optimizer.weight_decay,
+                                       end_weight_decay=optimizer.weight_decay,
+                                       weight_decay_incr_style="constant"), config.get("scheduler"))
+    validation = _apply(ValidationConfig(eval_interval=500, eval_iters=10), config.get("validation"))
+    checkpoint = _apply(CheckpointConfig(save=os.path.join(output_dir, "checkpoints"),
+                                         load=os.path.join(output_dir, "checkpoints"),
+                                         save_interval=1000, ckpt_format="torch_dist"), config.get("checkpoint"))
+    logger = _apply(LoggerConfig(log_interval=10, tensorboard_dir=os.path.join(output_dir, "tensorboard")),
+                    config.get("logger"))
+    ddp = _apply(DistributedDataParallelConfig(use_distributed_optimizer=optimizer.use_distributed_optimizer,
+                                               grad_reduce_in_fp32=True, average_in_collective=False),
+                 config.get("ddp"))
+    rng = _apply(RNGConfig(seed=42), config.get("rng"))
+
+    return ConfigContainer(
+        model=model_provider,
+        dataset=build_dataset_provider(config["model"], config["data"]),
+        train=train,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        validation=validation,
+        checkpoint=checkpoint,
+        logger=logger,
+        ddp=ddp,
+        rng=rng,
+        tokenizer=TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=model_provider.num_tokens),
     )
 
-    return IterableDatasetDict({"train": train_stream, "validation": validation_stream})
 
-
-def parse_args_into_dataclasses(args: list[str] | None | str = None):
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, WeLTTrainingArguments))
-    # If we pass only one argument to the script and it's the path to a json or yaml file,
-    # let's parse it to get our arguments.
-    if isinstance(args, str):
-        resolved_path = resolve_yaml_file(os.path.abspath(args))
-        return parser.parse_yaml_file(yaml_file=resolved_path)
-
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        return parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
-    elif len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
-        resolved_path = resolve_yaml_file(os.path.abspath(sys.argv[1]))
-        return parser.parse_yaml_file(yaml_file=resolved_path)
-    else:
-        return parser.parse_args_into_dataclasses(args=args)
-
-
-def init_logging(training_args: TrainingArguments):
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)],
-    )
-
-    if training_args.should_log:
-        # The default of training_args.log_level is passive, so we set log level at info here to have that default.
-        transformers.utils.logging.set_verbosity_info()
-
-    log_level = training_args.get_process_log_level()
-    logger.setLevel(log_level)
-    datasets.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.set_verbosity(log_level)
-    transformers.utils.logging.enable_default_handler()
-    transformers.utils.logging.enable_explicit_format()
-
-    # Log on each process the small summary:
-    logger.warning(
-        f"Process rank: {training_args.local_rank}, " +
-        f"device: {training_args.device}, " +
-        f"n_gpu: {training_args.n_gpu}, " +
-        f"distributed training: {training_args.parallel_mode.value == 'distributed'}, " +
-        f"16-bits training: {training_args.fp16}"
-    )
-    logger.info(f"Training/evaluation parameters {training_args}")
-
-
-def init_model(model_args: ModelArguments, data_args: DataTrainingArguments, seed: int):
-    # Set seed before initializing model.
-    set_seed(seed)
-
-    # Initialize the model
-    model, processor, collator = setup_model(
-        image_encoder_name=model_args.image_encoder_model_name_or_path,
-        image_encoder_config=model_args.image_encoder_config,
-        bytes_encoder_name=model_args.bytes_encoder_model_name_or_path,
-        bytes_encoder_config=model_args.bytes_encoder_config,
-        latent_transformer_name=model_args.latent_transformer_model_name_or_path,
-        latent_transformer_config=model_args.latent_transformer_config,
-        bytes_decoder_name=model_args.bytes_decoder_model_name_or_path,
-        bytes_decoder_config=model_args.bytes_decoder_config,
-        encoding=model_args.encoding,
-        trust_remote_code=model_args.trust_remote_code,
-        dtype=model_args.dtype,
-        seed=seed,
-        load_pretrained=model_args.load_pretrained,
-        max_word_length=data_args.max_word_length,
-        pretokenizer_name=model_args.pretokenizer_name,
-    )
-
-    # Load the model from a local path if provided
-    if model_args.model_name_or_path:
-        load_model(model, model_args.model_name_or_path, strict=False)
-
-    model.enable_backend_optimizations()
-    return model, processor, collator
-
-
-def detect_last_checkpoint(training_args: TrainingArguments):
-    last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-
-        if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(f"Checkpoint detected, resuming training at {last_checkpoint}.")
-
-    return last_checkpoint
-
-
-def init_datasets(data_args: DataTrainingArguments,  # noqa: C901
-                  trust_remote_code: bool,
-                  do_train: bool = True,
-                  cache_dir: str = None):
-    # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
-    # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
-    # (the dataset will be downloaded automatically from the datasets Hub).
-    #
-    # For CSV/JSON files, this script will use the column called 'text' or the first column if no column called
-    # 'text' is found. You can easily tweak this behavior (see below).
-    #
-    # In distributed training, the load_dataset function guarantee that only one local process can concurrently
-    # download the dataset.
-
-    # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
-    # https://huggingface.co/docs/datasets/loading_datasets.
-
-    # Load preprocessed data if path provided
-    if data_args.prepared_data_path is not None:
-        if data_args.validation_split_percentage is not None:
-            logger.warning("Ignoring validation_split_percentage because prepared_data_path is set.")
-        return load_prepared_data(data_args.prepared_data_path)
-
-    if data_args.dataset_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            cache_dir=cache_dir,
-            streaming=data_args.streaming,
-            trust_remote_code=trust_remote_code,
-        )
-        if "validation" not in raw_datasets:
-            if data_args.streaming:
-                dataset_stream = load_dataset(
-                    data_args.dataset_name,
-                    data_args.dataset_config_name,
-                    split="train",
-                    cache_dir=cache_dir,
-                    streaming=data_args.streaming,
-                    trust_remote_code=trust_remote_code,
-                )
-                raw_datasets = split_streaming_dataset(dataset_stream, data_args.validation_split_percentage)
-            else:
-                raw_datasets["validation"] = load_dataset(
-                    data_args.dataset_name,
-                    data_args.dataset_config_name,
-                    split=f"train[:{data_args.validation_split_percentage}%]",
-                    cache_dir=cache_dir,
-                    streaming=data_args.streaming,
-                    trust_remote_code=trust_remote_code,
-                )
-                raw_datasets["train"] = load_dataset(
-                    data_args.dataset_name,
-                    data_args.dataset_config_name,
-                    split=f"train[{data_args.validation_split_percentage}%:]",
-                    cache_dir=cache_dir,
-                    streaming=data_args.streaming,
-                    trust_remote_code=trust_remote_code,
-                )
-    else:
-        data_files = {}
-        dataset_args = {}
-        if data_args.train_file is not None:
-            data_files["train"] = data_args.train_file
-        if data_args.validation_file is not None:
-            data_files["validation"] = data_args.validation_file
-        extension = (
-            data_args.train_file.split(".")[-1]
-            if data_args.train_file is not None
-            else data_args.validation_file.split(".")[-1]
-        )
-        if extension == "txt":
-            extension = "text"
-            dataset_args["keep_linebreaks"] = data_args.keep_linebreaks
-        raw_datasets = load_dataset(
-            extension,
-            data_files=data_files,
-            cache_dir=cache_dir,
-            **dataset_args,
-        )
-        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets:
-            if data_args.streaming:
-                dataset_stream = load_dataset(
-                    extension,
-                    data_files=data_files,
-                    split="train",
-                    cache_dir=cache_dir,
-                    **dataset_args,
-                )
-                raw_datasets = split_streaming_dataset(dataset_stream, data_args.validation_split_percentage)
-            else:
-                raw_datasets["validation"] = load_dataset(
-                    extension,
-                    data_files=data_files,
-                    split=f"train[:{data_args.validation_split_percentage}%]",
-                    cache_dir=cache_dir,
-                    **dataset_args,
-                )
-
-                raw_datasets["train"] = load_dataset(
-                    extension,
-                    data_files=data_files,
-                    split=f"train[{data_args.validation_split_percentage}%:]",
-                    cache_dir=cache_dir,
-                    **dataset_args,
-                )
-
-    if do_train:
-        features = raw_datasets["train"].features
-    else:
-        features = raw_datasets["validation"].features
-
-    # For streaming datasets, features may be None - peek at first example
-    if features is None:
-        dataset = raw_datasets["train"] if do_train else raw_datasets["validation"]
-        first_example = next(iter(dataset))
-        column_names = list(first_example.keys())
-    else:
-        column_names = list(features)
-    text_column_name = "text" if "text" in column_names else column_names[0]
-
-    def process_split(dataset, split_name: str):
-        """Apply mapping and filtering to a dataset split."""
-        template = data_args.dataset_text_template
-        if template is None:
-            def mapping_fn(example):
-                return {"text": extract_text(example, text_column=text_column_name)}
-        else:
-            is_single_text_template = isinstance(template, str)
-            single_text_template = template \
-                if is_single_text_template else "".join(template)
-
-            def mapping_fn(example):
-                if is_single_text_template or split_name == "train":
-                    return {"text": extract_text(example, text_template=single_text_template)}
-
-                prefix = template[0].format(**example)
-                completion = template[1].format(**example)
-                return {
-                    "text": f"{prefix}{completion}",  # Full text for training loss calculation
-                    "prefix": prefix,  # For generation
-                    "completion": completion,  # Reference for metrics
-                }
-
-        map_args = {}
-        if not data_args.streaming:
-            map_args = {
-                "num_proc": data_args.preprocessing_num_workers,
-                "load_from_cache_file": not data_args.overwrite_cache,
-                "desc": f"Formatting {split_name} split",
-            }
-
-        dataset = dataset.map(
-            mapping_fn,
-            remove_columns=column_names,
-            **map_args
-        )
-
-        filter_args = {}
-        if not data_args.streaming:
-            filter_args = {
-                "num_proc": data_args.preprocessing_num_workers,
-                "load_from_cache_file": not data_args.overwrite_cache,
-                "desc": f"Filtering empty examples from {split_name}",
-            }
-        dataset = dataset.filter(
-            lambda x: len(x["text"]) > 0,
-            **filter_args
-        )
-        return dataset
-
-    return {split: process_split(raw_datasets[split], split) for split in raw_datasets}
-
-
-def limit_dataset_size(dataset, max_samples: int | None = None, streaming: bool = False):
-    if max_samples is not None:
-        if streaming:
-            dataset = take_streaming_dataset(dataset, max_samples)
-        elif max_samples < len(dataset):
-            dataset = dataset.select(range(max_samples))
-
-    return dataset
-
-
-def wrap_streaming_dataset(dataset, streaming: bool):
-    if streaming and isinstance(dataset, IterableDataset):
-        return CustomIterableDataset(dataset)
-    return dataset
-
-
-def train(args: list[str] | None | str = None):  # noqa: C901
-    cache_dir = None  # Use the default cache directory / Environment variable
-
-    model_args, data_args, training_args = parse_args_into_dataclasses(args)
-
-    init_logging(training_args)
-
-    # Detecting last checkpoint.
-    last_checkpoint = detect_last_checkpoint(training_args)
-
-    # Initialize the model
-    model, processor, collator = init_model(model_args, data_args, seed=training_args.seed)
-
-    if data_args.max_sequence_length is not None:
-        processor.max_seq_length = data_args.max_sequence_length
-
-    # Save the processor to the output directory
-    processor.save_pretrained(save_directory=training_args.output_dir, push_to_hub=False)
-
-    # Load the datasets
-    text_datasets = init_datasets(data_args,
-                                  cache_dir=cache_dir,
-                                  trust_remote_code=model_args.trust_remote_code,
-                                  do_train=training_args.do_train)
-
-    # Drop columns not needed for training (e.g. "language" from prepared data)
-    keep_cols = {"text", "prefix", "completion"}
-    for split in list(text_datasets):
-        col_names = text_datasets[split].column_names
-        if col_names is None:
-            continue
-        extra_cols = [c for c in col_names if c not in keep_cols]
-        if extra_cols:
-            text_datasets[split] = text_datasets[split].remove_columns(extra_cols)
-
-    train_dataset = None
-    if training_args.do_train:
-        if "train" not in text_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = limit_dataset_size(text_datasets["train"],
-                                           max_samples=data_args.max_train_samples,
-                                           streaming=data_args.streaming)
-
-    eval_dataset = None
-    if training_args.do_eval:
-        if "validation" not in text_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = limit_dataset_size(text_datasets["validation"],
-                                          max_samples=data_args.max_eval_samples,
-                                          streaming=data_args.streaming)
-
-    # Sequence packing
-    block_size = min(data_args.block_size or math.inf, processor.max_seq_length)
-
-    def pretokenize_and_pack(dataset):
-        # Strip columns that can't survive packing (scalar strings from generation templates).
-        # Packing concatenates documents, destroying per-document prefix/completion boundaries.
-        col_names = dataset.column_names if hasattr(dataset, "column_names") else None
-        if col_names:
-            drop = [c for c in col_names if c not in {"text", "words"}]
-            if drop:
-                dataset = dataset.remove_columns(drop)
-
-        dataset = processor.pretokenize_dataset(dataset, num_proc=data_args.preprocessing_num_workers)
-        dataset = pack_dataset(dataset, seq_length=block_size)
-
-        # Pad to fixed length for CUDA kernel caching (consistent tensor shapes)
-        def pad_to_fixed_length(example):
-            words = example["words"]
-            seq_lengths = example["seq_lengths"]
-            current_length = len(words)
-            if current_length < block_size:
-                pad_count = block_size - current_length
-                example["words"] = words + ["\x00"] * pad_count  # Null strings as padding
-                example["seq_lengths"] = seq_lengths + [1] * pad_count  # Each padding is a separate "sequence"
-            return example
-
-        return dataset.map(pad_to_fixed_length, batched=False)
-
-    if train_dataset:
-        train_dataset = pretokenize_and_pack(train_dataset)
-    if eval_dataset and data_args.pack_eval_dataset:
-        # Validate: packed eval is incompatible with generation metrics
-        eval_cols = getattr(eval_dataset, "column_names", None) or []
-        has_generation_cols = "prefix" in eval_cols or "completion" in eval_cols
-        has_generation_metrics = bool(training_args.eval_metrics) if hasattr(training_args, "eval_metrics") else False
-        if has_generation_cols or has_generation_metrics:
-            raise ValueError(
-                "pack_eval_dataset=True is incompatible with generation-based evaluation. "
-                "Packing concatenates documents, destroying per-document prefix/completion boundaries. "
-                "Either disable pack_eval_dataset or remove eval_metrics and the two-part dataset_text_template."
-            )
-        eval_dataset = pretokenize_and_pack(eval_dataset)
-
-    # Wrap streaming datasets with CustomIterableDataset to support with_transform
-    if train_dataset:
-        train_dataset = wrap_streaming_dataset(train_dataset, data_args.streaming)
-    if eval_dataset:
-        eval_dataset = wrap_streaming_dataset(eval_dataset, data_args.streaming)
-
-    # Transform the datasets to the format expected by the model
-    if train_dataset:
-        train_dataset = train_dataset.with_transform(processor)
-    if eval_dataset:
-        eval_dataset = eval_dataset.with_transform(processor)
-
-    # Initialize our Trainer
-    # Note: WeLTTrainer computes accuracy and generation-based metrics internally
-    trainer = WeLTTrainer(
-        model=model,
-        args=training_args,
-        processor=processor,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        data_collator=collator,
-        # Generation-based evaluation settings from training args
-        eval_metrics=training_args.eval_metrics if training_args.do_eval else None,
-        max_generated_words=training_args.generation_max_length or 50,
-        log_samples=training_args.log_samples,
-    )
-
-    # Freeze the pretrained models for some steps
-    trainer.add_callback(FreezeWarmupCallback(steps=model_args.warmup_freeze_steps, model=model))
-
-    # Add FLOPS profiling callback if enabled
-    if training_args.profile_flops:
-        trainer.add_callback(FlopsCallback(
-            profile_steps=training_args.flops_profile_steps,
-            warmup_steps=training_args.flops_warmup_steps,
-            active_steps=training_args.flops_active_steps,
-        ))
-
-    # Training
-    if training_args.do_train:
-        checkpoint = None
-        if training_args.resume_from_checkpoint is not None:
-            checkpoint = training_args.resume_from_checkpoint
-        elif last_checkpoint is not None:
-            checkpoint = last_checkpoint
-        train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()
-
-        metrics = train_result.metrics
-
-        if data_args.max_train_samples is not None:
-            max_train_samples = data_args.max_train_samples
-        elif data_args.streaming:
-            max_train_samples = 0 # TODO: figure out a better way to get the length of streaming dataset
-        else:
-            max_train_samples = len(train_dataset)
-
-        if data_args.streaming:
-            metrics["train_samples"] = max_train_samples
-        else:
-            metrics["train_samples"] = min(max_train_samples, len(train_dataset))
-
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
-        trainer.save_state()
-
-    # Evaluation
-    if training_args.do_eval:
-        logger.info("*** Evaluate ***")
-
-        metrics = trainer.evaluate()
-
-        max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
-        if data_args.streaming:
-            metrics["eval_samples"] = max_eval_samples
-        else:
-            metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-
-        try:
-            perplexity = math.exp(metrics["eval_loss"])
-        except OverflowError:
-            perplexity = float("inf")
-        metrics["perplexity"] = perplexity
-
-        trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
-
-    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "text-generation"}
-    if data_args.dataset_name is not None:
-        kwargs["dataset_tags"] = data_args.dataset_name
-        if data_args.dataset_config_name is not None:
-            kwargs["dataset_args"] = data_args.dataset_config_name
-            kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
-        else:
-            kwargs["dataset"] = data_args.dataset_name
-
-    if training_args.push_to_hub:
-        trainer.push_to_hub(**kwargs)
-    else:
-        trainer.create_model_card(**kwargs)
+def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor):
+    """Per-byte cross entropy, plus bits-per-byte (without EOS) and byte/word accuracy for logging."""
+    loss_mask = labels != TOKENIZER.pad_token_id
+    content_mask = loss_mask & (labels != TOKENIZER.eos_token_id)
+    losses = losses.float()
+
+    loss = (losses * loss_mask).sum()
+    num_tokens = loss_mask.sum().int()
+    get_rerun_state_machine().validate_result(result=loss, rejection_func=torch.isnan,
+                                              message="found NaN in local forward loss calculation",
+                                              tolerance=0.0, fatal=True)
+
+    def report(value, count):
+        return torch.stack([value.detach().float(), count.float()])
+
+    words = loss_mask.any(dim=-1)
+    words_correct = (correct | ~loss_mask).all(dim=-1) & words
+    return loss, num_tokens, {
+        "lm loss": report(loss, num_tokens),
+        "bits per byte": report((losses * content_mask).sum() / math.log(2), content_mask.sum()),
+        "byte accuracy": report((correct & loss_mask).sum(), num_tokens),
+        "word accuracy": report(words_correct.sum(), words.sum()),
+    }
+
+
+def forward_step(state, data_iterator, model, return_schedule_plan: bool = False):
+    batch = {key: value.cuda(non_blocking=True) for key, value in next(data_iterator).items()}
+    losses, correct, labels = model(**batch)
+    return losses, partial(loss_func, correct=correct, labels=labels)
+
+
+def train(args: list[str] | None = None):
+    args = sys.argv[1:] if args is None else args
+    config_path, overrides = args[0], args[1:]
+    config = load_yaml(config_path, overrides)
+    cfg = build_config(config)
+
+    output_dir = config.get("output_dir", "./output")
+    if int(os.environ.get("RANK", 0)) == 0:
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, CONFIG_FILE_NAME), "w") as f:
+            yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
+        cfg.dataset.processor().save_pretrained(os.path.join(output_dir, "processor"))
+
+    pretrain(config=cfg, forward_step_func=forward_step)
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
 
 
 if __name__ == "__main__":

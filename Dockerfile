@@ -1,25 +1,22 @@
-FROM nvcr.io/nvidia/pytorch:26.01-py3
+FROM nvcr.io/nvidia/nemo:26.08.01
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# System deps (git for installs; build-essential for compiling kernels; tidy apt cache)
 # Rendering system deps (pango, cairo...)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential pkg-config \
+    apt-get install -y --no-install-recommends pkg-config \
       libgirepository-1.0-1 libcairo2 gir1.2-pango-1.0 libcairo2-dev libgirepository1.0-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Install package dependencies
-RUN mkdir -p /app/welt/vision && \
-    mkdir -p /app/welt_training && \
-    touch /app/README.md
+# Install package dependencies (Megatron-Bridge, vLLM, torch and transformers come with the base image)
+RUN mkdir -p /app/welt /app/welt_training && touch /app/README.md
 WORKDIR /app
 COPY pyproject.toml /app/pyproject.toml
-RUN pip install ".[train]"
+RUN pip install ".[dev]"
 
 COPY welt /app/welt
 COPY welt_training /app/welt_training
 
-CMD accelerate launch --mixed_precision bf16 -m welt_training.train $CONFIG
+CMD torchrun --nproc_per_node=${NPROC_PER_NODE:-1} -m welt_training.train $CONFIG

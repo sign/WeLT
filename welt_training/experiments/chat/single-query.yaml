@@ -1,70 +1,40 @@
-# Model Setup
-image_encoder_model_name_or_path: null
-bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
-latent_transformer_model_name_or_path: PleIAs/Monad
-bytes_decoder_model_name_or_path: sign/utf8-lm-tiny
+output_dir: ./output/monad-chat
 
-# pretrained weights
-load_pretrained: true
-warmup_freeze_steps: 10 # Freeze for a handful of steps to stabilize training
+model:
+  bytes_encoder: sign/utf8-lm-tiny
+  latent_transformer: PleIAs/Monad
+  bytes_decoder: sign/utf8-lm-tiny
+  load_pretrained: true
 
-# Dataset setup
-dataset_name: PleIAs/SYNTH
-streaming: true # dataset is large
-dataset_text_template: # Following the chat format from the "Back to bytes" paper
-  - "\x01user\x0E{query}\x0F\x17"
-  - "\x01assistant\x05{synthetic_reasoning}\x06{synthetic_answer}\x17"
-max_sequence_length: 1024
-max_word_length: 16 # 14 bytes + BOS + EOS
+data:
+  dataset_name: PleIAs/SYNTH
+  streaming: true  # dataset is large
+  max_train_samples: 1000000
+  max_eval_samples: 64
+  dataset_text_template:  # Following the chat format from the "Back to bytes" paper
+    - "\x01user\x0E{query}\x0F\x17"
+    - "\x01assistant\x05{synthetic_reasoning}\x06{synthetic_answer}\x17"
+  seq_length: 1024
+  max_word_length: 16  # 14 bytes + BOS + EOS
+  num_workers: 8
 
-# Data Loader
-dataloader_num_workers: 1 # streaming datasets work with maximum num shards of workers
-dataloader_prefetch_factor: 4
-dataloader_pin_memory: true
-dataloader_persistent_workers: true
+train:
+  train_iters: 10000
+  micro_batch_size: 32
+  global_batch_size: 32
 
-# Training setup
-remove_unused_columns: false # Necessary
-per_device_train_batch_size: 32
-per_device_eval_batch_size: 32
-auto_find_batch_size: true
-output_dir: ./output/monad-chat-dion-lr3
-overwrite_output_dir: true
-do_train: true
+optimizer:
+  lr: 1.0e-3
+  min_lr: 1.0e-4
+  weight_decay: 0.01
 
-# Optimizer setup
-optim: dion
-weight_decay: 0.01
-max_steps: 10000
-#warmup_ratio: 0.05
-learning_rate: 0.005
-lr_scheduler_type: constant
+scheduler:
+  lr_warmup_iters: 500
 
-# Evaluation
-do_eval: true
-eval_on_start: true
-eval_strategy: steps
-eval_steps: 1000
-metric_for_best_model: chrf  # Using generation-based metric
-eval_metrics: [sacrebleu, chrf]  # Generation-based evaluation metrics
-predict_with_generate: true
-generation_max_length: 50  # Max tokens/words to generate during evaluation
-max_eval_samples: 8
-log_samples: 5  # Number of sample predictions to log
+validation:
+  eval_interval: 1000
+  eval_iters: 2
 
-# Logging
-logging_steps: 10
-logging_strategy: steps
-include_tokens_per_second: true
-include_num_input_tokens_seen: true
-report_to: wandb
-
-## FLOPS profiling
-#profile_flops: true
-#flops_profile_steps: 500
-#flops_warmup_steps: 10
-#flops_active_steps: 10
-
-# Dtype
-bf16: true
-dtype: bfloat16
+logger:
+  log_interval: 10
+  wandb_project: welt-chat

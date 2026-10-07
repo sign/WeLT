@@ -7,14 +7,13 @@ authors = [
 ]
 readme = "README.md"
 requires-python = ">=3.10"
+# Megatron-Bridge, Megatron-Core, Transformer Engine, vLLM, torch and transformers come from the
+# NeMo container (nvcr.io/nvidia/nemo:26.08.01), see the Dockerfile.
 dependencies = [
-    "transformers[torch]>=4.57,<5",
-    "trl", # For huggingface implementation of pack_dataset
     "datasets",
-    "Pillow", # For AutoImageProcessor
-    "torchvision", # For use_fast=True
+    "pyyaml",
     "cachetools", # For LRU cache in processor
-    "vit-pytorch", # For NaViT model implementation
+    "sacrebleu", # For generation evaluation metrics
     # Our packages
     "words-segmentation>=0.0.5", # For pre-tokenization into words
     "utf8-tokenizer[fast]>=0.8.2", # For tokenization of bytes
@@ -25,30 +24,11 @@ dependencies = [
 dev = [
     "ruff",
     "pytest",
-    "pytest-xdist", # For parallel test execution
-]
-
-train = [
-    "hf_transfer", # For HF_HUB_ENABLE_HF_TRANSFER
-    "accelerate", # For distributed training
-    "datasets", # For dataset loading and processing
-    "evaluate", # For evaluation metrics
-    "scikit-learn", # For "accuracy" metric in evaluate
-    "sacrebleu", # For usual bleu/chrF metrics
-    # For "sign/signwriting_similarity" metric
-    "signwriting-evaluation @ git+https://github.com/sign-language-processing/signwriting-evaluation.git",
-    "wandb", # For experiment tracking
-    "zstandard", # For compressing the data
-]
-
-dion = [
-    "dion @ git+https://github.com/microsoft/dion.git", # For Dion2 optimizer
 ]
 
 [tool.setuptools]
 packages = [
     "welt",
-    "welt.vision",
     "welt_training",
 ]
 
@@ -77,11 +57,12 @@ select = [
 markers = ["integration: tests requiring external pretrained assets"]
 addopts = "-v"
 testpaths = [
-    "welt",
     "tests",
 ]
 
 [project.scripts]
 welt-train = "welt_training.train:train"
+welt-export = "welt.export:main"
+welt-generate = "welt.inference:main"
 welt-prepare-data = "welt_training.prepare_data:main"
 welt-verify-data = "welt_training.verify_data:main"
