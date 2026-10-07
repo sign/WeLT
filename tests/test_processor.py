@@ -12,7 +12,7 @@ from welt.processor import TextImageProcessor
 
 
 def pack_dataset(dataset, seq_length):
-    from welt_training.data import pack_words
+    from welt_training.data_utils import pack_words
     return dataset.map(pack_words, batched=True, remove_columns=dataset.column_names,
                        fn_kwargs={"seq_length": seq_length})
 

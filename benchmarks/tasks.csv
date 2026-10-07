@@ -1,0 +1,3 @@
+task,train_iters,ms_per_step,val_loss,val_byte_accuracy,val_word_accuracy,gen_exact_match,gen_chrf,gen_words_per_second
+string-repetition,1500,116.2,0.0106,0.9977,0.9900,0.8633,96.60,990.2
+ocr,3000,94.7,0.0593,0.9853,0.9633,0.5938,89.26,828.9

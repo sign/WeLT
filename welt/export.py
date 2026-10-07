@@ -92,7 +92,7 @@ def export(checkpoint: str, output: str):
     else:
         run_dir = os.path.dirname(run_dir)
 
-    from welt_training.train import CONFIG_FILE_NAME, load_yaml
+    from welt_training.extendable_yaml import CONFIG_FILE_NAME, load_yaml
     config = load_yaml(os.path.join(run_dir, CONFIG_FILE_NAME))
 
     model = load_megatron_model(checkpoint, skip_temp_dist_context=True)

@@ -64,6 +64,7 @@ testpaths = [
 welt-train = "welt_training.train:train"
 welt-export = "welt.export:main"
 welt-generate = "welt.inference:main"
+welt-evaluate = "welt_training.evaluate:main"
 welt-prepare-data = "welt_training.prepare_data:main"
 welt-verify-data = "welt_training.verify_data:main"
 

@@ -11,16 +11,19 @@ Each generation step runs, for all active prompts at once:
 import argparse
 import os
 
-import torch
-from safetensors.torch import load_file
-from torch import nn
-from vllm import LLM, PoolingParams, SamplingParams
-from vllm.config import PoolerConfig
-from words_segmentation.pretokenizer import is_word_complete
+# Engine processes are spawned, not forked: forking after CUDA / Megatron imports is unsafe
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-from welt.attention import get_shift_blocks
-from welt.processor import PATCH_SIZE, TextImageProcessor
-from welt.vllm_plugin import RANGES_KEY
+import torch  # noqa: E402
+from safetensors.torch import load_file  # noqa: E402
+from torch import nn  # noqa: E402
+from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
+from vllm.config import PoolerConfig  # noqa: E402
+from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
+
+from welt.attention import get_shift_blocks  # noqa: E402
+from welt.processor import PATCH_SIZE, TextImageProcessor  # noqa: E402
+from welt.vllm_plugin import RANGES_KEY  # noqa: E402
 
 PATCH_DIM = PATCH_SIZE * PATCH_SIZE * 3
 

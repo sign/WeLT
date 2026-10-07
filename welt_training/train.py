@@ -32,24 +32,9 @@ from utf8_tokenizer.tokenizer import UTF8Tokenizer
 
 from welt.model import WeLTModelProvider
 from welt_training.data import WeLTDatasetProvider
-from welt_training.extendable_yaml import resolve_yaml_file
+from welt_training.extendable_yaml import CONFIG_FILE_NAME, load_yaml
 
-CONFIG_FILE_NAME = "welt.yaml"
 TOKENIZER = UTF8Tokenizer()
-
-
-def load_yaml(path: str, overrides: list[str] = ()) -> dict:
-    """Load a YAML config (supporting `$extends`), applying `section.key=value` overrides."""
-    with open(resolve_yaml_file(os.path.abspath(path))) as f:
-        config = yaml.safe_load(f)
-    for override in overrides:
-        key, value = override.split("=", 1)
-        *sections, name = key.split(".")
-        target = config
-        for section in sections:
-            target = target.setdefault(section, {})
-        target[name] = yaml.safe_load(value)
-    return config
 
 
 def build_model_provider(model: dict, data: dict) -> WeLTModelProvider:

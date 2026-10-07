@@ -139,3 +139,20 @@ def resolve_yaml_file(yaml_path: str | Path) -> str:
         return temp_file.name
     finally:
         temp_file.close()
+
+
+CONFIG_FILE_NAME = "welt.yaml"  # The training config, saved with runs and exports
+
+
+def load_yaml(path: str, overrides: list[str] = ()) -> dict:
+    """Load a YAML config (supporting `$extends`), applying `section.key=value` overrides."""
+    with open(resolve_yaml_file(os.path.abspath(path))) as f:
+        config = yaml.safe_load(f)
+    for override in overrides:
+        key, value = override.split("=", 1)
+        *sections, name = key.split(".")
+        target = config
+        for section in sections:
+            target = target.setdefault(section, {})
+        target[name] = yaml.safe_load(value)
+    return config

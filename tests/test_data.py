@@ -1,6 +1,7 @@
 from datasets import Dataset
 
-from welt_training.data import PAD_WORD, WeLTDatasetProvider, WordsDataset, load_text_datasets, pack_words
+from welt_training.data import WeLTDatasetProvider, WordsDataset
+from welt_training.data_utils import PAD_WORD, load_text_datasets, pack_words
 
 
 def test_pack_words_fills_blocks_and_pads():
