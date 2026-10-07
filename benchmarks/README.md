@@ -104,3 +104,7 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 172 | 29 min | 0.626 | 64.8% | 5.9% | 41.0 | 441 |
 
 Generation is greedy, on 256 validation examples, with vLLM (batched over all examples).
+
+The causal LM [baseline](../welt_training/experiments/machine-translation/baseline.yaml) (the same 6-layer 512-wide
+transformer over Pythia BPE tokens, same data and batch size, 10000 steps) reaches **1.016** validation bits per byte
+at 729 ms / step, vs. **0.626** for WeLT at 172 ms / step.
