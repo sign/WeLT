@@ -18,14 +18,12 @@ import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402, N812
 from cachetools import LRUCache  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402
-from transformers import AutoConfig  # noqa: E402
 from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
 from vllm.config import PoolerConfig  # noqa: E402
 from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
 from welt.attention import get_shift_blocks  # noqa: E402
 from welt.processor import TextImageProcessor  # noqa: E402
-from welt.vision import HFImageEncoder, is_vision_model  # noqa: E402
 from welt.vllm_plugin import RANGES_KEY, restore_opentelemetry_context  # noqa: E402
 
 
@@ -42,12 +40,9 @@ class WeLTGenerator:
         engine = dict(kv_cache_memory_bytes=int(kv_cache_gib * 2**30), gpu_memory_utilization=0.05, dtype="bfloat16")
         encoder = dict(runner="pooling", convert="embed", **engine,
                        pooler_config=PoolerConfig(seq_pooling_type="CLS", use_activation=False))
-        self.vision = None  # A HF vision backbone, which vLLM does not serve on its own
         self.image_encoder = self.bytes_encoder = None
         image_path, bytes_path = os.path.join(path, "image_encoder"), os.path.join(path, "bytes_encoder")
-        if os.path.isdir(image_path) and is_vision_model(AutoConfig.from_pretrained(image_path)):
-            self.vision = HFImageEncoder(image_path, pretrained=True).to(device, torch.bfloat16).eval()
-        elif os.path.isdir(image_path):
+        if os.path.isdir(image_path):
             self.image_encoder = LLM(image_path, enable_prompt_embeds=True, **encoder)
         if os.path.isdir(bytes_path):
             self.bytes_encoder = LLM(bytes_path, max_model_len=self.processor.max_word_length, **encoder)
@@ -84,18 +79,15 @@ class WeLTGenerator:
             return
         params = PoolingParams(use_activation=False)
         embeds = []
-        if self.vision is not None or self.image_encoder is not None:
+        if self.image_encoder is not None:
             patches, shapes = self.processor.render_texts(words)
             patches = patches.to(self.device)
-            if self.vision is not None:
-                embeds.append(self.vision(patches, shapes.to(self.device)).float().cpu())
-            else:
-                prompts = []
-                for word_patches, count in zip(patches, shapes.prod(dim=-1), strict=True):
-                    projected = self._linear(word_patches[:count] / 127.5 - 1, "image_encoder.embed.proj")
-                    cls = self.weights["image_encoder.embed.cls"]
-                    prompts.append({"prompt_embeds": torch.cat([cls[None], projected]).cpu()})
-                embeds.append(self._pooled(self.image_encoder, prompts, params))
+            prompts = []
+            for word_patches, count in zip(patches, shapes.prod(dim=-1), strict=True):
+                projected = self._linear(word_patches[:count] / 127.5 - 1, "image_encoder.embed.proj")
+                cls = self.weights["image_encoder.embed.cls"]
+                prompts.append({"prompt_embeds": torch.cat([cls[None], projected]).cpu()})
+            embeds.append(self._pooled(self.image_encoder, prompts, params))
         if self.bytes_encoder is not None:
             tokenized = self.processor.tokenize_words(words)
             prompts = [{"prompt_token_ids": ids[mask.bool()].tolist()}

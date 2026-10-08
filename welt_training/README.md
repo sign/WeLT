@@ -15,7 +15,7 @@ output_dir: ./output/string-repetition-tiny  # welt.yaml, processor/, checkpoint
 
 model:
   bytes_encoder: sign/utf8-lm-tiny        # HF model id/path, a JSON HF config, or null
-  image_encoder: null                     # A JSON HF config (patch transformer), a HF vision backbone, or null
+  image_encoder: null                     # A HF model id/path or JSON config (patch transformer), or null
   latent_transformer: sbintuitions/tiny-lm
   bytes_decoder: sign/utf8-lm-tiny
   load_pretrained: true                   # Initialize id/path transformers from their HF weights
@@ -68,11 +68,9 @@ step, rescaling the other), `tensor_model_parallel_size`, `sequence_parallel`, o
 Parallelism, precision and recomputation settings are shared with the other transformers
 (`SHARED_CONFIG_FIELDS`); other fields, e.g. `hidden_dropout`, only apply to the latent transformer.
 
-Image encoders:
-- **Patch transformer**: a causal LM config or model (e.g. [`models/image-encoder-tiny.json`](experiments/models/image-encoder-tiny.json)),
-  used bidirectionally over the 16x16 patches of each word, built by Megatron. See [`ocr.yaml`](experiments/easy-tasks/ocr.yaml).
-- **HF vision backbone** (ViT, DeiT, DINOv2, CLIP, SigLIP, ...: any config with a `patch_size`), run with
-  transformers, pretrained with `load_pretrained: true`. See [`ocr-vit.yaml`](experiments/easy-tasks/ocr-vit.yaml).
+The image encoder is a causal LM architecture (e.g. [`models/image-encoder-tiny.json`](experiments/models/image-encoder-tiny.json)),
+used bidirectionally over the 16x16 patches of each rendered word, with a CLS. With `load_pretrained: true` and a
+HF model id, it starts from that LM's transformer weights. See [`ocr.yaml`](experiments/easy-tasks/ocr.yaml).
 
 ### Data
 

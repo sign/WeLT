@@ -1,7 +1,0 @@
-# OCR with a pretrained HF vision backbone as the image encoder (any ViT / DINOv2 / CLIP / SigLIP works)
-$extends: ./ocr.yaml
-
-output_dir: ./output/ocr-vit
-
-model:
-  image_encoder: WinKawaks/vit-tiny-patch16-224

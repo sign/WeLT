@@ -5,7 +5,7 @@ import torch.nn.functional as F  # noqa: N812
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
 from tests.conftest import build_model  # noqa: E402
-from welt.model import PackedAttention, WeLTModelProvider  # noqa: E402
+from welt.model import PackedAttention  # noqa: E402
 from welt.processor import TextImageProcessor  # noqa: E402
 
 
@@ -124,36 +124,6 @@ def test_masked_attention_matches_sdpa(megatron):
     out = attention(query, key, value, attention_mask=~allowed)
     expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
     torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
-
-
-def test_hf_image_encoder_matches_full_images(megatron):
-    """Word images, rebuilt from processor patches, give the backbone's own output for each image."""
-    from welt.vision import HFImageEncoder, unpatchify
-
-    processor = TextImageProcessor.create(max_word_length=16, render_images=True)
-    encoder = HFImageEncoder("WinKawaks/vit-tiny-patch16-224", pretrained=True).cuda().eval()
-    words = ["hello ", "a ", "world"]
-    patches, shapes = processor.render_texts(words)
-    with torch.no_grad():
-        embeds = encoder(patches.cuda(), shapes.cuda())
-        for i, word in enumerate(words):
-            image = torch.from_numpy(processor.renderer.render_text(word)).permute(2, 0, 1)[None].cuda()
-            torch.testing.assert_close(unpatchify(patches[i:i + 1].cuda(), *shapes[i].tolist()), image)
-            pixels = (image.float() / 255 - encoder.mean) / encoder.std
-            expected = encoder.model(pixel_values=pixels, interpolate_pos_encoding=True).pooler_output
-            torch.testing.assert_close(embeds[i:i + 1], expected, atol=1e-2, rtol=1e-2)  # batched vs. single (TF32)
-
-
-def test_pretrained_vision_image_encoder(megatron, tiny_config, processor):
-    provider = WeLTModelProvider.from_hf(latent_transformer=tiny_config, bytes_decoder=tiny_config,
-                                         image_encoder="WinKawaks/vit-tiny-patch16-224", load_pretrained=True)
-    provider.bf16 = True
-    provider.seq_length = 64
-    provider.gradient_accumulation_fusion = False
-    provider.finalize()
-    model = provider.provide().cuda().bfloat16().eval()
-    assert type(model.image_encoder).__name__ == "HFImageEncoder"
-    assert torch.isfinite(word_losses(model, processor, ["hello world, how are you?"])).all()
 
 
 def test_checkpoint_shards_every_transformer(megatron, tiny_config):

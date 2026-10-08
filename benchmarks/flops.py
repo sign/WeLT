@@ -17,8 +17,7 @@ from welt_training.train import build_dataset_provider
 
 
 def matmul_params(config) -> tuple[int, int, int]:
-    """(params in matmuls per token, layers, attention width) of a transformer config (Llama-like or ViT-like)."""
-    config = getattr(config, "vision_config", config)
+    """(params in matmuls per token, layers, attention width) of a transformer config (Llama-like)."""
     hidden, layers = config.hidden_size, config.num_hidden_layers
     head_dim = getattr(config, "head_dim", None) or hidden // config.num_attention_heads
     kv = getattr(config, "num_key_value_heads", config.num_attention_heads) * head_dim

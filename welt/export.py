@@ -5,8 +5,7 @@ Export a WeLT Megatron checkpoint for inference with vLLM.
 
 Writes a HuggingFace model directory per transformer, in its original architecture (e.g. Llama or Qwen3),
 which vLLM serves:
-- bytes_encoder/, image_encoder/: bidirectional (is_causal: false), served with CLS pooling,
-  or for HF vision backbones, image_encoder/ in their own format (run with transformers)
+- bytes_encoder/, image_encoder/: bidirectional (is_causal: false), served with CLS pooling
 - latent_transformer/: causal, served with last token pooling, bidirectional shift blocks (is_mm_prefix_lm)
 - bytes_decoder/: causal LM over bytes
 and `welt.safetensors` with the remaining (small) layers, plus the processor.
@@ -21,7 +20,6 @@ from megatron.bridge.training.model_load_save import load_megatron_model
 from safetensors.torch import save_file
 
 from welt.model import WeLTModel, hf_config
-from welt.vision import HFImageEncoder
 
 TRANSFORMERS = {  # Config key in welt.yaml: the GPTModel in WeLTModel
     "bytes_encoder": "bytes_encoder.transformer",
@@ -100,7 +98,7 @@ def export(checkpoint: str, output: str):
     model = load_model(checkpoint)
 
     os.makedirs(output, exist_ok=True)
-    transformer_prefixes = (*(path + "." for path in TRANSFORMERS.values()), "image_encoder.model.")
+    transformer_prefixes = tuple(path + "." for path in TRANSFORMERS.values())
     others = {k: v for k, v in model.state_dict().items()
               if not k.startswith(transformer_prefixes) and isinstance(v, torch.Tensor) and "_extra_state" not in k}
     others["decoder_prompt_embeddings"] = model.bytes_decoder_embedding.folded_weight()  # Prompts are embeddings
@@ -108,9 +106,7 @@ def export(checkpoint: str, output: str):
               os.path.join(output, "welt.safetensors"))
 
     for name in TRANSFORMERS:
-        if isinstance(getattr(model, name, None), HFImageEncoder):
-            model.image_encoder.save_pretrained(os.path.join(output, name), config["model"][name])
-        elif config["model"].get(name):
+        if config["model"].get(name):
             _save_transformer(model, name, config["model"], os.path.join(output, name),
                               config["model"].get("trust_remote_code", False))
 

@@ -4,7 +4,6 @@ WeLT on Megatron-Core.
 Up to four Megatron GPT transformers, built (and optionally initialized from HF checkpoints) by Megatron-Bridge:
 - bytes encoder: bidirectional transformer over the bytes of each word, BOS output is the word embedding
 - image encoder: bidirectional transformer over 16x16 patches of each rendered word, CLS output is the word embedding
-  (or a HF vision backbone, see welt/vision.py)
 - latent transformer: causal transformer over word embeddings (packed sequences, prefix-LM shift blocks)
 - bytes decoder: causal transformer generating each word's bytes from the latent vector of the previous word
 
@@ -31,8 +30,6 @@ from megatron.core.transformer.module import MegatronModule
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 from transformers import AutoConfig
-
-from welt.vision import HFImageEncoder, is_vision_model
 
 PATCH_DIM = 16 * 16 * 3
 
@@ -102,9 +99,6 @@ class WeLTModelProvider(GPTModelProvider):
     bytes_decoder: GPTModelProvider | None = None
 
     # HF checkpoints to initialize each transformer from (None = random init)
-    # A HF vision backbone (e.g. "facebook/dinov2-small") as image encoder, instead of a patch transformer
-    image_encoder_vision: str | None = None
-    trust_remote_code: bool = False
     bytes_encoder_hf_path: str | None = None
     image_encoder_hf_path: str | None = None
     latent_transformer_hf_path: str | None = None
@@ -126,14 +120,10 @@ class WeLTModelProvider(GPTModelProvider):
         def pretrained(name):
             return name if load_pretrained and name and not name.endswith(".json") else None
 
-        is_vision = image_encoder and is_vision_model(hf_config(image_encoder, trust_remote_code))
-        vision = image_encoder if is_vision else None
         latent = provider(latent_transformer)
         fields = {f.name: getattr(latent, f.name) for f in dataclasses.fields(GPTModelProvider) if f.init}
         return cls(**fields | dict(bytes_encoder=provider(bytes_encoder),
-                                   image_encoder=None if vision else provider(image_encoder),
-                                   image_encoder_vision=vision,
-                                   trust_remote_code=trust_remote_code,
+                                   image_encoder=provider(image_encoder),
                                    bytes_decoder=provider(bytes_decoder),
                                    bytes_encoder_hf_path=pretrained(bytes_encoder),
                                    image_encoder_hf_path=pretrained(image_encoder),
@@ -372,9 +362,6 @@ class WeLTModel(MegatronModule):
         self.image_encoder = None
         if config.image_encoder is not None:
             self.image_encoder = PatchImageEncoder(config.image_encoder, config.image_encoder_hf_path)
-        elif config.image_encoder_vision is not None:
-            pretrained = config.image_encoder_hf_path is not None and config.perform_initialization
-            self.image_encoder = HFImageEncoder(config.image_encoder_vision, pretrained, config.trust_remote_code)
 
         self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path, "arbitrary")
 

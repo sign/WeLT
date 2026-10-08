@@ -99,7 +99,6 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 |------|------:|----------:|-----------:|-----------------:|---------------:|-----------------:|----------:|---------------:|
 | **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 50 | 1.3 min | 0.017 | 99.2% | 93.4% | 98.5 | 776 |
 | **ocr**: write a sentence seen only as rendered word images | 3000 | 62 | 3.1 min | 0.038 | 97.7% | 80.5% | 95.4 | 867 |
-| **ocr-vit**: the same, with a pretrained ViT-Tiny image encoder | 3000 | 105 | 5.2 min | 0.025 | 98.6% | 84.0% | 96.7 | 894 |
 | **letter-count**: count the letters of a word (Muon) | 3000 | 67 | 3.4 min | 0.0001 | 100% | 99.2% | 99.7 | 1336 |
 | **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 172 | 29 min | 0.626 | 64.8% | 5.9% | 41.0 | 441 |
 
