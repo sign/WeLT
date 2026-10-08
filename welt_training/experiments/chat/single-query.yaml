@@ -20,14 +20,11 @@ data:
 
 train:
   train_iters: 10000
-  micro_batch_size: 32
-  global_batch_size: 32
 
 optimizer:
   optimizer: muon
   lr: 1.0e-3
   min_lr: 1.0e-4
-  weight_decay: 0.01
 
 scheduler:
   lr_warmup_iters: 500
@@ -37,5 +34,4 @@ validation:
   eval_iters: 2
 
 logger:
-  log_interval: 10
   wandb_project: welt-chat

@@ -10,7 +10,6 @@ data:
   max_train_samples: 2000
   max_eval_samples: 16
   seq_length: 128
-  max_word_length: 32
 
 train:
   train_iters: 100

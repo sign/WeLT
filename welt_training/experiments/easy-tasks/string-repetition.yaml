@@ -2,7 +2,6 @@ output_dir: ./output/string-repetition-tiny
 
 model:
   bytes_encoder: sign/utf8-lm-tiny  # Pretrained byte-level LM, used bidirectionally
-  image_encoder: null
   latent_transformer: sbintuitions/tiny-lm
   bytes_decoder: sign/utf8-lm-tiny
   load_pretrained: true
@@ -20,8 +19,6 @@ data:
 
 train:
   train_iters: 10000
-  micro_batch_size: 32
-  global_batch_size: 32
 
 optimizer:
   lr: 6.0e-4
@@ -35,9 +32,5 @@ validation:
   eval_interval: 100
   eval_iters: 1
 
-checkpoint:
-  save_interval: 1000
-
 logger:
-  log_interval: 10
   wandb_project: string-repetition

@@ -1,7 +1,9 @@
+from types import SimpleNamespace
+
 import pytest
 from datasets import Dataset
 
-from welt_training.data_utils import PAD_WORD, TextDataConfig, load_text_datasets, pack_words
+from welt_training.data_utils import PAD_WORD, TextDataConfig, dataset_lengths, load_text_datasets, pack_words
 
 
 def test_pack_words_fills_blocks_and_pads():
@@ -10,17 +12,24 @@ def test_pack_words_fills_blocks_and_pads():
     assert packed["seq_lengths"] == [[2, 3], [4, 1]]
 
 
-def test_pack_words_truncates_long_sequences():
+def test_pack_words_splits_long_sequences():
     packed = pack_words({"words": [list("abcdefg")]}, seq_length=4)
-    assert packed["words"] == [list("abcd")]
-    assert packed["seq_lengths"] == [[4]]
+    assert packed["words"] == [list("abcd"), [*"efg", PAD_WORD]]
+    assert packed["seq_lengths"] == [[4], [3, 1]]
+
+
+def test_load_text_datasets_requires_a_text_column(tmp_path):
+    path = tmp_path / "data.json"
+    Dataset.from_dict({"src": ["a", "b"]}).to_json(path)
+    with pytest.raises(ValueError, match="No 'text' column"):
+        load_text_datasets(TextDataConfig(seq_length=16, train_file=str(path), validation_split_percentage=50))
 
 
 def test_load_text_datasets_with_template(tmp_path):
     path = tmp_path / "data.json"
     Dataset.from_dict({"src": [f"s{i}" for i in range(20)], "tgt": [f"t{i}" for i in range(20)]}).to_json(path)
     args = TextDataConfig(seq_length=16, train_file=str(path), dataset_text_template=["<{src}> ", "{tgt}"],
-                               validation_split_percentage=10)
+                          validation_split_percentage=10)
     texts = load_text_datasets(args)
     assert len(texts["train"]) == 18
     assert len(texts["validation"]) == 2
@@ -29,9 +38,7 @@ def test_load_text_datasets_with_template(tmp_path):
 
 
 def test_dataset_lengths_repeat_examples_equally():
-    from types import SimpleNamespace
 
-    from welt_training.data_utils import dataset_lengths
 
     datasets = {"train": [0] * 10, "validation": [0] * 4}
     context = SimpleNamespace(train_samples=15, valid_samples=100)

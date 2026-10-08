@@ -15,16 +15,11 @@ data:
 
 train:
   train_iters: 143000
-  micro_batch_size: 32
-  global_batch_size: 32
 
 optimizer:
   lr: 1.0e-3
   min_lr: 1.0e-4
   weight_decay: 0.1
-  adam_beta1: 0.9
-  adam_beta2: 0.95
-  clip_grad: 1.0
 
 scheduler:
   lr_warmup_iters: 1430
@@ -33,9 +28,5 @@ validation:
   eval_interval: 5000
   eval_iters: 16
 
-checkpoint:
-  save_interval: 1000
-
 logger:
-  log_interval: 10
   wandb_project: welt-pretrain

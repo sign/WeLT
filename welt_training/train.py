@@ -13,7 +13,6 @@ import sys
 from functools import partial
 
 import torch
-import torch.nn.functional as F  # noqa: N812
 import yaml
 from megatron.bridge.training.config import (
     CheckpointConfig,
@@ -44,9 +43,15 @@ def build_dataset_provider(model: dict, data: dict) -> WeLTDatasetProvider:
                                **{"trust_remote_code": model.get("trust_remote_code", False)} | data)
 
 
+SECTIONS = ("train", "optimizer", "scheduler", "validation", "checkpoint", "logger", "ddp", "rng")
+
+
 def build_config(config: dict, model_provider, dataset_provider, vocab_size: int) -> ConfigContainer:
     """Megatron-Bridge config from the YAML's Megatron-Bridge sections, with the given model and dataset."""
-    output_dir = config.get("output_dir", "./output")
+    output_dir = config.get("output_dir", "./output")  # Set by main()
+    unknown = set(config) - {"output_dir", "model", "data", *SECTIONS}
+    if unknown:
+        raise ValueError(f"Unknown config sections {sorted(unknown)}, expected output_dir, model, data, {SECTIONS}")
 
     def section(cls, name: str, **defaults):
         return cls(**defaults | (config.get(name) or {}))  # Unknown keys raise a TypeError
@@ -69,7 +74,8 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
     model_provider.seq_length = dataset_provider.seq_length
     model_provider.calculate_per_token_loss = True
     model_provider.bf16 = optimizer.bf16
-    dataset_provider.samples_per_eval = validation.eval_iters * train.global_batch_size
+    dataset_provider.samples_per_eval = validation.eval_iters * (validation.eval_global_batch_size
+                                                                 or train.global_batch_size)
 
     return ConfigContainer(
         model=model_provider,
@@ -102,7 +108,8 @@ def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor)
     EOS ending a document (a word with an empty label), per UTF-8 byte of text, like the causal LM baseline."""
     loss_mask = labels != TOKENIZER.pad_token_id
     eos = labels == TOKENIZER.eos_token_id
-    document_end = eos & F.pad(torch.ones_like(eos[:, :1]), (0, eos.size(1) - 1), value=False)
+    document_end = torch.zeros_like(eos)
+    document_end[:, 0] = eos[:, 0]  # A word whose first label byte is EOS is empty: the end of a document
     losses = losses.float()
 
     loss = (losses * loss_mask).sum()
@@ -127,29 +134,24 @@ def forward_step(state, data_iterator, model, return_schedule_plan: bool = False
     return losses, partial(loss_func, correct=correct, labels=labels)
 
 
-def run(config: dict, cfg: ConfigContainer, forward_step_func, save_artifacts=None):
-    """Save the YAML config (and other artifacts) to the output directory, then train."""
-    output_dir = config.get("output_dir", "./output")
+def main(build, forward_step_func):
+    """Train from a YAML config and overrides on the command line, with build(config) -> (ConfigContainer, artifacts
+    saving function). The config (and other artifacts) are saved to the output directory first."""
+    if len(sys.argv) < 2:
+        sys.exit(f"Usage: {sys.argv[0]} <config.yaml> [section.key=value ...]")
+    config = load_yaml(sys.argv[1], sys.argv[2:])
+    config.setdefault("output_dir", "./output")
+    cfg, save_artifacts = build(config)
     if int(os.environ.get("RANK", 0)) == 0:
-        os.makedirs(output_dir, exist_ok=True)
-        with open(os.path.join(output_dir, CONFIG_FILE_NAME), "w") as f:
+        os.makedirs(config["output_dir"], exist_ok=True)
+        with open(os.path.join(config["output_dir"], CONFIG_FILE_NAME), "w") as f:
             yaml.safe_dump(config, f, sort_keys=False, allow_unicode=True)
         if save_artifacts is not None:
-            save_artifacts(output_dir)
+            save_artifacts(config["output_dir"])
 
     pretrain(config=cfg, forward_step_func=forward_step_func)
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
-
-
-def main(build, forward_step_func):
-    """Train from a YAML config and overrides on the command line, with build(config) -> (ConfigContainer, artifacts
-    saving function)."""
-    if len(sys.argv) < 2:
-        sys.exit(f"Usage: {sys.argv[0]} <config.yaml> [section.key=value ...]")
-    config = load_yaml(sys.argv[1], sys.argv[2:])
-    cfg, save_artifacts = build(config)
-    run(config, cfg, forward_step_func, save_artifacts)
 
 
 def build(config: dict):

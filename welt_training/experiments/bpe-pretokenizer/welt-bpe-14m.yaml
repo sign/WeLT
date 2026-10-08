@@ -15,14 +15,6 @@ data:
   max_eval_samples: 32
   num_workers: 8
 
-train:
-  train_iters: 1000
-  micro_batch_size: 32
-  global_batch_size: 32
-
 validation:
   eval_interval: 100
   eval_iters: 1
-
-logger:
-  log_interval: 10

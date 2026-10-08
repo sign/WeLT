@@ -46,13 +46,14 @@ def repeated_length(num_examples: int, min_length: int) -> int:
 def dataset_lengths(datasets: dict, context, samples_per_eval: int | None) -> dict[str, int]:
     """Samples drawn from each split: train repeats examples equally up to the train samples. Validation has
     samples_per_eval samples, so that every evaluation (one epoch of Megatron's sampler) covers the whole set."""
+    for split, dataset in datasets.items():
+        if len(dataset) == 0:
+            raise ValueError(f"Empty {split} dataset (e.g. fewer texts than one packed example)")
     lengths = {}
     if "train" in datasets:
         lengths["train"] = repeated_length(len(datasets["train"]), context.train_samples)
     if "validation" in datasets:
         num_examples = len(datasets["validation"])
-        if num_examples == 0:
-            raise ValueError("Empty validation dataset (e.g. fewer texts than one packed example)")
         lengths["validation"] = samples_per_eval or repeated_length(num_examples, context.valid_samples)
         if samples_per_eval is not None and samples_per_eval < num_examples:
             logger.warning(f"Evaluations see {samples_per_eval} of {num_examples} validation examples, "
@@ -119,8 +120,9 @@ def load_prepared_data(prepared_data_path: str):
 
 
 def pack_words(batch: dict[str, list], seq_length: int) -> dict[str, list]:
-    """Greedily pack word sequences (truncated to seq_length) into blocks of exactly seq_length words.
-    Each block is right-padded with PAD words, each its own sequence, for constant shapes."""
+    """Greedily pack word sequences into blocks of exactly seq_length words. Longer sequences are split into
+    seq_length chunks, each its own sequence. Each block is right-padded with PAD words, each its own sequence,
+    for constant shapes."""
     packed = {"words": [], "seq_lengths": []}
 
     def flush(words, lengths):
@@ -129,9 +131,12 @@ def pack_words(batch: dict[str, list], seq_length: int) -> dict[str, list]:
             packed["words"].append(words + [PAD_WORD] * pad)
             packed["seq_lengths"].append(lengths + [1] * pad)
 
+    # ponytail: a chunk's last word is trained as a document end; carry the next chunk's first word as its label
+    # (a label without an input word) if long documents matter
+    chunks = (document[start:start + seq_length] for document in batch["words"]
+              for start in range(0, len(document), seq_length))
     words, lengths = [], []
-    for sequence in batch["words"]:
-        sequence = sequence[:seq_length]
+    for sequence in chunks:
         if len(words) + len(sequence) > seq_length:
             flush(words, lengths)
             words, lengths = [], []
@@ -151,7 +156,7 @@ def pack_dataset(processor: TextImageProcessor, dataset: Dataset, seq_length: in
 
 def load_raw_datasets(args: TextDataConfig) -> dict:
     if args.prepared_data_path is not None:
-        return load_prepared_data(args.prepared_data_path)
+        return with_validation(load_prepared_data(args.prepared_data_path), args.validation_split_percentage)
 
     if args.dataset_name is not None:
         load_args = dict(path=args.dataset_name, name=args.dataset_config_name,
@@ -177,11 +182,15 @@ def load_raw_datasets(args: TextDataConfig) -> dict:
                                                                     limit=limit))
                 for name, (split, skip, limit) in splits.items()}
 
-    raw = load_dataset(**load_args)
-    if "validation" not in raw:
-        split = raw["train"].train_test_split(test_size=args.validation_split_percentage / 100, seed=42)
-        raw = {"train": split["train"], "validation": split["test"]}
-    return dict(raw)
+    return with_validation(dict(load_dataset(**load_args)), args.validation_split_percentage)
+
+
+def with_validation(raw: dict, validation_split_percentage: int) -> dict:
+    """Holds out a part of the train split as validation, if there is no validation split."""
+    if "validation" in raw:
+        return raw
+    split = raw["train"].train_test_split(test_size=validation_split_percentage / 100, seed=42)
+    return {"train": split["train"], "validation": split["test"]}
 
 
 def load_text_datasets(args: TextDataConfig) -> dict[str, Dataset]:
@@ -189,7 +198,7 @@ def load_text_datasets(args: TextDataConfig) -> dict[str, Dataset]:
     raw = load_raw_datasets(args)
 
     template = args.dataset_text_template
-    if isinstance(template, list | tuple):
+    if isinstance(template, list):
         template = "".join(template)
 
     limits = {"train": args.max_train_samples, "validation": args.max_eval_samples}
@@ -200,8 +209,9 @@ def load_text_datasets(args: TextDataConfig) -> dict[str, Dataset]:
         dataset = raw[split]
         if limits[split] is not None and limits[split] < len(dataset):
             dataset = dataset.select(range(limits[split]))
-        text_column = "text" if "text" in dataset.column_names else dataset.column_names[0]
-        dataset = dataset.map(lambda example, column=text_column: {"text": extract_text(example, column, template)},
+        if template is None and "text" not in dataset.column_names:
+            raise ValueError(f"No 'text' column (columns: {dataset.column_names}), set data.dataset_text_template")
+        dataset = dataset.map(lambda example: {"text": extract_text(example, "text", template)},
                               remove_columns=dataset.column_names, num_proc=args.preprocessing_num_workers,
                               desc=f"Formatting {split} split")
         texts[split] = dataset.filter(lambda example: len(example["text"]) > 0)
