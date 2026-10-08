@@ -115,7 +115,7 @@ def test_prepare_data_with_language(temp_output_dir, monkeypatch):
             "--dataset_config", WIKITEXT_CONFIG,
             "--train_split_units", "160",
             "--validation_split_units", "40",
-            "--max_seq_length", "1024",
+            "--max_seq_length", "32",  # Small examples, so the units budget fills both splits in any shuffle order
             "--language", "eng_Latn",
             "--seed", "42",
             "--output_path", temp_output_dir,

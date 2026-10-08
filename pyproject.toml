@@ -6,11 +6,14 @@ authors = [
     { name = "Amit Moryossef", email = "amit@sign.mt" },
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+# Megatron-Bridge, Megatron-Core, Transformer Engine, vLLM, torch and transformers come from the
+# NeMo container (nvcr.io/nvidia/nemo:26.08.01), see the Dockerfile.
 dependencies = [
-    "transformers[torch]>=4.57,<5",
+    "torch",
+    "transformers",
     "trl", # For huggingface implementation of pack_dataset
-    "datasets",
+    "datasets>=4", # Older releases break with current pyarrow
     "Pillow", # For AutoImageProcessor
     "torchvision", # For use_fast=True
     "cachetools", # For LRU cache in processor
@@ -18,7 +21,7 @@ dependencies = [
     # Our packages
     "words-segmentation>=0.0.5", # For pre-tokenization into words
     "utf8-tokenizer[fast]>=0.8.2", # For tokenization of bytes
-    "pixel-renderer[pangocairo]>=0.1.4", # For text rendering into images (thread safe)
+    "pixel-renderer[pangocairo]>=0.1.5", # For text rendering into images (thread safe)
 ]
 
 [project.optional-dependencies]
@@ -31,7 +34,6 @@ dev = [
 train = [
     "hf_transfer", # For HF_HUB_ENABLE_HF_TRANSFER
     "accelerate", # For distributed training
-    "datasets", # For dataset loading and processing
     "evaluate", # For evaluation metrics
     "scikit-learn", # For "accuracy" metric in evaluate
     "sacrebleu", # For usual bleu/chrF metrics

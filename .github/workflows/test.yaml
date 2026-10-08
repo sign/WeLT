@@ -10,13 +10,8 @@ on:
 
 jobs:
   test:
-    name: Test (transformers ${{ matrix.transformers }})
+    name: Test
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    strategy:
-      matrix:
-        transformers: ["<5", ">=5"]
 
     steps:
       - uses: actions/checkout@v5
@@ -24,25 +19,8 @@ jobs:
       - name: Setup environment
         uses: ./.github/actions/setup-environment
 
-      - name: Install transformers version
-        run: uv pip install "transformers[torch]${{ matrix.transformers }}"
-
       - name: Test code
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WANDB_MODE: disabled
-        run: uv run --no-sync pytest -n auto --dist loadscope
-
-      - name: Freeze working environment
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.transformers == '<5'
-        run: uv pip freeze > working_environment.txt
-
-      - name: Commit working environment
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.transformers == '<5'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add working_environment.txt
-          git diff --staged --quiet || git commit -m "chore: update working_environment.txt"
-          git push
-
+        run: pytest -n auto --dist loadscope

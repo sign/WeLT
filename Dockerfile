@@ -1,25 +1,30 @@
-FROM nvcr.io/nvidia/pytorch:26.01-py3
+# Megatron-Bridge, Megatron-Core, Transformer Engine, vLLM, torch and transformers come with the NeMo container
+FROM nvcr.io/nvidia/nemo:26.08.01
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
+ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# System deps (git for installs; build-essential for compiling kernels; tidy apt cache)
-# Rendering system deps (pango, cairo...)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential pkg-config \
-      libgirepository-1.0-1 libcairo2 gir1.2-pango-1.0 libcairo2-dev libgirepository1.0-dev && \
-    rm -rf /var/lib/apt/lists/*
+# Text rendering: the latest Pango, cairo and PyGObject from conda-forge (as pixel-renderer installs them),
+# in their own prefix (for the container's Python version), on the path of the container's Python.
+# The prefix's own pip, setuptools and wheel are removed, so they do not shadow the container's.
+RUN py=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])') && \
+    curl -Ls https://micro.mamba.pm/api/micromamba/linux-$(uname -m | sed s/x86_64/64/)/latest | \
+      tar -xj -C /usr/local bin/micromamba && \
+    micromamba create -y -p /opt/pango -c conda-forge python=$py pango pycairo pygobject && \
+    micromamba clean -a -y && \
+    rm -rf /opt/pango/lib/python$py/site-packages/pip* /opt/pango/lib/python$py/site-packages/setuptools* \
+      /opt/pango/lib/python$py/site-packages/wheel* /opt/pango/lib/python$py/site-packages/_distutils_hack && \
+    echo /opt/pango/lib/python$py/site-packages > "$(python -c 'import site; print(site.getsitepackages()[0])')/pango.pth"
 
-# Install package dependencies
-RUN mkdir -p /app/welt/vision && \
-    mkdir -p /app/welt_training && \
-    touch /app/README.md
 WORKDIR /app
-COPY pyproject.toml /app/pyproject.toml
-RUN pip install ".[train]"
+# Dependencies first, for layer caching (python -m pip: the container's Python, not the system's pip)
+COPY pyproject.toml README.md /app/
+RUN mkdir -p welt/vision welt_training && python -m pip install ".[dev,train]"
+# Rendering fonts are downloaded once, at build time, rendering a word (which fails the build if Pango cannot load)
+RUN python -c "from font_download import FontConfig; from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS; \
+    from pixel_renderer import PixelRendererProcessor; \
+    print(PixelRendererProcessor(font=FontConfig(sources=FONTS_NOTO_SANS)).render_text('hello').shape)"
 
-COPY welt /app/welt
-COPY welt_training /app/welt_training
-
-CMD accelerate launch --mixed_precision bf16 -m welt_training.train $CONFIG
+# Editable install: the commands (and the vLLM plugin) use /app, also when a checkout is mounted there
+COPY . /app
+RUN python -m pip install --no-deps -e .
