@@ -12,6 +12,7 @@ and output layers by the mapping layers. Unused HF modules are deleted after loa
 """
 import dataclasses
 import os
+import shutil
 from dataclasses import dataclass
 
 import torch
@@ -64,8 +65,13 @@ def safetensors_checkpoint(name_or_path: str) -> str:
     path = os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
                         "safetensors", os.path.abspath(name_or_path).lstrip("/") if os.path.isdir(name_or_path)
                         else name_or_path)
-    if not os.path.isdir(path):
-        AutoModelForCausalLM.from_pretrained(name_or_path).save_pretrained(path)
+    if not os.path.isdir(path):  # Converted in a temporary directory, renamed (atomically) when complete
+        temporary = f"{path}.tmp{os.getpid()}"
+        AutoModelForCausalLM.from_pretrained(name_or_path).save_pretrained(temporary)
+        try:
+            os.rename(temporary, path)
+        except OSError:  # Another process converted it first
+            shutil.rmtree(temporary)
     return path
 
 
@@ -145,7 +151,21 @@ class WeLTModelProvider(GPTModelProvider):
 
 
 FLEX_BLOCK_SIZE = 128
-compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
+
+
+# One compiled FlexAttention per attention kind: each recompiles for its own shapes, dtypes and train / eval. Past
+# torch.compile's recompile limit, FlexAttention would silently run uncompiled (materializing T x T scores).
+torch._dynamo.config.recompile_limit = max(torch._dynamo.config.recompile_limit, 64)
+
+
+@torch.compile(dynamic=True)
+def packed_flex_attention(query, key, value, block_mask: BlockMask, scale: float | None):
+    return flex_attention(query, key, value, block_mask=block_mask, scale=scale)
+
+
+@torch.compile(dynamic=True)
+def masked_flex_attention(query, key, value, block_mask: BlockMask, scale: float | None):
+    return flex_attention(query, key, value, block_mask=block_mask, scale=scale)
 
 
 def repeat_kv(tensor: torch.Tensor, heads: int) -> torch.Tensor:
@@ -200,7 +220,7 @@ class PackedAttention(nn.Module):
             setattr(packed_seq_params, cache_key, block_mask)
         query, key, value = (t.transpose(0, 1).unsqueeze(0) for t in (query, key, value))
         key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
-        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale)
+        out = packed_flex_attention(query, key, value, block_mask, self.softmax_scale)
         return out.squeeze(0).transpose(0, 1)
 
 
@@ -224,7 +244,7 @@ class MaskedAttention(nn.Module):
             attention_mask._welt_block_mask = block_mask
         query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
         key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
-        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale)
+        out = masked_flex_attention(query, key, value, block_mask, self.softmax_scale)
         return out.permute(2, 0, 1, 3).flatten(2)
 
 
@@ -257,14 +277,6 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
         del model.output_layer
         model.post_process = False  # Only affects the (unused) forward and output layer checkpointing
     return model, embeddings
-
-
-def run_transformer(model: GPTModel, hidden: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
-    """(B, S, H) -> (B, S, H), including the final layer norm. attention_mask: True = masked."""
-    hidden = hidden.transpose(0, 1).contiguous()
-    rotary_pos_emb = model.rotary_pos_emb(hidden.size(0))
-    hidden = model.decoder(hidden_states=hidden, attention_mask=attention_mask, rotary_pos_emb=rotary_pos_emb)
-    return hidden.transpose(0, 1)
 
 
 def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -338,6 +350,7 @@ class WeLTModel(MegatronModule):
         if config.image_encoder is not None:
             self.image_encoder = PatchImageEncoder(config.image_encoder, config.image_encoder_hf_path)
 
+        config.vocab_size = config.num_tokens  # Not to build the HF vocabulary's embeddings and output layer, deleted
         self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path, "arbitrary")
 
         decoder_config = config.bytes_decoder
@@ -362,8 +375,11 @@ class WeLTModel(MegatronModule):
         keep = torch.ones(num_modalities, device=device)
         if self.training and num_modalities > 1 and self.config.modality_dropout > 0:
             keep = (torch.rand(num_modalities, device=device) >= self.config.modality_dropout).float()
+            # When all are dropped, keep one at random
+            keep = torch.where(keep.any(), keep, F.one_hot(torch.randint(num_modalities, (), device=device),
+                                                           num_modalities).float())
             # Multiplying by zero, rather than skipping, keeps all parameters in the graph for DDP
-            keep = keep * (num_modalities / keep.sum().clamp(min=1))
+            keep = keep * (num_modalities / keep.sum())
         return keep
 
     def encode_words(self,
@@ -398,8 +414,11 @@ class WeLTModel(MegatronModule):
 
     def latent(self, word_embeds: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         """(B, L, H) word embeddings, (B, 1, L, L) True = attend -> (B, L, H_decoder) latent vectors"""
-        hidden = run_transformer(self.latent_transformer, word_embeds, ~attention_mask)
-        return self.decoder_norm(self.decoder_mapping(hidden))
+        model = self.latent_transformer
+        hidden = word_embeds.transpose(0, 1).contiguous()  # (S, B, H)
+        hidden = model.decoder(hidden_states=hidden, attention_mask=~attention_mask,  # True = masked
+                               rotary_pos_emb=model.rotary_pos_emb(hidden.size(0)))
+        return self.decoder_norm(self.decoder_mapping(hidden.transpose(0, 1)))
 
     def decode(self, latents: torch.Tensor, labels_input: torch.Tensor, labels_mask: torch.Tensor):
         """Parallel causal decoding, each word's bytes conditioned on its latent vector.

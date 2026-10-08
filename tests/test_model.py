@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -80,25 +82,31 @@ def test_backward_reaches_all_parameters(model, processor):
         model.eval()
 
 
-@pytest.mark.parametrize("causal", [True, False])
-def test_packed_attention_matches_padded_attention(megatron, causal):
-    torch.manual_seed(0)
-    lengths = torch.tensor([3, 7, 1, 5], device="cuda")
-    heads, dim = 4, 16
-    total = int(lengths.sum())
-    query, key, value = (torch.randn(total, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3))
+ATTENTION_CONFIG = SimpleNamespace(softmax_scale=None, attention_dropout=0.0)
 
+
+@pytest.mark.parametrize("causal", [True, False])
+@pytest.mark.parametrize(("lengths", "kv_heads"), [
+    ([3, 7, 1, 5], 4),  # Within one 128-token block
+    ([3, 300, 7, 129, 1, 250], 2),  # Sequences across blocks, grouped query attention
+])
+def test_packed_attention_matches_padded_attention(megatron, causal, lengths, kv_heads):
     from megatron.core.packed_seq_params import PackedSeqParams
+
+    torch.manual_seed(0)
+    lengths = torch.tensor(lengths, device="cuda")
+    total, heads, dim = int(lengths.sum()), 4, 16
+    query = torch.randn(total, heads, dim, device="cuda", dtype=torch.bfloat16)
+    key, value = (torch.randn(total, kv_heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(2))
     cu_seqlens = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     params = PackedSeqParams(qkv_format="thd", cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
-                             max_seqlen_q=7, max_seqlen_kv=7)
-    config = type("Config", (), {"softmax_scale": None, "attention_dropout": 0.0})()
-    packed = PackedAttention(config, causal=causal)(query, key, value, packed_seq_params=params)
+                             max_seqlen_q=int(lengths.max()), max_seqlen_kv=int(lengths.max()))
+    packed = PackedAttention(ATTENTION_CONFIG, causal=causal)(query, key, value, packed_seq_params=params)
 
     expected = []
     for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=True):
         q, k, v = (t[start:end].transpose(0, 1) for t in (query, key, value))
-        expected.append(F.scaled_dot_product_attention(q, k, v, is_causal=causal).transpose(0, 1))
+        expected.append(F.scaled_dot_product_attention(q, k, v, is_causal=causal, enable_gqa=True).transpose(0, 1))
     torch.testing.assert_close(packed, torch.cat(expected), atol=2e-2, rtol=2e-2)
 
 
@@ -111,8 +119,7 @@ def test_masked_attention_matches_sdpa(megatron):
     allowed = torch.stack([get_attention_mask_for_packed_sequence([7, 2], words=words)] * 2).cuda()  # (B, 1, S, S)
     seq, batch, heads, dim = allowed.size(-1), 2, 4, 16
     query, key, value = (torch.randn(seq, batch, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3))
-    config = type("Config", (), {"softmax_scale": None, "attention_dropout": 0.0})()
-    attention = MaskedAttention(config)
+    attention = MaskedAttention(ATTENTION_CONFIG)
     out = attention(query, key, value, attention_mask=~allowed)
 
     q, k, v = (t.permute(1, 2, 0, 3) for t in (query, key, value))

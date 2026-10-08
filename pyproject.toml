@@ -59,6 +59,8 @@ select = [
 [tool.pytest.ini_options]
 markers = ["integration: tests requiring external pretrained assets"]
 addopts = "-v"
+# FlexAttention silently falling back to uncompiled attention (e.g. past the recompile limit) is an error
+filterwarnings = ["error:.*flex_attention called without torch.compile"]
 testpaths = [
     "tests",
 ]

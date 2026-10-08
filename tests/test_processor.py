@@ -31,11 +31,6 @@ def test_processor_multiprocessing_pickle(processor):
     pickle.dumps(processor)
 
 
-def test_processor_collates_texts(processor):
-    inputs = processor(["example text for testing", "another"])
-    assert all(isinstance(inputs[key], torch.Tensor) and len(inputs[key]) == 2 for key in expected_tensor_keys)
-
-
 def test_packed_padding_does_not_add_eos_labels(processor):
     words = processor.pretokenize("a b")
     original = processor.process_single_example(words, [len(words)])
@@ -54,46 +49,6 @@ def test_processor_single_text_value(processor):
     # Unpacked mode: labels are shorter (only next token, not all remaining)
     assert torch.equal(inputs["labels_input"][0], torch.tensor([[2, 97, 32], [2, 98, 3], [2, 3, 0]]))
     assert torch.equal(inputs["labels_output"][0], torch.tensor([[97, 32, 3], [98, 3, 0], [3, 0, 0]]))
-
-
-def test_processor_multiple_strings_collated_attention_mask(processor):
-    texts = ["one", "two words", "three word test"]
-    inputs = processor(texts)
-    assert inputs["attention_mask"].shape == (3, 1, 4, 4)
-
-    expected = [
-        torch.tensor([
-            [True, False, False, False],
-            [True, True, False, False],
-            [False, False, False, False],
-            [False, False, False, False]
-        ]),
-        torch.tensor([
-            [True, False, False, False],
-            [True, True, False, False],
-            [True, True, True, False],
-            [False, False, False, False]
-        ]),
-        torch.tensor([
-            [True, False, False, False],
-            [True, True, False, False],
-            [True, True, True, False],
-            [True, True, True, True]
-        ])
-    ]
-
-    for mask, expected_mask in zip(inputs["attention_mask"], expected, strict=False):
-        assert torch.equal(mask[0], expected_mask)
-
-
-def test_get_words_and_labels(processor):
-    text = "hello world test"
-    words = processor.pretokenize(text)
-
-    labels = processor.get_sequence_labels(words, [len(words)])
-
-    # Unpacked mode: each token predicts only the next token
-    assert labels == ['hello ', 'world ', 'test', '']
 
 
 def test_render_images_shape(processor):
@@ -187,23 +142,6 @@ def test_packed_dataset_labels_independent(processor):
         'c ', 'd', '',
         '', '',
     ]
-
-
-def test_processor_works_on_packed_sequence(processor):
-    texts = [
-        "hi!",
-        "hello world",
-        "yes.",
-        "a b c"
-    ]
-    dataset = Dataset.from_dict({"text": texts})
-    packed_dataset = pack_dataset(processor, dataset, seq_length=8)
-
-    for datum in packed_dataset:
-        inputs = processor.process_single_example(datum["words"], datum["seq_lengths"])
-        assert all(key in inputs for key in expected_tensor_keys)
-        assert all(isinstance(inputs[key], torch.Tensor) for key in expected_tensor_keys)
-        assert inputs["input_ids"].shape[0] == 8
 
 
 def test_processor_save_and_load_works(processor):

@@ -1,7 +1,6 @@
 """Overfit a tiny WeLT on a few texts, and check it learned character, word, and byte level conditioning."""
 import pytest
 import torch
-from datasets import Dataset
 
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
@@ -15,8 +14,7 @@ TRAIN_TEXTS = ["a b", "b a", "a cat", "a dog"]
 
 def train(model, processor, packed: bool, steps: int = 600):
     if packed:
-        words = Dataset.from_dict({"text": TRAIN_TEXTS}).map(lambda e: {"words": processor.pretokenize(e["text"])})
-        examples = pack_words({"words": words["words"]}, seq_length=7)
+        examples = pack_words({"words": [processor.pretokenize(text) for text in TRAIN_TEXTS]}, seq_length=7)
         batch = collate_fn([processor.process_single_example(w, lengths)
                             for w, lengths in zip(examples["words"], examples["seq_lengths"], strict=True)])
     else:
@@ -50,8 +48,7 @@ def text_losses(model, processor, texts: list[str]) -> dict[str, float]:
 @pytest.fixture(scope="module", params=["packed", "unpacked"])
 def trained(request, megatron, tiny_config):
     torch.manual_seed(0)
-    model = build_model(tiny_config).float()
-    model.config.modality_dropout = 0.15
+    model = build_model(tiny_config).float()  # With the default modality dropout
     processor = TextImageProcessor.create(max_word_length=16, render_images=True)
     train(model, processor, packed=request.param == "packed")
     return model, processor
