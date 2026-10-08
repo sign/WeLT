@@ -18,6 +18,8 @@ dependencies = [
     "datasets>=4", # Older releases break with current pyarrow
     "pyyaml",
     "cachetools", # For LRU cache in processor
+    "flask", # welt-serve
+    "gunicorn", # welt-serve
     # Our packages
     "words-segmentation>=0.0.5", # For pre-tokenization into words
     "utf8-tokenizer[fast]>=0.8.2", # For tokenization of bytes
@@ -67,5 +69,11 @@ testpaths = [
 ]
 
 [project.scripts]
+welt-export = "welt.export:main"
+welt-serve = "welt.server:main"
+welt-generate = "welt.server:generate_main"
 welt-prepare-data = "welt_training.prepare_data:main"
 welt-verify-data = "welt_training.verify_data:main"
+
+[project.entry-points."vllm.general_plugins"]
+welt = "welt.vllm_plugin:register"
