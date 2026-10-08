@@ -22,9 +22,10 @@ CONFIGS = sorted(glob.glob("welt_training/experiments/*/*.yaml"))
 def test_experiment_configs_build(path):
     """Every shipped config builds a Megatron-Bridge config (unknown options raise)."""
     pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
-    from welt_training import train
+    from welt_training import baseline, train
 
-    train.build(load_yaml(path))
+    config = load_yaml(path)
+    (baseline if "transformer" in config["model"] else train).build(config)  # baseline: a causal LM
 
 
 def test_null_sections_and_model_overrides():
