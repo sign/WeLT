@@ -17,4 +17,4 @@ torchrun --nproc_per_node=1 -m welt_training.baseline welt_training/experiments/
 Both log `bits per byte` to the same W&B project (`welt-machine-translation`): the loss of every prediction
 except the end of a document (WeLT's word ends included), per UTF-8 byte of text, so their validation values
 compare directly. Generation quality of the WeLT model (chrF, exact match) comes from
-`welt-export` and `welt-evaluate`, see the [README](../../../README.md#export--generate).
+`welt-export`, `welt-serve` and `welt-evaluate`, see the [README](../../../README.md#export-serve--generate).

@@ -79,37 +79,47 @@ Training and validation log `lm loss` (per byte), `bits per byte`, `byte accurac
 Bits per byte count every byte prediction, including the end of each word (like a space in a causal LM) but not
 the end of a document, per UTF-8 byte of text, so they are comparable to the [baseline](#baseline)'s.
 
-## Export & Generate
+## Export, Serve & Generate
 
 Export the latest checkpoint (or a specific `checkpoints/iter_*` directory) to HuggingFace-format transformers,
-then generate with vLLM:
+which vLLM serves, then start a generation server (one per GPU) in the container:
 
 ```shell
 welt-export output/string-repetition-tiny/checkpoints --output output/string-repetition-tiny/export
-welt-generate output/string-repetition-tiny/export $'<text>\x0eHello world\x0f<repeat> '
+welt-serve output/string-repetition-tiny/export --port 8080
+# or: docker run --rm --gpus all --ipc=host -p 8080:8080 -v "$(pwd)":/app welt welt-serve /app/output/string-repetition-tiny/export
 ```
 
-```python
-from welt.inference import WeLTGenerator
+and generate through it:
 
-generator = WeLTGenerator("output/string-repetition-tiny/export", kv_cache_gib=1.0)
-generator.generate(["<text>\x0eHello world\x0f<repeat> "], max_generated_words=50, temperature=0.0, seed=None)
+```shell
+welt-generate $'<text>\x0eHello world\x0f<repeat> ' --url http://localhost:8080
+curl localhost:8080/generate -H "Content-Type: application/json" \
+  -d '{"texts": ["<text>\u000eHello world\u000f<repeat> "], "max_generated_words": 50, "temperature": 0.0}'
 ```
+
+`welt-serve` ([`welt/server.py`](welt/server.py)) answers `GET /health` and `POST /generate`, one generation at a time
+(all texts of a request are batched; a busy server answers 503 with `Retry-After`), and tags responses with
+`X-Model-Tag` from the `MODEL_TAG` environment variable. In Python, `welt.server.generate(url, texts)` is the client,
+and `welt.inference.WeLTGenerator(export_dir).generate(texts)` runs the model in-process.
 
 Each generation step encodes the new words (vLLM pooling, cached per word), runs the latent transformer over all
 word embeddings (vLLM pooling with prefix caching; bidirectional shift blocks via [a vLLM plugin](welt/vllm_plugin.py)),
-and generates the next word's bytes (vLLM generation). Decoding is greedy (`temperature=0`) or sampled; there is no
-beam search. A prompt ending mid-word continues that word. Generation stops at an empty word or `max_generated_words`.
+and generates the next word's bytes (vLLM generation, [valid UTF-8 only](welt/utf8.py)). Decoding is greedy
+(`temperature=0`) or sampled; there is no beam search. A prompt ending mid-word continues that word.
+Generation stops at an empty word or `max_generated_words`.
 
 ## Evaluate
 
+With the model served:
+
 ```shell
-welt-evaluate output/string-repetition-tiny/export --max_samples 256 --output results.json
+welt-evaluate output/string-repetition-tiny/export/welt.yaml --url http://localhost:8080 --max_samples 256 --output results.json
 ```
 
-Generates completions for the validation prefixes of the exported run's dataset, and reports exact match, chrF and
+Generates completions for the validation prefixes of the run's dataset, and reports exact match, chrF and
 generated words per second. It needs `data.dataset_text_template` as `[prefix, completion]` in the config.
-[`benchmarks/run_task.sh`](benchmarks/run_task.sh) trains, exports and evaluates a config in one go.
+[`benchmarks/run_task.sh`](benchmarks/run_task.sh) trains, exports, serves and evaluates a config in one go.
 
 ## Baseline
 
