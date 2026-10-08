@@ -71,11 +71,12 @@ class WeLTGenerator:
                                                                 use_tqdm=False)])
 
     @torch.inference_mode()
-    def _encode_words(self, words: list[str]):
-        """Cache the latent-space embedding of each new word."""
-        words = list(dict.fromkeys(w for w in words if w not in self.word_embeddings))
+    def _encode_words(self, words: list[str]) -> dict[str, torch.Tensor]:
+        """The latent-space embedding of each word: cached, or encoded (and cached)."""
+        embeddings = {w: self.word_embeddings[w] for w in dict.fromkeys(words) if w in self.word_embeddings}
+        words = [w for w in dict.fromkeys(words) if w not in embeddings]
         if not words:
-            return
+            return embeddings
         params = PoolingParams(use_activation=False)
         embeds = []
         if self.image_encoder is not None:
@@ -93,17 +94,19 @@ class WeLTGenerator:
                        for ids, mask in zip(tokenized.input_ids, tokenized.attention_mask, strict=True)]
             embeds.append(self._pooled(self.bytes_encoder, prompts, params))
         embeds = self._map(torch.cat(embeds, dim=-1).to(self.device), "encoder").cpu()
-        self.word_embeddings.update(zip(words, embeds, strict=True))
+        embeddings.update(zip(words, embeds, strict=True))
+        self.word_embeddings.update(zip(words, embeds, strict=True))  # May evict others, not the returned ones
+        return embeddings
 
     @torch.inference_mode()
     def _latents(self, sequences: list[list[str]]) -> torch.Tensor:
         """The latent vector after the last word of each sequence, mapped to the bytes decoder."""
-        self._encode_words([w for words in sequences for w in words])
+        embeddings = self._encode_words([w for words in sequences for w in words])
         prompts, params = [], []
         for words in sequences:
             ranges = list(get_shift_blocks(words))
             # Cached keys and values depend on the bidirectional ranges, which are not part of vLLM's cache key
-            prompts.append({"prompt_embeds": torch.stack([self.word_embeddings[w] for w in words]),
+            prompts.append({"prompt_embeds": torch.stack([embeddings[w] for w in words]),
                             "cache_salt": repr(ranges)})
             params.append(PoolingParams(use_activation=False, extra_kwargs={RANGES_KEY: ranges}))
         return self._map(self._pooled(self.latent, prompts, params).to(self.device), "decoder")
