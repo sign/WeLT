@@ -1,59 +1,127 @@
 # Training
 
-> [!CAUTION]
-> Read the [vision README](../welt/vision/README.md) to understand how to select
-> an image encoder model for fast training.
-
-Setup with:
-
-```bash
-pip install ".[train]"
+```shell
+torchrun --nproc_per_node=<gpus> -m welt_training.train <config.yaml> [section.key=value ...]
 ```
 
-Run:
-[//]: # (TODO: Unclear why `remove_unused_columns=False` is needed, but it is required to avoid errors during training.)
+Overrides are YAML values, at any depth: `output_dir=./output/test`, `train.train_iters=50`,
+`logger.wandb_project=null`, `model.modality_dropout=0.3`.
+Configs can inherit with `$extends: ./other.yaml` (relative to the file), deep-merging their sections.
 
-```bash
-python -m welt_training.train \
-    --image_encoder_model_name_or_path "WinKawaks/vit-tiny-patch16-224" \
-    --bytes_encoder_model_name_or_path "prajjwal1/bert-tiny" \
-    --latent_transformer_model_name_or_path "sbintuitions/tiny-lm" \
-    --bytes_decoder_model_name_or_path "sbintuitions/tiny-lm" \
-    --load_pretrained True \
-    --dataset_name Helsinki-NLP/opus-100 \
-    --dataset_config_name en-he \
-    --dataset_text_template "<en> {translation[en]} <he> {translation[he]}" \
-    --remove_unused_columns False \
-    --per_device_train_batch_size 1 \
-    --per_device_eval_batch_size 1 \
-    --do_train \
-    --save_steps 10 \
-    --output_dir output \
-    --overwrite_output_dir \
-    --logging_steps 1 \
-    --logging_strategy steps \
-    --max_steps 50 \
-    --max_sequence_length 32 \
-    --max_word_length 8 \
-    --dataloader_num_workers 4 \
-    --include_tokens_per_second True \
-    --include_num_input_tokens_seen True \
-    --max_train_samples 16 \
-    --warmup_freeze_steps 10
+## Config
+
+```yaml
+output_dir: ./output/string-repetition-tiny  # welt.yaml, processor/, checkpoints/, tensorboard/
+
+model:
+  bytes_encoder: sign/utf8-lm-tiny        # HF model id/path, a JSON HF config, or null
+  image_encoder: null                     # A HF model id/path or JSON config (patch transformer), or null
+  latent_transformer: sbintuitions/tiny-lm
+  bytes_decoder: sign/utf8-lm-tiny
+  load_pretrained: true                   # Initialize id/path transformers from their HF weights
+  # pretokenizer: EleutherAI/pythia-14m   # A HF tokenizer splitting words, defaults to sign/words-segmentation
+  # trust_remote_code: false
+  # modality_dropout: 0.15                # Any other WeLTModelProvider field, e.g. tensor_model_parallel_size
+
+data:
+  dataset_name: Helsinki-NLP/opus-100
+  dataset_config_name: en-he
+  dataset_text_template:                  # [prefix, completion] (concatenated for training), or one string
+    - "<text>\x0E{translation[en]}\x0F<repeat> "
+    - "{translation[en]}"
+  seq_length: 128                         # Words per packed example
+  max_word_length: 16                     # Bytes per word, including BOS and EOS
+  max_eval_samples: 32
+  num_workers: 8
+
+# Megatron-Bridge sections, keys set as-is on its configs (unknown keys raise)
+train:                                    # TrainingConfig
+  train_iters: 10000
+  micro_batch_size: 32
+  global_batch_size: 32
+optimizer:                                # OptimizerConfig
+  lr: 6.0e-4
+  min_lr: 6.0e-5
+scheduler:                                # SchedulerConfig
+  lr_warmup_iters: 500
+validation:                               # ValidationConfig
+  eval_interval: 100
+  eval_iters: 1
+checkpoint:                               # CheckpointConfig
+  save_interval: 1000
+logger:                                   # LoggerConfig
+  wandb_project: string-repetition        # null disables W&B; wandb_exp_name names the run
+# ddp: DistributedDataParallelConfig, rng: RNGConfig
 ```
 
-Use `warmup_freeze_steps=N` to freeze the pretrained modules for the first N steps
-([#7](https://github.com/sign/WeLT/issues/7)).
+Defaults ([`train.py`](train.py) `build_config`): 1000 iterations of batch 32, distributed Adam
+(lr 3e-4 → 3e-5 cosine, betas 0.9/0.95, weight decay 0.01, grad clip 1.0), bf16, evaluation every 500 iterations,
+checkpoints every 1000 to `<output_dir>/checkpoints` (also loaded from there, to resume), TensorBoard logs to
+`<output_dir>/tensorboard`, seed 42.
 
-### Training Quirks
+### Model
 
-`num_input_tokens_seen` and `train_tokens_per_second` are calculated based on the number of bytes the model decodes.
-That means that in practice, if `max_word_length=32`, a rough estimate of
-the real number of **words** the model sees should be divided by 32.
+`model` keys other than the four transformers, `load_pretrained`, `pretokenizer` and `trust_remote_code` are set on
+the `WeLTModelProvider` ([`welt/model.py`](../welt/model.py)), the latent transformer's Megatron config, e.g.
+`modality_dropout` (default 0.15: with both encoders, each one's embeddings are dropped with this probability per
+step, rescaling the other), `tensor_model_parallel_size`, `sequence_parallel`, or `recompute_granularity`.
+Parallelism, precision and recomputation settings are shared with the other transformers
+(`SHARED_CONFIG_FIELDS`); other fields, e.g. `hidden_dropout`, only apply to the latent transformer.
 
-### Performance Optimization
+The image encoder is a causal LM architecture (e.g. [`models/image-encoder-tiny.json`](experiments/models/image-encoder-tiny.json)),
+used bidirectionally over the 16x16 patches of each rendered word, with a CLS. With `load_pretrained: true` and a
+HF model id, it starts from that LM's transformer weights. See [`ocr.yaml`](experiments/easy-tasks/ocr.yaml).
 
-To speed up the processor's image rendering and preprocessing, you can
-increase `processor.cache_size` to cache more preprocessed images in memory.
-(`cache_size=500_000` can take 25GB of RAM per process).
-Ideally, we make the renderer so fast it doesn't need caching at all.
+### Data
+
+The `data` section configures the `WeLTDatasetProvider` ([`data.py`](data.py), [`data_utils.py`](data_utils.py)).
+Texts come from one of:
+- a HF dataset: `dataset_name`, `dataset_config_name`. Without a validation split, `validation_split_percentage`
+  (default 5) of train is held out. Large datasets can be `streaming: true`, which materializes the first
+  `max_train_samples` and `max_eval_samples` examples (both required).
+- local files: `train_file`, `validation_file` (`.txt`, `.json`, `.csv`, ...).
+- shards made by `welt-prepare-data`: `prepared_data_path` (see the [README](../README.md#data-preparation)).
+
+`dataset_text_template` is a Python format string over the dataset's columns (without it, the `text` column, or the
+first). As `[prefix, completion]`, both parts are concatenated for training, and `welt-evaluate` generates the
+completion from the prefix. `max_train_samples` / `max_eval_samples` cap the number of texts per split.
+
+Texts are prefixed with BOS, split into words, and packed in order into examples of exactly `seq_length` words
+(longer texts are truncated, the rest padded). With the default pretokenizer, words longer than
+`max_word_length - 2` bytes are split.
+Within the model, the bytes of all words (and the patches of rendered words) are packed without padding, so the
+encoders and the bytes decoder only compute on real bytes.
+Dataloader options (`num_workers`, `pin_memory`, ...) and `preprocessing_num_workers` also go in `data`.
+
+### Validation
+
+Each evaluation draws `validation.eval_iters × train.global_batch_size` packed examples. When that is at least the
+number of packed validation examples, every evaluation covers the whole validation set (examples repeat to fill
+the batches); otherwise only part of it is, and a warning is logged. Use `max_eval_samples` to keep
+the validation set small, and raise `eval_iters` to cover it.
+
+## Parallelism
+
+- **Data parallel**: `torchrun --nproc_per_node=N` (and Megatron's distributed optimizer). `train.global_batch_size`
+  must be a multiple of `micro_batch_size` × the data parallel size; larger multiples accumulate gradients.
+- **Tensor parallel**: `model.tensor_model_parallel_size=T`, optionally with `model.sequence_parallel=true`.
+  Data parallel size is then `N / T`.
+- Pipeline and context parallelism are not supported.
+
+[`benchmarks/parity.sh`](../benchmarks/parity.sh) checks that 1 GPU, DP=2 and TP=2 (with sequence parallelism)
+train alike, on 2 GPUs.
+
+## Optimizers
+
+Megatron's optimizers, selected by `optimizer.optimizer`: `adam` (default), `sgd`, `lion`,
+`muon` (2D weights orthogonalized, the rest with Adam; see [`letter-count.yaml`](experiments/easy-tasks/letter-count.yaml)),
+`adaptive_muon`, `soap`, `scion`, `psgd_pro` and the other
+[Emerging-Optimizers](https://github.com/NVIDIA-NeMo/Emerging-Optimizers).
+Their hyperparameters are `OptimizerConfig` fields (e.g. `optimizer.muon_momentum`).
+
+## Not ported from the HuggingFace Trainer implementation
+
+The previous implementation is kept at the `huggingface-transformers` git tag. Not ported:
+- UTF-16/UTF-32 encodings (`CharacterCausalLMWrapper`): only UTF-8 bytes are supported.
+- `warmup_freeze_steps` and the Dion optimizer.
+- Generation metrics during training: export a checkpoint and run `welt-evaluate` instead.
