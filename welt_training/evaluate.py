@@ -29,12 +29,15 @@ def evaluate(config_path: str, url: str, max_samples: int = 256, max_generated_w
     prefixes = [prefix_template.format(**example) for example in validation]
     references = [completion_template.format(**example) for example in validation]
 
-    generate(url, prefixes[:2], max_generated_words=2)  # Warmup
+    generate(url, prefixes, max_generated_words=2)  # Warmup, with the batch size of the measurement
     start = time.perf_counter()
     result = generate(url, prefixes, max_generated_words=max_generated_words)
     elapsed = time.perf_counter() - start
     predictions = result["outputs"]
     return {
+        "config": config_path,
+        "url": url,
+        "max_generated_words": max_generated_words,
         "samples": len(references),
         "exact_match": sum(p.strip() == r.strip()
                            for p, r in zip(predictions, references, strict=True)) / len(references),
@@ -56,10 +59,11 @@ def main():
     args = parser.parse_args()
 
     results = evaluate(args.config, args.url, args.max_samples, args.max_generated_words)
-    print(json.dumps(results, indent=2, ensure_ascii=False))
     if args.output:
         with open(args.output, "w") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
+        results.pop("examples")  # Only the summary on stdout
+    print(json.dumps(results, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

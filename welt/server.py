@@ -82,7 +82,7 @@ def generate(url: str, texts: list[str], max_generated_words: int = 50, temperat
                 return json.load(response)
         except urllib.error.HTTPError as error:
             if error.code != 503:
-                raise
+                raise RuntimeError(f"welt-serve answered {error.code}: {error.read().decode()}") from error
             time.sleep(float(error.headers.get("Retry-After", 1)))
 
 
