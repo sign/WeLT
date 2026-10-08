@@ -18,6 +18,7 @@ dependencies = [
     "datasets>=4", # Older releases break with current pyarrow
     "pyyaml",
     "cachetools", # For LRU cache in processor
+    "sacrebleu", # For generation evaluation metrics
     "flask", # welt-serve
     "gunicorn", # welt-serve
     # Our packages
@@ -72,6 +73,7 @@ testpaths = [
 welt-export = "welt.export:main"
 welt-serve = "welt.server:main"
 welt-generate = "welt.server:generate_main"
+welt-evaluate = "welt_training.evaluate:main"
 welt-prepare-data = "welt_training.prepare_data:main"
 welt-verify-data = "welt_training.verify_data:main"
 
