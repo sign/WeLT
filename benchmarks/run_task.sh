@@ -7,6 +7,7 @@ mkdir -p "$output"
 torchrun --nproc_per_node=1 -m welt_training.train "$config" output_dir="$output" "$@" 2>&1 | tee "$output/train.log"
 welt-export "$output/checkpoints" --output "$output/export"
 port=${PORT:-8199}
+if curl -s localhost:$port > /dev/null; then echo "Port $port is in use, set PORT" >&2; exit 1; fi
 welt-serve "$output/export" --port $port > "$output/serve.log" 2>&1 &
 server=$!
 trap 'kill $server; wait $server' EXIT  # Waits for vLLM to release the GPU
