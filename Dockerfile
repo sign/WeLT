@@ -17,9 +17,10 @@ WORKDIR /app
 # Dependencies first, for layer caching (python -m pip: the NeMo image has a separate system pip)
 COPY pyproject.toml README.md /app/
 RUN mkdir -p welt welt_training && python -m pip install ".[dev]" && python -m pip uninstall -y WeLT
-# Rendering fonts are downloaded once, at build time
+# Rendering fonts are downloaded once, at build time, rendering a word (which fails the build if Pango cannot load)
 RUN python -c "from font_download import FontConfig; from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS; \
-    FontConfig(sources=FONTS_NOTO_SANS).get_font_dir()"
+    from pixel_renderer import PixelRendererProcessor; \
+    print(PixelRendererProcessor(font=FontConfig(sources=FONTS_NOTO_SANS)).render_text('hello').shape)"
 
 # Editable install: the commands (and the vLLM plugin) use /app, also when a checkout is mounted there
 COPY . /app

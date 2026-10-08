@@ -1,14 +1,11 @@
 """
-WeLT generation with vLLM, from a `welt.export` directory.
-
-    welt-generate <export_dir> "<text prompt>" ["<another prompt>" ...]
+WeLT generation with vLLM, from a `welt.export` directory. Served by welt-serve (welt/server.py).
 
 Each generation step runs, for all active prompts at once:
 1. the encoders (vLLM pooling) on new words -> word embeddings (cached per word)
 2. the latent transformer (vLLM pooling, prefix cached) on all word embeddings -> latent of the last word
 3. the bytes decoder (vLLM generation, valid UTF-8 only) from the latent -> bytes of the next word
 """
-import argparse
 import os
 
 # Engine processes are spawned, not forked: forking after CUDA / Megatron imports is unsafe
@@ -112,7 +109,8 @@ class WeLTGenerator:
         return self._map(self._pooled(self.latent, prompts, params).to(self.device), "decoder")
 
     @torch.inference_mode()
-    def _next_words(self, latents: torch.Tensor, prefixes: list[bytes], sampling: SamplingParams) -> list[bytes]:
+    def _next_words(self, latents: torch.Tensor, prefixes: list[bytes],
+                    sampling: SamplingParams | list[SamplingParams]) -> list[bytes]:
         prompts = []
         for latent, prefix in zip(latents, prefixes, strict=True):
             byte_ids = torch.tensor([self.tokenizer.bos_token_id, *prefix], device=self.device)
@@ -139,9 +137,11 @@ class WeLTGenerator:
         for step in range(max_generated_words):
             if not active:
                 break
-            sampling = SamplingParams(temperature=temperature, seed=None if seed is None else seed + step,
-                                      detokenize=False, max_tokens=self.processor.max_word_length - 1,
-                                      stop_token_ids=[self.tokenizer.eos_token_id])
+            # The decoder's context (max_word_length + 1) holds the latent, BOS, the word's prefix and new bytes
+            sampling = [SamplingParams(temperature=temperature, seed=None if seed is None else seed + step,
+                                       max_tokens=self.processor.max_word_length - 1 - len(prefixes[i]),
+                                       stop_token_ids=[self.tokenizer.eos_token_id], detokenize=False)
+                        for i in active]
             latents = self._latents([sequences[i] for i in active])
             next_words = self._next_words(latents, [prefixes[i] for i in active], sampling)
             still_active = []
@@ -155,21 +155,3 @@ class WeLTGenerator:
                 still_active.append(i)
             active = still_active
         return ["".join(words) for words in generated]
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("model", help="Directory exported by welt.export")
-    parser.add_argument("prompts", nargs="+")
-    parser.add_argument("--max_generated_words", type=int, default=50)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    args = parser.parse_args()
-
-    generator = WeLTGenerator(args.model)
-    outputs = generator.generate(args.prompts, args.max_generated_words, args.temperature)
-    for prompt, output in zip(args.prompts, outputs, strict=True):
-        print(repr(prompt), "->", repr(output))
-
-
-if __name__ == "__main__":
-    main()

@@ -41,8 +41,7 @@ TOKENIZER = UTF8Tokenizer()
 def build_dataset_provider(model: dict, data: dict) -> WeLTDatasetProvider:
     return WeLTDatasetProvider(render_images=model.get("image_encoder") is not None,
                                pretokenizer_name=model.get("pretokenizer"),
-                               trust_remote_code=model.get("trust_remote_code", False),
-                               **data)
+                               **{"trust_remote_code": model.get("trust_remote_code", False)} | data)
 
 
 def build_config(config: dict, model_provider, dataset_provider, vocab_size: int) -> ConfigContainer:

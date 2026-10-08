@@ -50,7 +50,8 @@ def dataset_lengths(datasets: dict, context, samples_per_eval: int | None) -> di
         lengths["train"] = repeated_length(len(datasets["train"]), context.train_samples)
     if "validation" in datasets:
         num_examples = len(datasets["validation"])
-        lengths["validation"] = samples_per_eval or repeated_length(num_examples, context.valid_samples)
+        lengths["validation"] = repeated_length(num_examples, context.valid_samples)  # Raises if empty
+        lengths["validation"] = samples_per_eval or lengths["validation"]
         if samples_per_eval is not None and samples_per_eval < num_examples:
             logger.warning(f"Evaluations see {samples_per_eval} of {num_examples} validation examples, "
                            "increase validation.eval_iters to see them all")

@@ -19,6 +19,8 @@ dependencies = [
     "pyyaml",
     "cachetools", # For LRU cache in processor
     "sacrebleu", # For generation evaluation metrics
+    "flask", # welt-serve
+    "gunicorn", # welt-serve
     # Our packages
     "words-segmentation>=0.0.5", # For pre-tokenization into words
     "utf8-tokenizer[fast]>=0.8.2", # For tokenization of bytes
@@ -68,7 +70,8 @@ testpaths = [
 
 [project.scripts]
 welt-export = "welt.export:main"
-welt-generate = "welt.inference:main"
+welt-serve = "welt.server:main"
+welt-generate = "welt.server:generate_main"
 welt-evaluate = "welt_training.evaluate:main"
 welt-prepare-data = "welt_training.prepare_data:main"
 welt-verify-data = "welt_training.verify_data:main"

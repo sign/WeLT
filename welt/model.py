@@ -63,10 +63,12 @@ def safetensors_checkpoint(name_or_path: str) -> str:
     from huggingface_hub import list_repo_files
     from transformers import AutoModelForCausalLM
 
-    if os.path.isdir(name_or_path) or any(f.endswith(".safetensors") for f in list_repo_files(name_or_path)):
+    files = os.listdir(name_or_path) if os.path.isdir(name_or_path) else list_repo_files(name_or_path)
+    if any(f.endswith(".safetensors") for f in files):
         return name_or_path
     path = os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
-                        "safetensors", name_or_path)
+                        "safetensors", os.path.abspath(name_or_path).lstrip("/") if os.path.isdir(name_or_path)
+                        else name_or_path)
     if not os.path.isdir(path):
         AutoModelForCausalLM.from_pretrained(name_or_path).save_pretrained(path)
     return path

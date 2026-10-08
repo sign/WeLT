@@ -67,6 +67,24 @@ def test_generate_with_vllm(trained):
     assert len(outputs) == 2
     assert all(isinstance(output, str) for output in outputs)
 
+    # Served by welt-serve's app, through its HTTP client
+    import threading
+
+    from werkzeug.serving import make_server
+
+    from welt.server import create_app, generate
+
+    server = make_server("localhost", 0, create_app(generator), threaded=True)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        served = generate(f"http://localhost:{server.port}", ["number 4 is", "number \x0E7\x0F is od"],
+                          max_generated_words=3)
+    finally:
+        server.shutdown()
+        thread.join()
+    assert served["outputs"] == outputs  # Greedy
+
 
     # Sampled at a high temperature from random latents, words are still valid UTF-8 (ending at a character boundary)
     from vllm import SamplingParams
