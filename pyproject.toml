@@ -6,9 +6,12 @@ authors = [
     { name = "Amit Moryossef", email = "amit@sign.mt" },
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
+# Megatron-Bridge, Megatron-Core, Transformer Engine, vLLM, torch and transformers come from the
+# NeMo container (nvcr.io/nvidia/nemo:26.08.01), see the Dockerfile.
 dependencies = [
-    "transformers[torch]>=4.57,<5",
+    "torch",
+    "transformers",
     "trl", # For huggingface implementation of pack_dataset
     "datasets",
     "Pillow", # For AutoImageProcessor

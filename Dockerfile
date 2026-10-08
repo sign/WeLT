@@ -1,25 +1,24 @@
-FROM nvcr.io/nvidia/pytorch:26.01-py3
+# Megatron-Bridge, Megatron-Core, Transformer Engine, vLLM, torch and transformers come with the NeMo container
+FROM nvcr.io/nvidia/nemo:26.08.01
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# System deps (git for installs; build-essential for compiling kernels; tidy apt cache)
-# Rendering system deps (pango, cairo...)
+# Text rendering (pango, cairo)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential pkg-config \
+    apt-get install -y --no-install-recommends pkg-config \
       libgirepository-1.0-1 libcairo2 gir1.2-pango-1.0 libcairo2-dev libgirepository1.0-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Install package dependencies
-RUN mkdir -p /app/welt/vision && \
-    mkdir -p /app/welt_training && \
-    touch /app/README.md
 WORKDIR /app
-COPY pyproject.toml /app/pyproject.toml
-RUN pip install ".[train]"
+# Dependencies first, for layer caching (python -m pip: the NeMo image has a separate system pip)
+COPY pyproject.toml README.md /app/
+RUN mkdir -p welt/vision welt_training && python -m pip install ".[dev,train]" && python -m pip uninstall -y WeLT
+# Rendering fonts are downloaded once, at build time
+RUN python -c "from font_download import FontConfig; from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS; \
+    FontConfig(sources=FONTS_NOTO_SANS).get_font_dir()"
 
-COPY welt /app/welt
-COPY welt_training /app/welt_training
-
-CMD accelerate launch --mixed_precision bf16 -m welt_training.train $CONFIG
+# Editable install: the commands (and the vLLM plugin) use /app, also when a checkout is mounted there
+COPY . /app
+RUN python -m pip install --no-deps -e .
