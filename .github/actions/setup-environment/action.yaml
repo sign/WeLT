@@ -1,5 +1,5 @@
 name: 'Setup Environment'
-description: 'Install rendering dependencies, setup uv, and install Python dependencies'
+description: 'Install the rendering stack (Pango, cairo, PyGObject from conda-forge) and the Python dependencies'
 
 inputs:
   python-version:
@@ -10,23 +10,16 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Set up Pango and Cairo
-      uses: sign/pixel-renderer/.github/actions/setup-pango-cairo@main
-
-    # ponytail: pixel-renderer 0.1.4 pins PyGObject<3.52, built against girepository-1.0 (the action installs 2.0).
-    # Remove once a pixel-renderer release allows modern PyGObject.
-    - name: Install girepository-1.0
-      shell: bash
-      run: sudo apt-get install -y libgirepository1.0-dev
-
-    - name: Setup uv
-      uses: astral-sh/setup-uv@v7
+    # conda-forge ships the latest Pango, cairo and PyGObject (as pixel-renderer's CI and the Dockerfile)
+    - name: Set up the rendering stack
+      uses: mamba-org/setup-micromamba@v3
       with:
-        python-version: ${{ inputs.python-version }}
-        enable-cache: true
-        activate-environment: true
+        environment-name: welt
+        create-args: -c conda-forge python=${{ inputs.python-version }} pango pycairo pygobject
+        cache-downloads: true
 
     - name: Install dependencies
-      shell: bash
-      run: uv pip install ".[dev,train]"
-
+      shell: bash -el {0}
+      run: |
+        pip install ".[dev,train]"
+        echo "$CONDA_PREFIX/bin" >> "$GITHUB_PATH"  # The environment's python, pytest and ruff for later steps

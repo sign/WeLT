@@ -23,4 +23,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WANDB_MODE: disabled
-        run: uv run --no-sync pytest -n auto --dist loadscope
+        run: pytest -n auto --dist loadscope
