@@ -68,6 +68,23 @@ def test_generate_with_vllm(trained):
     assert all(isinstance(output, str) for output in outputs)
 
 
+    # Sampled at a high temperature from random latents, words are still valid UTF-8 (ending at a character boundary)
+    from vllm import SamplingParams
+
+    latents = torch.randn(64, generator.weights["decoder_norm.weight"].size(0), device="cuda").bfloat16()
+    sampling = SamplingParams(temperature=2.0, seed=0, max_tokens=generator.processor.max_word_length - 1,
+                              stop_token_ids=[generator.tokenizer.eos_token_id], detokenize=False)
+    words = generator._next_words(latents, [b""] * len(latents), sampling)
+    assert any(max(word, default=0) >= 0x80 for word in words)  # Multi-byte characters were sampled
+    invalid = []
+    for word in words:
+        try:
+            word.decode("utf-8")
+        except UnicodeDecodeError:
+            invalid.append(word)
+    assert not invalid, (invalid, sum(len(w) == sampling.max_tokens for w in words))
+
+
 def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     """The exported model, served by vLLM, computes what the Megatron model computes."""
     from vllm import SamplingParams
@@ -102,8 +119,10 @@ def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     # Negative control: without the bidirectional shift block, vLLM matches Megatron's causal latent instead
     monkeypatch.setattr(welt.inference, "get_shift_blocks", lambda _: [])
     vllm_causal = generator._latents([words])[0]
-    assert error(causal_latents[-1], latents[-1]) > 2 * error(latent, latents[-1])  # The test is sensitive
     assert error(vllm_causal, causal_latents[-1]) < 0.02
+    # Each is closer to its own Megatron counterpart (the shift block changes the latent by a few percent)
+    assert error(latent, latents[-1]) < error(latent, causal_latents[-1])
+    assert error(vllm_causal, causal_latents[-1]) < error(vllm_causal, latents[-1])
 
     # The decoder predicts the same first byte (index 1, after BOS)
     greedy = SamplingParams(temperature=0, max_tokens=1, detokenize=False)

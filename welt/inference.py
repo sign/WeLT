@@ -6,7 +6,7 @@ WeLT generation with vLLM, from a `welt.export` directory.
 Each generation step runs, for all active prompts at once:
 1. the encoders (vLLM pooling) on new words -> word embeddings (cached per word)
 2. the latent transformer (vLLM pooling, prefix cached) on all word embeddings -> latent of the last word
-3. the bytes decoder (vLLM generation) from the latent -> bytes of the next word
+3. the bytes decoder (vLLM generation, valid UTF-8 only) from the latent -> bytes of the next word
 """
 import argparse
 import os
@@ -24,6 +24,7 @@ from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
 from welt.attention import get_shift_blocks  # noqa: E402
 from welt.processor import TextImageProcessor  # noqa: E402
+from welt.utf8 import UTF8LogitsProcessor  # noqa: E402
 from welt.vllm_plugin import RANGES_KEY, restore_opentelemetry_context  # noqa: E402
 
 
@@ -51,7 +52,8 @@ class WeLTGenerator:
                           enable_prompt_embeds=True, enable_prefix_caching=True, enable_chunked_prefill=False,
                           pooler_config=PoolerConfig(seq_pooling_type="LAST", use_activation=False), **engine)
         self.decoder = LLM(os.path.join(path, "bytes_decoder"), enable_prompt_embeds=True,
-                           max_model_len=self.processor.max_word_length + 1, **engine)
+                           max_model_len=self.processor.max_word_length + 1,
+                           logits_processors=[UTF8LogitsProcessor], **engine)
 
         self.weights = load_file(os.path.join(path, "welt.safetensors"), device=device)  # The layers around them
 
