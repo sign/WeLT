@@ -6,7 +6,9 @@ WeLT generation server: an exported model on one GPU, served over HTTP (run in t
 GET  /health   -> {"status": "ok", "version": MODEL_TAG}
 POST /generate {"texts": [...], "max_generated_words": 50, "temperature": 0.0, "seed": null}
                -> {"outputs": [...], "generated_words": N}
+Invalid requests, and prompts whose words + max_generated_words exceed the latent's context, get a 400.
 One generation runs at a time (vLLM batches all texts of a request); a busy server answers 503 with Retry-After.
+Responses carry an X-Model-Tag header from the MODEL_TAG environment variable, when set.
 `generate()` is the client, used by welt-generate (`welt-generate "<prompt>" ... --url URL`) and welt-evaluate.
 """
 import argparse

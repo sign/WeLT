@@ -1,58 +1,10 @@
 # Easy Tasks
 
-We define easy task to verify the model is able to perform basic computation.
+Small tasks that verify the model learns basic computation, in minutes on one GPU
+(results in [benchmarks](../../../benchmarks#tasks)). Each is evaluated with `welt-evaluate`.
 
-### String Repetition
-
-```bash
-export WANDB_PROJECT="string-repetition"
-welt-train welt_training/experiments/easy-tasks/string-repetition.yaml
-```
-
-Or
-```shell
-mkdir -p output && \
-docker build -t welt . && \
-docker run -it --rm --gpus all \
-  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v "$(pwd)/welt:/app/welt" \
-  -v "$(pwd)/welt_training:/app/welt_training" \
-  -v "$(pwd)/output:/app/output" \
-  -v /shared/.cache:/root/.cache \
-  -v ~/.netrc:/root/.netrc:ro \
-  -e WANDB_PROJECT="string-repetition" \
-  -e WANDB_NAME="full-run-dion-lr" \
-  -e CONFIG="welt_training/experiments/easy-tasks/string-repetition.yaml" \
-  welt
-```
-
-### OCR
-
-```bash
-export WANDB_PROJECT="ocr"
-welt-train welt_training/experiments/easy-tasks/ocr.yaml
-```
-
-### Letter Count
-
-```bash
-export WANDB_PROJECT="letter-count"
-welt-train welt_training/experiments/easy-tasks/letter-count.yaml
-```
-
-Or
-```shell
-mkdir -p output && \
-docker build -t welt . && \
-docker run -it --rm --gpus all \
-  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v "$(pwd)/welt:/app/welt" \
-  -v "$(pwd)/welt_training:/app/welt_training" \
-  -v "$(pwd)/output:/app/output" \
-  -v /shared/.cache:/root/.cache \
-  -v ~/.netrc:/root/.netrc:ro \
-  -e WANDB_PROJECT="letter-count" \
-  -e WANDB_NAME="full-run-dion-lr" \
-  -e CONFIG="welt_training/experiments/easy-tasks/letter-count.yaml" \
-  welt
-```
+| Config | Task |
+|--------|------|
+| [`string-repetition.yaml`](string-repetition.yaml) | Repeat an English sentence (opus-100), pretrained tiny LMs, bytes encoder only |
+| [`ocr.yaml`](ocr.yaml) | Write a sentence seen only as rendered word images: a patch transformer image encoder from scratch, no bytes encoder |
+| [`letter-count.yaml`](letter-count.yaml) | Count the letters of a word, with the Muon optimizer |

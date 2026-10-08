@@ -1,16 +1,10 @@
 # Chat
 
+Fine-tunes the pretrained [PleIAs/Monad](https://huggingface.co/PleIAs/Monad) as the latent transformer on
+single-turn chat ([PleIAs/SYNTH](https://huggingface.co/datasets/PleIAs/SYNTH), streamed: 1M training examples),
+with query, reasoning and answer delimited by control characters, as in the "Back to bytes" paper.
+Uses the Muon optimizer.
+
 ```shell
-mkdir -p output && \
-docker build -t welt . && \
-docker run -it --rm --gpus all \
-  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v "$(pwd)/welt:/app/welt" \
-  -v "$(pwd)/welt_training:/app/welt_training" \
-  -v "$(pwd)/output:/app/output" \
-  -v /shared/.cache:/root/.cache \
-  -v ~/.netrc:/root/.netrc:ro \
-  -e WANDB_PROJECT="welt" \
-  -e CONFIG="welt_training/experiments/chat/single-query.yaml" \
-  welt
- ```
+torchrun --nproc_per_node=1 -m welt_training.train welt_training/experiments/chat/single-query.yaml
+```
