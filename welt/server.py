@@ -49,11 +49,18 @@ def create_app(generator=None, model_tag: str | None = None) -> Flask:
         texts = body.get("texts") if isinstance(body, dict) else None
         if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
             return jsonify(message="'texts' must be a list of strings"), 400
+        try:
+            options = dict(max_generated_words=int(body.get("max_generated_words", 50)),
+                           temperature=float(body.get("temperature", 0.0)),
+                           seed=None if body.get("seed") is None else int(body["seed"]))
+        except (TypeError, ValueError) as error:
+            return jsonify(message=f"Invalid option: {error}"), 400
         if not busy.acquire(blocking=False):
             return jsonify(message="Busy"), 503, {"Retry-After": "1"}
         try:
-            outputs = generator.generate(texts, max_generated_words=int(body.get("max_generated_words", 50)),
-                                         temperature=float(body.get("temperature", 0.0)), seed=body.get("seed"))
+            outputs = generator.generate(texts, **options)
+        except ValueError as error:  # e.g. a context longer than the model's
+            return jsonify(message=str(error)), 400
         finally:
             busy.release()
         generated_words = sum(len(generator.processor.pretokenize(output)) - 1 for output in outputs)  # Without BOS

@@ -16,6 +16,8 @@ class FakeGenerator:
         self.processor = type("Processor", (), {"pretokenize": staticmethod(lambda text: ["\x02", *text.split()])})
 
     def generate(self, texts, max_generated_words, temperature, seed):
+        if max_generated_words > 100:
+            raise ValueError("Prompt words + max_generated_words exceed the latent's context")
         self.release.wait()
         return [f"{text}!" * max_generated_words for text in texts]
 
@@ -41,8 +43,10 @@ def test_generate(client):
     assert response.json == {"outputs": ["a b!a b!", "c!c!"], "generated_words": 4}
 
 
-@pytest.mark.parametrize("body", [None, [], {"texts": "a"}, {"texts": [1]}])
-def test_generate_rejects_invalid_texts(client, body):
+@pytest.mark.parametrize("body", [None, [], {"texts": "a"}, {"texts": [1]}, {"texts": ["a"], "seed": "x"},
+                                  {"texts": ["a"], "max_generated_words": "x"},
+                                  {"texts": ["a"], "max_generated_words": 1000}])
+def test_generate_rejects_invalid_requests(client, body):
     assert client.post("/generate", json=body).status_code == 400
 
 

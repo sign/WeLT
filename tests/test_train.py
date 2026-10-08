@@ -100,13 +100,8 @@ def test_generate_with_vllm(trained):
                               stop_token_ids=[generator.tokenizer.eos_token_id], detokenize=False)
     words = generator._next_words(latents, [b""] * len(latents), sampling)
     assert any(max(word, default=0) >= 0x80 for word in words)  # Multi-byte characters were sampled
-    invalid = []
     for word in words:
-        try:
-            word.decode("utf-8")
-        except UnicodeDecodeError:
-            invalid.append(word)
-    assert not invalid, (invalid, sum(len(w) == sampling.max_tokens for w in words))
+        word.decode("utf-8")  # Raises on invalid UTF-8
 
 
 def test_vllm_matches_megatron(trained, megatron, monkeypatch):
@@ -139,6 +134,11 @@ def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     latent = generator._latents([words])[0]
     assert error(latent, latents[-1]) < 0.02
     assert error(generator._latents([words])[0], latent) < 1e-3  # Again, from the prefix cache
+    # A prompt with the same words before, and the same ranges, but other words within the shift block, does not
+    # reuse the cached keys and values of the block's first words (which attend to the rest of the block)
+    other = generator.processor.pretokenize(text.replace("which is even", "which is odd"))
+    generator._latents([other])
+    assert error(generator._latents([words])[0], latent) < 1e-3
 
     # Negative control: without the bidirectional shift block, vLLM matches Megatron's causal latent instead
     monkeypatch.setattr(welt.inference, "get_shift_blocks", lambda _: [])

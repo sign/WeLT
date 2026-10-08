@@ -85,12 +85,11 @@ def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str
 
 
 def export(checkpoint: str, output: str):
-    run_dir = os.path.dirname(os.path.normpath(checkpoint))
-    if not os.path.basename(os.path.normpath(checkpoint)).startswith("iter_"):  # A checkpoints dir, use the latest
+    checkpoint = os.path.normpath(checkpoint)
+    if not os.path.basename(checkpoint).startswith("iter_"):  # A checkpoints dir, use the latest
         with open(os.path.join(checkpoint, "latest_checkpointed_iteration.txt")) as f:
             checkpoint = os.path.join(checkpoint, f"iter_{int(f.read().strip()):07d}")
-    else:
-        run_dir = os.path.dirname(run_dir)
+    run_dir = os.path.dirname(os.path.dirname(checkpoint))  # <run>/checkpoints/iter_N
 
     from welt_training.extendable_yaml import CONFIG_FILE_NAME, load_yaml
     config = load_yaml(os.path.join(run_dir, CONFIG_FILE_NAME))

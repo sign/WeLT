@@ -5,6 +5,9 @@ Each generation step runs, for all active prompts at once:
 1. the encoders (vLLM pooling) on new words -> word embeddings (cached per word)
 2. the latent transformer (vLLM pooling, prefix cached) on all word embeddings -> latent of the last word
 3. the bytes decoder (vLLM generation, valid UTF-8 only) from the latent -> bytes of the next word
+
+vLLM engines run in spawned processes, so a script creating a WeLTGenerator needs an `if __name__ == "__main__":`
+guard.
 """
 import os
 
@@ -105,9 +108,10 @@ class WeLTGenerator:
         prompts, params = [], []
         for words in sequences:
             ranges = list(get_shift_blocks(words))
-            # Cached keys and values depend on the bidirectional ranges, which are not part of vLLM's cache key
-            prompts.append({"prompt_embeds": torch.stack([embeddings[w] for w in words]),
-                            "cache_salt": repr(ranges)})
+            # Cached keys and values within a bidirectional range depend on all of its words, possibly beyond the
+            # cached block: vLLM's cache key must include them
+            salt = repr([words[start:end + 1] for start, end in ranges])
+            prompts.append({"prompt_embeds": torch.stack([embeddings[w] for w in words]), "cache_salt": salt})
             params.append(PoolingParams(use_activation=False, extra_kwargs={RANGES_KEY: ranges}))
         return self._map(self._pooled(self.latent, prompts, params).to(self.device), "decoder")
 
@@ -128,6 +132,9 @@ class WeLTGenerator:
                  seed: int | None = None) -> list[str]:
         """Greedy (or sampled, with temperature) continuation of each text, word by word."""
         sequences = [self.processor.pretokenize(text) for text in texts]
+        max_length = self.latent.llm_engine.model_config.max_model_len
+        if any(len(words) + max_generated_words > max_length for words in sequences):
+            raise ValueError(f"Prompt words + max_generated_words exceed the latent's context ({max_length} words)")
         # A prompt ending mid-word continues that word: its bytes become the decoder's prefix
         max_prefix = self.processor.max_word_length - 3  # BOS and EOS, and at least one new byte
         prefixes = [b""] * len(texts)
@@ -140,9 +147,9 @@ class WeLTGenerator:
         for step in range(max_generated_words):
             if not active:
                 break
-            # The decoder's context (max_word_length + 1) holds the latent, BOS, the word's prefix and new bytes
+            # Words have at most max_word_length - 2 bytes (without BOS and EOS), as in training
             sampling = [SamplingParams(temperature=temperature, seed=None if seed is None else seed + step,
-                                       max_tokens=self.processor.max_word_length - 1 - len(prefixes[i]),
+                                       max_tokens=self.processor.max_word_length - 2 - len(prefixes[i]),
                                        stop_token_ids=[self.tokenizer.eos_token_id], detokenize=False)
                         for i in active]
             latents = self._latents([sequences[i] for i in active])

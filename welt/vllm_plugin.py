@@ -34,12 +34,12 @@ def register():
     def _update_states(self, scheduler_output):
         result = update_states(self, scheduler_output)
         for new_request in scheduler_output.scheduled_new_reqs:
-            state = self.requests.get(new_request.req_id)
-            params = state.pooling_params if state is not None else None
-            ranges = (params.extra_kwargs or {}).get(RANGES_KEY) if params is not None else None
+            params = new_request.pooling_params
+            ranges = params and (params.extra_kwargs or {}).get(RANGES_KEY)
             if ranges:
-                # ponytail: relies on vLLM's runner reading `mm_features[i].mm_position` for prefix-LM ranges
-                state.mm_features = [
+                # ponytail: relies on vLLM's runner reading `mm_features[i].mm_position` for prefix-LM ranges;
+                # test_vllm_matches_megatron (with its negative control) catches a vLLM change silently breaking it
+                self.requests[new_request.req_id].mm_features = [
                     SimpleNamespace(modality="welt_shift_block",
                                     mm_position=PlaceholderRange(offset=start, length=end - start + 1))
                     for start, end in ranges]
