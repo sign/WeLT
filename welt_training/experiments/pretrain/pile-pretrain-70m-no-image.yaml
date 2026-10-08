@@ -1,0 +1,41 @@
+# Pretraining on prepared data shards (see `welt-prepare-data` in the README)
+output_dir: ./output/welt-pile-pretrain
+
+model:
+  bytes_encoder: welt_training/experiments/models/bytes-encoder-tiny.json
+  latent_transformer: welt_training/experiments/models/latent-70m.json
+  bytes_decoder: sbintuitions/tiny-lm
+
+data:
+  prepared_data_path: /scratch/data/pretrain
+  seq_length: 512
+  max_word_length: 32
+  max_eval_samples: 512
+  num_workers: 8
+
+train:
+  train_iters: 143000
+  micro_batch_size: 32
+  global_batch_size: 32
+
+optimizer:
+  lr: 1.0e-3
+  min_lr: 1.0e-4
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  clip_grad: 1.0
+
+scheduler:
+  lr_warmup_iters: 1430
+
+validation:
+  eval_interval: 5000
+  eval_iters: 16
+
+checkpoint:
+  save_interval: 1000
+
+logger:
+  log_interval: 10
+  wandb_project: welt-pretrain

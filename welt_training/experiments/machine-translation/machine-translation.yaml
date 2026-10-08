@@ -1,48 +1,35 @@
-# Model Setup
-image_encoder_model_name_or_path: WinKawaks/vit-tiny-patch16-224
-bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
-latent_transformer_model_name_or_path: EleutherAI/pythia-31m
-bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
-
-# Dataset setup
-dataset_name: Helsinki-NLP/opus-100
-dataset_config_name: en-he
-dataset_text_template: "<en>\x0E{translation[en]}\x0F<he> {translation[he]}"
-max_sequence_length: 128
-max_word_length: 16
-
-# Data Loader
-dataloader_num_workers: 8
-dataloader_prefetch_factor: 4
-dataloader_pin_memory: true
-dataloader_persistent_workers: true
-
-# Training setup
-remove_unused_columns: false # Necessary
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 2
-auto_find_batch_size: true
 output_dir: ./output/en-he
-do_train: true
-max_steps: 10000
-learning_rate: 3.0e-4
-optim: adamw_torch_fused
 
-# Evaluation
-do_eval: false
-eval_on_start: true
-eval_strategy: steps
-eval_steps: 500
-metric_for_best_model: accuracy
-max_eval_samples: 32
+model:
+  image_encoder: welt_training/experiments/models/image-encoder-tiny.json
+  bytes_encoder: sign/utf8-lm-tiny
+  latent_transformer: welt_training/experiments/models/latent-70m.json
+  bytes_decoder: sbintuitions/tiny-lm
 
-# Logging
-logging_steps: 10
-logging_strategy: steps
-include_tokens_per_second: true
-include_num_input_tokens_seen: true
-report_to: wandb
+data:
+  dataset_name: Helsinki-NLP/opus-100
+  dataset_config_name: en-he
+  dataset_text_template:
+    - "<en>\x0E{translation[en]}\x0F<he> "
+    - "{translation[he]}"
+  seq_length: 128
+  max_word_length: 16
+  max_eval_samples: 256
+  num_workers: 8
 
-# Dtype
-bf16: true
-dtype: bfloat16
+train:
+  train_iters: 10000
+  micro_batch_size: 64
+  global_batch_size: 64
+
+optimizer:
+  lr: 3.0e-4
+  min_lr: 3.0e-5
+
+validation:
+  eval_interval: 500
+  eval_iters: 4
+
+logger:
+  log_interval: 10
+  wandb_project: welt-machine-translation
