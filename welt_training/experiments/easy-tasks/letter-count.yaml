@@ -12,8 +12,5 @@ data:
     - "<text>\x0E{text}\x0F<count> "
     - "{count}"
 
-optimizer:
-  optimizer: muon  # Megatron's Muon: 2D weights orthogonalized, the rest with Adam
-
 logger:
   wandb_project: letter-count

@@ -21,6 +21,9 @@ train:
   micro_batch_size: 96
   global_batch_size: 96
 
+optimizer:
+  optimizer: muon
+
 validation:
   eval_interval: 500
   eval_iters: 2
