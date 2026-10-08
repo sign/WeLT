@@ -18,6 +18,18 @@ def test_pack_words_splits_long_sequences():
     assert packed["seq_lengths"] == [[4], [3, 1]]
 
 
+@pytest.mark.parametrize("name", ["data.jsonl", "data.txt"])
+def test_load_text_datasets_from_files(tmp_path, name):
+    texts = [f"text {i}" for i in range(10)]
+    path = tmp_path / name
+    if name.endswith(".txt"):
+        path.write_text("\n".join(texts))
+    else:
+        Dataset.from_dict({"text": texts}).to_json(path)
+    loaded = load_text_datasets(TextDataConfig(seq_length=16, train_file=str(path), validation_split_percentage=20))
+    assert sorted([*loaded["train"]["text"], *loaded["validation"]["text"]]) == sorted(texts)
+
+
 def test_load_text_datasets_requires_a_text_column(tmp_path):
     path = tmp_path / "data.json"
     Dataset.from_dict({"src": ["a", "b"]}).to_json(path)

@@ -167,8 +167,8 @@ def load_raw_datasets(args: TextDataConfig) -> dict:
             data_files["train"] = args.train_file
         if args.validation_file is not None:
             data_files["validation"] = args.validation_file
-        extension = next(iter(data_files.values())).split(".")[-1]
-        load_args = dict(path="text" if extension == "txt" else extension, data_files=data_files)
+        extension = next(iter(data_files.values())).removesuffix(".gz").rsplit(".", 1)[-1]
+        load_args = dict(path={"txt": "text", "jsonl": "json"}.get(extension, extension), data_files=data_files)
 
     if args.streaming:
         if args.max_train_samples is None or args.max_eval_samples is None:
