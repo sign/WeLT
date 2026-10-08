@@ -13,7 +13,7 @@ dependencies = [
     "torch",
     "transformers",
     "trl", # For huggingface implementation of pack_dataset
-    "datasets",
+    "datasets>=4", # Older releases break with current pyarrow
     "Pillow", # For AutoImageProcessor
     "torchvision", # For use_fast=True
     "cachetools", # For LRU cache in processor
