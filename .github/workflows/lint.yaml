@@ -15,8 +15,5 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Setup environment
-        uses: ./.github/actions/setup-environment
-
       - name: Lint code
-        run: ruff check .
+        uses: astral-sh/ruff-action@v3

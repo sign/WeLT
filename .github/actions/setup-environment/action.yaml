@@ -1,12 +1,6 @@
 name: 'Setup Environment'
 description: 'Install the rendering stack (Pango, cairo, PyGObject from conda-forge) and the Python dependencies'
 
-inputs:
-  python-version:
-    description: 'Python version to use'
-    required: false
-    default: '3.12'
-
 runs:
   using: 'composite'
   steps:
@@ -15,7 +9,7 @@ runs:
       uses: mamba-org/setup-micromamba@v3
       with:
         environment-name: welt
-        create-args: -c conda-forge python=${{ inputs.python-version }} pango pycairo pygobject
+        create-args: -c conda-forge python=3.12 pango pycairo pygobject
         cache-downloads: true
 
     - name: Install dependencies

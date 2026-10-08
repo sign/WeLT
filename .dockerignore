@@ -1,3 +1,6 @@
 .git
 output
 **/__pycache__
+.venv
+*.egg-info
+wandb
