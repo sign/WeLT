@@ -15,7 +15,7 @@ def test_nested_extends_and_overrides(tmp_path):
                       "output_dir": "out", "train": {"train_iters": 5}, "optimizer": {"lr": 1e-4}}
 
 
-CONFIGS = sorted(glob.glob("welt_training/experiments/*/*.yaml"))
+CONFIGS = sorted(glob.glob("welt_training/experiments/*/*.yaml") + ["benchmarks/welt-bench.yaml"])
 
 
 @pytest.mark.parametrize("path", CONFIGS)
