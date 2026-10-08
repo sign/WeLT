@@ -33,6 +33,7 @@ class TextDataConfig:
     max_eval_samples: int | None = None
     preprocessing_num_workers: int | None = None
     trust_remote_code: bool = False
+    dataloader_type: str = "cyclic"  # Megatron's sampler: shuffled, repeating epochs
     samples_per_eval: int | None = None  # Set from the validation config: each evaluation covers the dataset once
 
 

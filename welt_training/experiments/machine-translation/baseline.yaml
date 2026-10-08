@@ -22,14 +22,8 @@ train:
   micro_batch_size: 64
   global_batch_size: 64
 
-optimizer:
-  lr: 3.0e-4
-  min_lr: 3.0e-5
-
 validation:
-  eval_interval: 500
   eval_iters: 4
 
 logger:
-  log_interval: 10
   wandb_project: welt-machine-translation
