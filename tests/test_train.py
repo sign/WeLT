@@ -85,6 +85,12 @@ def test_generate_with_vllm(trained):
         thread.join()
     assert served["outputs"] == outputs  # Greedy
 
+    # A word cache smaller than a sequence: words still needed are not evicted mid-step
+    from cachetools import LRUCache
+
+    generator.word_embeddings = LRUCache(maxsize=2)
+    assert generator.generate(["number 4 is", "number \x0E7\x0F is od"], max_generated_words=3) == outputs
+
 
     # Sampled at a high temperature from random latents, words are still valid UTF-8 (ending at a character boundary)
     from vllm import SamplingParams
@@ -128,8 +134,8 @@ def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     def error(a, b):
         return ((a.float().cuda() - b.float().cuda()).norm() / b.float().cuda().norm()).item()
 
-    generator._encode_words(words)
-    assert error(torch.stack([generator.word_embeddings[w] for w in words]), word_embeds[0]) < 0.02
+    embeddings = generator._encode_words(words)
+    assert error(torch.stack([embeddings[w] for w in words]), word_embeds[0]) < 0.02
     latent = generator._latents([words])[0]
     assert error(latent, latents[-1]) < 0.02
     assert error(generator._latents([words])[0], latent) < 1e-3  # Again, from the prefix cache
