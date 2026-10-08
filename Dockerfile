@@ -19,7 +19,7 @@ RUN py=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])') && \
 WORKDIR /app
 # Dependencies first, for layer caching (python -m pip: the container's Python, not the system's pip)
 COPY pyproject.toml README.md /app/
-RUN mkdir -p welt/vision welt_training && python -m pip install ".[dev,train]"
+RUN mkdir -p welt welt_training && python -m pip install ".[dev]"
 # Rendering fonts are downloaded once, at build time, rendering a word (which fails the build if Pango cannot load)
 RUN python -c "from font_download import FontConfig; from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS; \
     from pixel_renderer import PixelRendererProcessor; \

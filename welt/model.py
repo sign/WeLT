@@ -1,857 +1,454 @@
-import logging
-import warnings
-from typing import Any
+"""
+WeLT on Megatron-Core.
+
+Up to four Megatron GPT transformers, built (and optionally initialized from HF checkpoints) by Megatron-Bridge:
+- bytes encoder: bidirectional transformer over the bytes of each word, BOS output is the word embedding
+- image encoder: bidirectional transformer over 16x16 patches of each rendered word, CLS output is the word embedding
+- latent transformer: causal transformer over word embeddings (packed sequences, prefix-LM shift blocks)
+- bytes decoder: causal transformer generating each word's bytes from the latent vector of the previous word
+
+Only the transformer blocks of each GPTModel are used: embeddings are replaced by word embeddings / byte embeddings,
+and output layers by the mapping layers. Unused HF modules are deleted after loading.
+"""
+import dataclasses
+import os
+from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
-import transformers
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForCausalLM,
-    AutoModelForMaskedLM,
-    GenerationConfig,
-    GenerationMixin,
-    PretrainedConfig,
-    PreTrainedModel,
+import torch.nn.functional as F  # noqa: N812
+from megatron.bridge import AutoBridge
+from megatron.bridge.models.gpt_provider import GPTModelProvider
+from megatron.bridge.utils.instantiate_utils import register_allowed_target_prefix
+from megatron.core.models.gpt import GPTModel
+from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.module import MegatronModule
+from torch import nn
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
+from transformers import AutoConfig
+
+PATCH_DIM = 16 * 16 * 3
+
+register_allowed_target_prefix("welt")  # Checkpoints' run_config.yaml instantiate WeLTModelProvider
+
+# Fields copied from the WeLT (latent) config to every sub-transformer config
+SHARED_CONFIG_FIELDS = (
+    "bf16", "fp16", "params_dtype", "pipeline_dtype",
+    "autocast_dtype", "use_cpu_initialization", "perform_initialization", "gradient_accumulation_fusion",
+    "attention_backend", "recompute_granularity", "recompute_method", "recompute_num_layers", "recompute_modules",
 )
-from transformers.modeling_outputs import CausalLMOutput
-from transformers.models.auto.auto_factory import _get_model_class
-from utf8_tokenizer import CharacterCausalLMConfig, CharacterCausalLMWrapper, CharacterEmbedding
-from utf8_tokenizer.byte_embeddings import patch_embedding_layers
-from utf8_tokenizer.logits_processor import UTF8ValidationLogitsProcessor
-from utf8_tokenizer.tokenizer import UTF8Tokenizer
-from words_segmentation.pretokenizer import WordStoppingCriteria, is_word_complete
-
-from welt.config import WordLatentTransformerConfig
-from welt.noop import NoopConfig
-from welt.processor import TextImageProcessor
-from welt.vision.batch_image_encoder import encode_images
-from welt.vision.vision_utils import image_encoder_size
-
-logger = logging.getLogger(__name__)
 
 
-def model_from_config(config: PretrainedConfig,
-                      cls: type[PreTrainedModel],
-                      dtype: torch.dtype = torch.float32,
-                      load_pretrained: bool = False,
-                      attn_implementation=None) -> PreTrainedModel:
-    """Load pretrained model or initialize from config with new weights."""
-
-    # Override attn_implementation if not supported
-    if attn_implementation is not None and attn_implementation.startswith("flash_attention"):
-        resolved_class = _get_model_class(config, cls._model_mapping)
-
-        if not getattr(resolved_class, "_supports_flash_attn", False):
-            print(f"Model {resolved_class.__name__} does not support flash_attention, using default attention.")
-            attn_implementation = None
-
-    if load_pretrained:
-        name_or_path = getattr(config, "_name_or_path", "")
-        if name_or_path:
-            print(f"Loading pretrained model from {name_or_path}")
-            return cls.from_pretrained(name_or_path,
-                                       config=config,
-                                       dtype=dtype,
-                                       attn_implementation=attn_implementation)
-
-    return cls.from_config(config, dtype=dtype, attn_implementation=None)
+def hf_config(name_or_path: str, trust_remote_code: bool = False):
+    """A HF model id/path, or a JSON file of a HF config (must include "model_type" and "architectures")."""
+    if name_or_path.endswith(".json"):
+        import json
+        with open(name_or_path) as f:
+            kwargs = json.load(f)
+        return AutoConfig.for_model(kwargs.pop("model_type"), **kwargs)
+    return AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
 
 
-def set_module_trainable(module, trainable: bool = True):
-    for p in module.parameters():
-        p.requires_grad = trainable
+def transformer_provider(name_or_path: str, trust_remote_code: bool = False) -> GPTModelProvider:
+    return AutoBridge.from_hf_config(hf_config(name_or_path, trust_remote_code)).to_megatron_provider(
+        load_weights=False)
 
 
+def safetensors_checkpoint(name_or_path: str) -> str:
+    """Megatron-Bridge reads safetensors only, convert (once) checkpoints that only have pytorch_model.bin."""
+    from huggingface_hub import list_repo_files
+    from transformers import AutoModelForCausalLM
 
-class WordLatentTransformer(PreTrainedModel):
-    config_class = WordLatentTransformerConfig
+    if os.path.isdir(name_or_path) or any(f.endswith(".safetensors") for f in list_repo_files(name_or_path)):
+        return name_or_path
+    path = os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")),
+                        "safetensors", name_or_path)
+    if not os.path.isdir(path):
+        AutoModelForCausalLM.from_pretrained(name_or_path).save_pretrained(path)
+    return path
 
-    _supports_flash_attn = True
-    _keys_to_ignore_on_load_missing = [
-        # Layers we replace with Identity
-        r"bytes_encoder\.cls.*",
-        r"bytes_encoder\.decoder.*"
-    ]
 
-    def _initialize_missing_keys(self, *args, **kwargs):
-        if int(transformers.__version__.split(".")[0]) >= 5:
-            super()._initialize_missing_keys(*args, **kwargs)
+class ByteEmbedding(nn.Module):
+    """Embedding table plus an additive (zero-initialized) projection of each token's 8 bits."""
 
-    def __init__(self, config: WordLatentTransformerConfig,
-                 load_pretrained: bool = False,
-                 attn_implementation=None):
+    def __init__(self, weight: torch.Tensor):
+        super().__init__()
+        num_embeddings, dim = weight.shape
+        self.weight = nn.Parameter(weight.detach().clone())
+        self.bit_proj = nn.Parameter(torch.zeros(dim, 8))
+        shifts = torch.arange(7, -1, -1)
+        self.register_buffer("bits", (torch.arange(num_embeddings)[:, None] >> shifts & 1).float(), persistent=False)
+
+    def folded_weight(self) -> torch.Tensor:
+        """Equivalent plain embedding table (used for export)."""
+        return self.weight + self.bits.to(self.weight.dtype) @ self.bit_proj.T.to(self.weight.dtype)
+
+    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+        return F.embedding(ids, self.folded_weight())
+
+
+@dataclass
+class WeLTModelProvider(GPTModelProvider):
+    """The latent transformer's config, plus the configs of the other transformers."""
+    bytes_encoder: GPTModelProvider | None = None
+    image_encoder: GPTModelProvider | None = None
+    bytes_decoder: GPTModelProvider | None = None
+
+    # HF checkpoints to initialize each transformer from (None = random init)
+    bytes_encoder_hf_path: str | None = None
+    image_encoder_hf_path: str | None = None
+    latent_transformer_hf_path: str | None = None
+    bytes_decoder_hf_path: str | None = None
+
+    num_tokens: int = 256
+    pad_token_id: int = 0
+    modality_dropout: float = 0.15
+
+    @classmethod
+    def from_hf(cls, latent_transformer: str, bytes_decoder: str,
+                bytes_encoder: str | None = None, image_encoder: str | None = None,
+                load_pretrained: bool = False, trust_remote_code: bool = False, **kwargs) -> "WeLTModelProvider":
+        assert bytes_encoder or image_encoder, "At least one encoder must be provided"
+
+        def provider(name):
+            return transformer_provider(name, trust_remote_code) if name else None
+
+        def pretrained(name):
+            return name if load_pretrained and name and not name.endswith(".json") else None
+
+        latent = provider(latent_transformer)
+        fields = {f.name: getattr(latent, f.name) for f in dataclasses.fields(GPTModelProvider) if f.init}
+        return cls(**fields | dict(bytes_encoder=provider(bytes_encoder),
+                                   image_encoder=provider(image_encoder),
+                                   bytes_decoder=provider(bytes_decoder),
+                                   bytes_encoder_hf_path=pretrained(bytes_encoder),
+                                   image_encoder_hf_path=pretrained(image_encoder),
+                                   latent_transformer_hf_path=pretrained(latent_transformer),
+                                   bytes_decoder_hf_path=pretrained(bytes_decoder)) | kwargs)
+
+    def sub_providers(self):
+        return [p for p in (self.bytes_encoder, self.image_encoder, self.bytes_decoder) if p is not None]
+
+    def finalize(self):
+        for sub in self.sub_providers():
+            for name in SHARED_CONFIG_FIELDS:
+                setattr(sub, name, getattr(self, name))
+            sub.finalize()
+        super().finalize()
+
+    def provide(self, pre_process=None, post_process=None, vp_stage=None) -> "WeLTModel":
+        assert self.pipeline_model_parallel_size == 1, "WeLT does not support pipeline parallelism"
+        assert self.context_parallel_size == 1, "WeLT does not support context parallelism"
+        assert self.tensor_model_parallel_size == 1, "WeLT does not support tensor parallelism"
+        return WeLTModel(self)
+
+
+FLEX_BLOCK_SIZE = 128
+compiled_flex_attention = torch.compile(flex_attention, dynamic=True)
+
+
+def repeat_kv(tensor: torch.Tensor, heads: int) -> torch.Tensor:
+    """(B, kv_heads, S, D) -> (B, heads, S, D) for grouped query attention.
+    FlexAttention's enable_gqa fails to compile for some small inputs."""
+    return tensor.repeat_interleave(heads // tensor.size(1), dim=1)
+
+
+def packed_block_mask(cu_seqlens: torch.Tensor, causal: bool) -> BlockMask:
+    """FlexAttention block mask over packed (THD) sequences, built in O(tokens) from cu_seqlens.
+    Each query block attends to the key blocks spanned by the sequences it overlaps."""
+    lengths = cu_seqlens.diff().long()
+    total = int(cu_seqlens[-1])
+    sequence = torch.repeat_interleave(torch.arange(len(lengths), device=lengths.device), lengths)
+    starts = torch.repeat_interleave(cu_seqlens[:-1].long(), lengths)
+    ends = torch.repeat_interleave(cu_seqlens[1:].long(), lengths) - 1
+
+    num_blocks = (total + FLEX_BLOCK_SIZE - 1) // FLEX_BLOCK_SIZE
+    blocks = torch.arange(num_blocks, device=lengths.device)
+    first_block = starts[blocks * FLEX_BLOCK_SIZE] // FLEX_BLOCK_SIZE
+    last_tokens = ((blocks + 1) * FLEX_BLOCK_SIZE - 1).clamp(max=total - 1)
+    last_block = blocks if causal else ends[last_tokens] // FLEX_BLOCK_SIZE
+    kv_num_blocks = (last_block - first_block + 1).int()
+    kv_indices = (first_block[:, None] + blocks[None, :]).clamp(max=num_blocks - 1).int()
+
+    def mask_mod(batch, head, q_index, kv_index):
+        same_sequence = sequence[q_index] == sequence[kv_index]
+        return same_sequence & (kv_index <= q_index) if causal else same_sequence
+
+    return BlockMask.from_kv_blocks(kv_num_blocks[None, None], kv_indices[None, None], BLOCK_SIZE=FLEX_BLOCK_SIZE,
+                                    mask_mod=mask_mod, seq_lengths=(total, total))
+
+
+class PackedAttention(nn.Module):
+    """Core attention over packed (THD) short sequences, e.g. the bytes of each word, with FlexAttention.
+    Varlen flash attention is ~2x slower on thousands of few-token sequences (its backward pads per sequence)."""
+
+    def __init__(self, config, causal: bool):
+        super().__init__()
+        assert not config.attention_dropout, "Attention dropout is not supported"
+        self.causal = causal
+        self.softmax_scale = config.softmax_scale
+
+    def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None,
+                packed_seq_params: PackedSeqParams = None, **kwargs):
+        """(T, heads, dim) packed query, key, value -> (T, heads, dim)"""
+        # The mask is shared by all layers of the transformer, cached on its packed_seq_params
+        cache_key = f"_welt_block_mask_{self.causal}"
+        block_mask = getattr(packed_seq_params, cache_key, None)
+        if block_mask is None:
+            block_mask = packed_block_mask(packed_seq_params.cu_seqlens_q, self.causal)
+            setattr(packed_seq_params, cache_key, block_mask)
+        query, key, value = (t.transpose(0, 1).unsqueeze(0) for t in (query, key, value))
+        key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
+        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale)
+        return out.squeeze(0).transpose(0, 1)
+
+
+class MaskedAttention(nn.Module):
+    """Core attention with an arbitrary (B, 1, S, S) mask (True = masked) in FlexAttention, e.g. the latent
+    transformer's packed sequences with bidirectional shift blocks."""
+
+    def __init__(self, config):
+        super().__init__()
+        assert not config.attention_dropout, "Attention dropout is not supported"
+        self.softmax_scale = config.softmax_scale
+
+    def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None, **kwargs):
+        """(S, B, heads, dim) query, key, value -> (S, B, heads * dim)"""
+        # The mask is shared by all layers of the transformer, cached on it
+        block_mask = getattr(attention_mask, "_welt_block_mask", None)
+        if block_mask is None:
+            allowed = ~attention_mask[:, 0]
+            block_mask = create_block_mask(lambda b, h, q, kv: allowed[b, q, kv], allowed.size(0), None,
+                                           allowed.size(1), allowed.size(2), device=allowed.device, _compile=True)
+            attention_mask._welt_block_mask = block_mask
+        query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
+        key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
+        out = compiled_flex_attention(query, key, value, block_mask=block_mask, scale=self.softmax_scale)
+        return out.permute(2, 0, 1, 3).flatten(2)
+
+
+def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention: str,
+                      keep_output_layer=False) -> tuple[GPTModel, torch.Tensor]:
+    """Build a Megatron GPTModel, load HF weights, then drop the parts WeLT replaces.
+    attention: "arbitrary" (an attention_mask, BSHD) or "causal"/"bidirectional" (packed short sequences, THD).
+    Attention is replaced by FlexAttention.
+    Returns the model, and its (vocab, hidden) input embeddings table, removed from it."""
+    provider.share_embeddings_and_output_weights = False  # embeddings and output layers are replaced
+    assert provider.position_embedding_type == "rope", "Only RoPE transformers are supported"
+    assert provider.window_size is None, "Sliding window attention is not supported"
+    assert not getattr(provider, "attn_logit_softcapping", None), "Attention logit softcapping is not supported"
+    model = GPTModelProvider.provide(provider, pre_process=True, post_process=True)
+
+    if hf_path is not None and provider.perform_initialization:  # Otherwise, weights come from a checkpoint
+        # HF vocabularies differ from bytes, skip mismatched embedding & lm_head
+        AutoBridge.from_hf_pretrained(safetensors_checkpoint(hf_path)).load_hf_weights(
+            [model], allowed_mismatched_params=["embedding.word_embeddings.weight", "output_layer.weight"])
+
+    for layer in model.decoder.layers:
+        if attention == "arbitrary":
+            layer.self_attention.core_attention = MaskedAttention(provider)
+        else:
+            layer.self_attention.core_attention = PackedAttention(provider, causal=attention == "causal")
+
+    embeddings = model.embedding.word_embeddings.weight.detach()
+    del model.embedding
+    if not keep_output_layer:
+        del model.output_layer
+        model.post_process = False  # Only affects the (unused) forward and output layer checkpointing
+    return model, embeddings
+
+
+def run_transformer(model: GPTModel, hidden: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
+    """(B, S, H) -> (B, S, H), including the final layer norm. attention_mask: True = masked."""
+    hidden = hidden.transpose(0, 1).contiguous()
+    rotary_pos_emb = model.rotary_pos_emb(hidden.size(0))
+    hidden = model.decoder(hidden_states=hidden, attention_mask=attention_mask, rotary_pos_emb=rotary_pos_emb)
+    return hidden.transpose(0, 1)
+
+
+def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Runs the valid positions of (N, S, H) right-padded sequences, packed without padding (THD format).
+    Returns (num_valid, H) outputs, including the final layer norm."""
+    lengths = mask.sum(dim=-1, dtype=torch.int32)
+    cu_seqlens = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
+    max_length = mask.size(1)
+    params = PackedSeqParams(qkv_format="thd", cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
+                             max_seqlen_q=max_length, max_seqlen_kv=max_length)
+    rotary_pos_emb = model.rotary_pos_emb(max_length, packed_seq=True)
+    hidden = model.decoder(hidden_states=hidden[mask].unsqueeze(1), attention_mask=None,
+                           rotary_pos_emb=rotary_pos_emb, packed_seq_params=params)
+    return hidden.squeeze(1)
+
+
+class WordEncoder(nn.Module):
+    """Bidirectional transformer, whose first position output is the word embedding."""
+
+    def __init__(self, provider: GPTModelProvider, hf_path: str | None, embed: type[nn.Module]):
+        super().__init__()
+        self.transformer, embeddings = build_transformer(provider, hf_path, "bidirectional")
+        self.embed = embed(embeddings)  # Initialized from the (possibly pretrained) input embeddings
+        self.hidden_size = provider.hidden_size
+
+    def forward(self, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """inputs: (N, T, ...), mask: (N, T) True = valid, right padded -> (N, H)"""
+        hidden = run_packed_transformer(self.transformer, self.embed(inputs), mask)
+        first_positions = F.pad(mask.sum(dim=-1).cumsum(0), (1, 0))[:-1]
+        return hidden[first_positions]
+
+
+class PatchImageEncoder(WordEncoder):
+    """Bidirectional transformer over each word image's 16x16 patches (NaViT-style, native sizes), and a CLS."""
+
+    def __init__(self, provider: GPTModelProvider, hf_path: str | None):
+        super().__init__(provider, hf_path, lambda embeddings: PatchEmbedding(embeddings.size(1)))
+
+    def forward(self, patches: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
+        """(N, P, 768) uint8 patches, (N, 2) patch rows and columns of each image -> (N, H)"""
+        counts = shapes.prod(dim=-1)
+        mask = torch.arange(patches.size(1) + 1, device=counts.device)[None, :] <= counts[:, None]  # With CLS
+        return super().forward(patches, mask)
+
+
+class PatchEmbedding(nn.Module):
+    """uint8 16x16 RGB patches -> CLS + linear patch embeddings."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.proj = nn.Linear(PATCH_DIM, dim)
+        self.cls = nn.Parameter(torch.randn(dim) * 0.02)
+        nn.init.xavier_uniform_(self.proj.weight)  # Like PIXEL / ViT-MAE patch embeddings
+
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
+        embeds = self.proj(patches.to(self.proj.weight.dtype) / 127.5 - 1)
+        return torch.cat([self.cls.expand(len(embeds), 1, -1), embeds], dim=1)
+
+
+class WeLTModel(MegatronModule):
+    def __init__(self, config: WeLTModelProvider):
         super().__init__(config=config)
+        self.pre_process = self.post_process = True
 
-        is_image_encoder = not isinstance(config.image_encoder, NoopConfig)
-        is_bytes_encoder = not isinstance(config.bytes_encoder, NoopConfig)
+        self.bytes_encoder = None
+        if config.bytes_encoder is not None:
+            config.bytes_encoder.vocab_size = config.num_tokens
+            self.bytes_encoder = WordEncoder(config.bytes_encoder, config.bytes_encoder_hf_path, ByteEmbedding)
 
-        assert is_bytes_encoder or is_image_encoder, \
-            "At least one encoder must be provided"
+        self.image_encoder = None
+        if config.image_encoder is not None:
+            self.image_encoder = PatchImageEncoder(config.image_encoder, config.image_encoder_hf_path)
 
-        if not is_bytes_encoder or not is_image_encoder:
-            warnings.warn("Either image encoder or bytes encoder is not provided, setting modality_dropout to 0.0",
-                          stacklevel=2)
-            config.modality_dropout = 0.0
+        self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path, "arbitrary")
 
-        # Image Encoder
-        if is_image_encoder:
-            self.image_encoder = model_from_config(config.image_encoder, AutoModel,
-                                                   config.dtype, load_pretrained, attn_implementation)
-            self.image_encoder_dim = image_encoder_size(self.image_encoder)
-        else:
-            self.image_encoder = None
-            self.image_encoder_dim = 0
-
-        # Bytes Encoder
-        if is_bytes_encoder:
-            self.bytes_encoder = model_from_config(config.bytes_encoder, AutoModelForMaskedLM,
-                                                   config.dtype, load_pretrained, attn_implementation)
-            self._prepare_bytes_encoder()
-            self.bytes_encoder_dim = self.bytes_encoder.config.hidden_size
-        else:
-            self.bytes_encoder = None
-            self.bytes_encoder_dim = 0
-
-        # Latent Transformer
-        # TODO: not passing attn_implementation since we have 4D attention masks which error.
-        #       https://github.com/Dao-AILab/flash-attention/issues/1857
-        self.latent_transformer = model_from_config(config.latent_transformer, AutoModelForCausalLM,
-                                                    config.dtype, load_pretrained, None)
-        self.latent_transformer.resize_token_embeddings(0, pad_to_multiple_of=1)
-        model_dim = self.latent_transformer.config.hidden_size
-        # Disable weight tying - we use a separate decoder_mapping instead of tied lm_head
-        self.latent_transformer.config.tie_word_embeddings = False
-
-        # Small Language Model
-        self.bytes_decoder = model_from_config(config.bytes_decoder, AutoModelForCausalLM,
-                                               config.dtype, load_pretrained, attn_implementation)
-        bytes_decoder_dim = self._prepare_bytes_decoder()
+        decoder_config = config.bytes_decoder
+        decoder_config.vocab_size = config.num_tokens
+        self.bytes_decoder, embeddings = build_transformer(decoder_config, config.bytes_decoder_hf_path, "causal",
+                                                           keep_output_layer=True)
+        self.bytes_decoder_embedding = ByteEmbedding(embeddings)
 
         # Mapping layers
-        encoder_dim = self.bytes_encoder_dim + self.image_encoder_dim
-        self.encoder_mapping = nn.Linear(encoder_dim, model_dim, dtype=self.latent_transformer.dtype)
-        self.encoder_norm = nn.RMSNorm(model_dim, dtype=self.latent_transformer.dtype)
+        encoders = [e for e in (self.image_encoder, self.bytes_encoder) if e is not None]
+        encoder_dim = sum(e.hidden_size for e in encoders)
+        self.encoder_mapping = nn.Linear(encoder_dim, config.hidden_size)
+        self.encoder_norm = nn.RMSNorm(config.hidden_size, eps=1e-6)
+        self.decoder_mapping = nn.Linear(config.hidden_size, decoder_config.hidden_size)
+        self.decoder_norm = nn.RMSNorm(decoder_config.hidden_size, eps=1e-6)
 
-        # Set decoder_mapping as the LM head so we can use .logits directly
-        decoder_mapping = nn.Linear(model_dim, bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
-        self.latent_transformer.set_output_embeddings(decoder_mapping)
-        self.decoder_norm = nn.RMSNorm(bytes_decoder_dim, dtype=self.bytes_decoder.dtype)
+    def set_input_tensor(self, input_tensor):
+        pass  # No pipeline parallelism
 
-        self.post_init()
+    def _modality_scale(self, num_modalities: int, device) -> torch.Tensor:
+        """Per-modality multiplier: drops modalities during training, rescaling the remaining ones."""
+        keep = torch.ones(num_modalities, device=device)
+        if self.training and num_modalities > 1 and self.config.modality_dropout > 0:
+            keep = (torch.rand(num_modalities, device=device) >= self.config.modality_dropout).float()
+            # Multiplying by zero, rather than skipping, keeps all parameters in the graph for DDP
+            keep = keep * (num_modalities / keep.sum().clamp(min=1))
+        return keep
 
-        # Ensure consistent dtype across all submodels (some pretrained checkpoints
-        # may have been saved in different dtypes like float16 vs bfloat16)
-        self.to(dtype=config.dtype)
-
-    def _prepare_bytes_decoder(self):
-        """Wrap bytes_decoder for multi-byte encodings (UTF-16/UTF-32).
-
-        UTF-8 uses variable-length byte sequences (1-4 bytes per character).
-        UTF-16/UTF-32 use fixed-width units (2/4 bytes), requiring the decoder
-        to predict multiple bytes per step via CharacterCausalLMWrapper.
-        """
-
-        if self.config.encoding == "UTF-8":
-            assert not isinstance(self.bytes_decoder, CharacterCausalLMWrapper), \
-                "UTF-8 encoding should not use CharacterCausalLMWrapper"
-
-            self.bytes_decoder.resize_token_embeddings(self.config.num_tokens, pad_to_multiple_of=8)
-            patch_embedding_layers(self.bytes_decoder)
-            return self.bytes_decoder.config.hidden_size
-
-        num_bytes = 2 if self.config.encoding == "UTF-16" else 4
-
-        if isinstance(self.bytes_decoder, CharacterCausalLMWrapper):
-            assert num_bytes == self.bytes_decoder.config.num_bytes
-        else:
-            char_config = CharacterCausalLMConfig(num_bytes=num_bytes)
-            self.bytes_decoder = CharacterCausalLMWrapper(config=char_config, model=self.bytes_decoder)
-
-        return self.bytes_decoder.model.config.hidden_size
-
-    def _prepare_bytes_encoder(self):
-        """Prepare bytes_encoder for multi-byte encodings (UTF-16/UTF-32).
-
-        UTF-8 uses variable-length byte sequences (1-4 bytes per character).
-        UTF-16/UTF-32 use fixed-width units (2/4 bytes), requiring the encoder
-        to use CharacterEmbedding to handle multi-byte input.
-        """
-        self.bytes_encoder.config.tie_word_embeddings = False
-        self.bytes_encoder.all_tied_weights_keys = []
-
-        self.bytes_encoder.cls = self.bytes_encoder.decoder = torch.nn.Identity()
-        self.bytes_encoder.get_output_embeddings = lambda: None
-
-        if self.config.encoding == "UTF-8":
-            self.bytes_encoder.resize_token_embeddings(self.config.num_tokens, pad_to_multiple_of=8)
-            patch_embedding_layers(self.bytes_encoder)
-            return
-
-        num_bytes = 2 if self.config.encoding == "UTF-16" else 4
-        input_embeddings = self.bytes_encoder.get_input_embeddings()
-
-        if isinstance(input_embeddings, CharacterEmbedding):
-            assert num_bytes == input_embeddings.num_bytes
-            return
-
-        embedding_dim = input_embeddings.embedding_dim
-        char_embedding = CharacterEmbedding(embedding_dim, num_bytes=num_bytes)
-        self.bytes_encoder.set_input_embeddings(char_embedding)
-
-    def _should_drop_modality(self):
-        if not self.training or self.config.modality_dropout == 0:
-            return False
-        return torch.rand(1).item() < self.config.modality_dropout
-
-    def encode_images(self,
-                      input_images: torch.Tensor,
-                      input_images_dimensions: torch.Tensor,
-                      device: torch.device) -> torch.Tensor:
-        """
-        Args:
-            input_images: Tensor of nested images, where each inner list contains images for one sample
-            input_images_dimensions: (BATCH, LENGTH, 2) - Original dimensions of each image (height, width)
-            device: Device to move the tensors to
-        Returns:
-            torch.Tensor: (BATCH, LENGTH, HIDDEN_DIM) - Image embeddings
-        """
-
-        if self.image_encoder is None or self._should_drop_modality():
-            # If image encoder is None, return zeros
-            B, L, *_, = input_images.shape  # noqa: N806
-            dtype = self.latent_transformer.dtype if self.image_encoder is None else self.image_encoder.dtype
-            return torch.zeros((B, L, self.image_encoder_dim), device=device, dtype=dtype)
-
-        return encode_images(self.image_encoder,
-                             input_images=input_images,
-                             input_images_dimensions=input_images_dimensions)
-
-    def encode_texts(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            input_ids: (BATCH, LENGTH, INPUT_TOKENS)
-            attention_mask: (BATCH, LENGTH, INPUT_TOKENS)
-        Returns:
-            torch.Tensor: (BATCH, LENGTH, HIDDEN_DIM) - Text embeddings
-        """
-        B, L, T = input_ids.shape  # noqa: N806
-
-        # If bytes encoder is None, return zeros
-        if self.bytes_encoder is None or self._should_drop_modality():
-            dtype = self.latent_transformer.dtype if self.bytes_encoder is None else self.bytes_encoder.dtype
-            return torch.zeros(B, L, self.bytes_encoder_dim, device=input_ids.device, dtype=dtype)
-
-        # Flatten batch and length dimensions
-        input_ids = input_ids.view(B * L, T)
-        attention_mask = attention_mask.view(B * L, T)
-        # Encode texts using the bytes decoder as encoder
-        if hasattr(self.bytes_encoder, "model"):
-            # For models like ModernBertForMaskedLM
-            text_outputs = self.bytes_encoder.model(input_ids=input_ids, attention_mask=attention_mask)
-            text_embeds = text_outputs.last_hidden_state
-        else:
-            text_outputs = self.bytes_encoder(input_ids=input_ids,
-                                              attention_mask=attention_mask,
-                                              output_hidden_states=True)
-            text_embeds = text_outputs.hidden_states[-1]
-
-        # Use BOS token embedding as word embedding
-        text_embeds = text_embeds[:, 0]
-        return text_embeds.view(B, L, -1)
-
-    def encode_input(self,
+    def encode_words(self,
                      input_ids: torch.Tensor,
-                     attention_mask: torch.Tensor,
-                     input_images: torch.Tensor,
-                     input_images_dimensions: torch.Tensor):
+                     input_attention_mask: torch.Tensor,
+                     input_patches: torch.Tensor | None = None,
+                     input_patches_shape: torch.Tensor | None = None) -> torch.Tensor:
+        """Word embeddings in the latent space: (B, L, T) bytes [+ (B, L, P, 768) patches] -> (B, L, H)"""
+        B, L, T = input_ids.shape  # noqa: N806
+        input_ids = input_ids.view(B * L, T)
+        words_mask = input_attention_mask.view(B * L, T).bool()
+        valid = words_mask[:, 0]  # Words have BOS, batch padding words do not
+
+        # Encode each distinct word once (about a third of the words in a batch), its embedding is shared
+        unique_words, inverse = torch.unique(input_ids[valid], dim=0, return_inverse=True)
+        positions = torch.arange(len(inverse), device=inverse.device)
+        first = positions.new_full((len(unique_words),), len(inverse)).scatter_reduce(0, inverse, positions, "amin")
+        rows = valid.nonzero().squeeze(1)[first]
+
         embeds = []
-        if self.image_encoder_dim > 0:
-            image_embeds = self.encode_images(input_images, input_images_dimensions, device=input_ids.device)
-            embeds.append(image_embeds)
+        if self.image_encoder is not None:
+            patches = input_patches.view(B * L, *input_patches.shape[2:])[rows]
+            embeds.append(self.image_encoder(patches, input_patches_shape.view(B * L, 2)[rows]))
+        if self.bytes_encoder is not None:
+            embeds.append(self.bytes_encoder(input_ids[rows], words_mask[rows]))
 
-        if self.bytes_encoder_dim > 0:
-            text_embeds = self.encode_texts(input_ids, attention_mask)
-            embeds.append(text_embeds)
+        scale = self._modality_scale(len(embeds), input_ids.device)
+        embeds = torch.cat([e * s for e, s in zip(embeds, scale, strict=True)], dim=-1)
+        word_embeds = embeds.new_zeros(B * L, embeds.size(-1))
+        word_embeds[valid] = embeds[inverse]
+        return self.encoder_norm(self.encoder_mapping(word_embeds)).view(B, L, -1)
 
-        assert len(embeds) > 0, "At least one type of encoder must be provided"
+    def latent(self, word_embeds: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """(B, L, H) word embeddings, (B, 1, L, L) True = attend -> (B, L, H_decoder) latent vectors"""
+        hidden = run_transformer(self.latent_transformer, word_embeds, ~attention_mask)
+        return self.decoder_norm(self.decoder_mapping(hidden))
 
-        concatenated_embeds = torch.cat(embeds, dim=-1)
-
-        if len(embeds) > 1:
-            active = sum(1 for e in embeds if e.any())
-            if 0 < active < len(embeds):
-                concatenated_embeds = concatenated_embeds * (len(embeds) / active)
-
-        return self.encoder_norm(self.encoder_mapping(concatenated_embeds))
-
-    def _num_words_per_datum(self, attention_mask: torch.Tensor) -> torch.Tensor:
-        return attention_mask.sum(dim=-1).gt(0).sum(dim=-1)
+    def decode(self, latents: torch.Tensor, labels_input: torch.Tensor, labels_mask: torch.Tensor):
+        """Parallel causal decoding, each word's bytes conditioned on its latent vector.
+        (N, H) latents, (N, T) input bytes and mask -> (num_valid, vocab) logits and (N, 1 + T) valid mask,
+        where the logits at each latent position are a prediction of the first input byte (which is BOS)."""
+        embeds = torch.cat([latents[:, None], self.bytes_decoder_embedding(labels_input)], dim=1)
+        mask = F.pad(labels_mask.bool(), (1, 0), value=True)
+        logits, _ = self.bytes_decoder.output_layer(run_packed_transformer(self.bytes_decoder, embeds, mask))
+        return logits, mask
 
     def forward(self,
                 input_ids: torch.Tensor,
                 input_attention_mask: torch.Tensor,
                 attention_mask: torch.Tensor,
-                input_images: torch.Tensor,
-                input_images_dimensions: torch.Tensor,
-                position_ids: torch.Tensor | None = None,
-                labels_input: torch.Tensor | None = None,
-                labels_attention_mask: torch.Tensor | None = None,
-                labels_output: torch.Tensor | None = None):
+                labels_input: torch.Tensor,
+                labels_attention_mask: torch.Tensor,
+                labels_output: torch.Tensor,
+                input_patches: torch.Tensor | None = None,
+                input_patches_shape: torch.Tensor | None = None):
         """
         Args:
-            input_ids: (BATCH, LENGTH, INPUT_TOKENS)
-            input_attention_mask: Attention within a word (BATCH, LENGTH, INPUT_TOKENS)
-            attention_mask: Attention across words (BATCH, 1, LENGTH, LENGTH)
-            input_images: (BATCH, LENGTH, CHANNELS, HEIGHT, WIDTH)
-            input_images_dimensions: (BATCH, LENGTH, 2)
-            position_ids: (BATCH, LENGTH) - Position IDs for latent transformer (useful for sequence packing)
-            labels_input: (BATCH, LENGTH, OUTPUT_TOKENS) - Input tokens for bytes decoder
-            labels_attention_mask: (BATCH, LENGTH, OUTPUT_TOKENS) - Attention mask for labels
-            labels_output: (BATCH, LENGTH, OUTPUT_TOKENS) - Target tokens for language modeling
-        """
-        # Embed images and texts
-        mapped_embeds = self.encode_input(input_ids, input_attention_mask, input_images, input_images_dimensions)
-
-        # Process the sequence with the latent transformer
-        latent_outputs = self.latent_transformer(
-            inputs_embeds=mapped_embeds,
-            position_ids=position_ids,
-            attention_mask=attention_mask,
-        )
-        # they aren't really "logits", since we replace the lm_head with decoder_mapping
-        mapped_embeds = self.decoder_norm(latent_outputs.logits)
-
-        # Decode the latent vectors to bytes using parallel causal decoding
-        logits = self.parallel_causal_decode(mapped_embeds, labels_input, labels_attention_mask)
-
-        loss = None
-        if labels_output is not None:
-            # Flatten dimensions for cross entropy loss
-            # logits: (B, L, T, vocab_size) -> (B*L*T, vocab_size)
-            # labels_output: (B, L, T) -> (B*L*T,)
-            flat_logits = logits.reshape(-1, logits.size(-1))
-            flat_labels = labels_output.reshape(-1)
-
-            if self.config.encoding == "UTF-8":
-                # UTF-8: standard cross entropy over byte predictions
-                loss = torch.nn.functional.cross_entropy(flat_logits, flat_labels,
-                                                         ignore_index=self.config.pad_token_id)
-            else:
-                # UTF-16/UTF-32: wrapper handles multi-byte loss (predicts num_bytes simultaneously)
-                loss = self.bytes_decoder.compute_loss(flat_logits, flat_labels)
-
-        return CausalLMOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=(mapped_embeds,),
-            attentions=None
-        )
-
-    def parallel_causal_decode(self,
-                               latent_vectors: torch.Tensor,
-                               target_ids: torch.Tensor,
-                               target_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Parallel causal decoding with word-level vectors prepended to character sequences.
-
-        Args:
-            latent_vectors: (B, L, hidden_dim) - latent representations for each word
-            target_ids: (B, L, T) - target token IDs for each word
-            target_mask: (B, L, T) - attention mask for target tokens
+            input_ids: (B, L, T) bytes of each word
+            input_attention_mask: (B, L, T) attention within each word
+            attention_mask: (B, 1, L, L) attention across words, True = attend
+            labels_input: (B, L, T') bytes decoder inputs (next word, without EOS)
+            labels_attention_mask: (B, L, T')
+            labels_output: (B, L, T') bytes decoder targets (next word, without BOS)
+            input_patches: (B, L, P, 768) uint8 patches of the rendered words
+            input_patches_shape: (B, L, 2) rows and columns of patches of each word
 
         Returns:
-            torch.Tensor: (B, L, T, vocab_size) - logits for each token in each word
+            (N, T') per-byte losses and (N, T') per-byte correctness, for the N words with labels
         """
-        B, L, hidden_dim = latent_vectors.shape  # noqa: N806
-        BL = B * L  # noqa: N806
-        _, _, T = target_ids.shape  # noqa: N806
-
-        # Step 1: Reshape target_ids from [B, L, T] to [B*L, T]
-        target_ids_flat = target_ids.view(BL, T)  # [B*L, T]
-        target_mask_flat = target_mask.view(BL, T)  # [B*L, T]
-
-        # Step 2: Get embeddings for target tokens
-        embed_layer = self.bytes_decoder.get_input_embeddings()
-        target_embeds = embed_layer(target_ids_flat)  # [B*L, T, embed_dim]
-
-        # Step 3: Each decoder uses only one latent vector (no history)
-        # Decoder i uses latent_vectors[:, i]
-        # Reshape from [B, L, hidden_dim] to [B*L, hidden_dim] then add sequence dimension
-        latent_vectors_flat = latent_vectors.view(BL, 1, hidden_dim)  # [B*L, 1, hidden_dim]
-
-        # Step 4: Concatenate single latent vector with character embeddings
-        # Each sequence gets only its corresponding latent vector prepended
-        combined_embeds = torch.cat([latent_vectors_flat, target_embeds], dim=1)  # [B*L, 1+T, embed_dim]
-
-        # Step 5: Create attention mask by padding target_mask with 1 on the left
-        combined_mask = torch.nn.functional.pad(target_mask_flat, (1, 0), value=1)  # [B*L, 1+T]
-
-        # Step 6: Pass through bytes decoder
-        outputs = self.bytes_decoder(
-            inputs_embeds=combined_embeds,
-            attention_mask=combined_mask,
-            output_hidden_states=False
-        )
-
-        # Step 7: Extract character-level logits (skip the single latent position)
-        all_logits = outputs.logits  # [B*L, 1+T, vocab_size]
-        char_logits = all_logits[:, 1:]  # [B*L, T, vocab_size]
-
-        # Step 8: Reshape back to [B, L, T, vocab_size]
-        logits = char_logits.view(B, L, T, -1)
-
-        return logits
-
-    def freeze_pretrained_models(self):
-        """Freeze everything, then enable just the requested submodules."""
-        set_module_trainable(self, False)
-
-        # Enable newly created embeddings, LM head, mapping layers
-        if self.bytes_encoder is not None:
-            set_module_trainable(self.bytes_encoder.get_input_embeddings())
-
-        set_module_trainable(self.bytes_decoder.get_input_embeddings())
-        set_module_trainable(self.bytes_decoder.get_output_embeddings())
-
-        set_module_trainable(self.encoder_mapping)
-        set_module_trainable(self.encoder_norm)
-        # decoder_mapping
-        set_module_trainable(self.latent_transformer.get_output_embeddings())
-        set_module_trainable(self.decoder_norm)
-
-    def unfreeze(self):
-        """Unfreeze everything."""
-        set_module_trainable(self, True)
-
-
-class WordLatentTransformerForCausalLM(WordLatentTransformer, GenerationMixin):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._original_decode = None
-        self._compile_enabled = False
-        self._logits_processor = None
-
-    @property
-    def logits_processor(self):
-        # Lazy init: transformers 5 from_pretrained runs __init__ under a meta device context,
-        # which would create the processor's mask tensors on meta device (unusable).
-        if self._logits_processor is None:
-            self._logits_processor = UTF8ValidationLogitsProcessor()
-        return self._logits_processor
-
-    def _get_partial_word_prefix(
-            self,
-            input_ids: torch.Tensor,
-            input_attention_mask: torch.Tensor,
-            initial_num_words: torch.Tensor,
-            tokenizer: UTF8Tokenizer,
-    ) -> torch.Tensor | None:
-        """
-        Get prefix token IDs for partial (incomplete) last words.
-
-        Returns:
-            prefix_ids: (B, T) tensor if any words are incomplete, else None.
-                       Complete words get [BOS, PAD, ...], incomplete get their tokens (without EOS).
-        """
-        batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
-
-        last_word_ids = input_ids[batch_indices, initial_num_words - 1]
-        last_word_mask = input_attention_mask[batch_indices, initial_num_words - 1]
-
-        last_words = [tokenizer.decode(ids[mask.bool()].tolist(), skip_special_tokens=True)
-                      for ids, mask in zip(last_word_ids, last_word_mask, strict=True)]
-
-        if all(is_word_complete(w) for w in last_words):
-            return None
-
-        print("Found partial words:", last_words)
-        print("input_ids", input_ids)
-
-        prefix_ids = last_word_ids.clone()
-        prefix_ids[prefix_ids == tokenizer.eos_token_id] = tokenizer.pad_token_id
-
-        return prefix_ids
-
-    def enable_backend_optimizations(self):
-        """
-        Enable PyTorch backend optimizations (TF32, Flash Attention, cudnn benchmark).
-
-        These optimizations are safe for both training and inference and provide
-        significant speedups (especially Flash Attention). They don't use torch.compile
-        so they're compatible with Hugging Face Trainer and Accelerate.
-
-        Call this before training or inference for best performance.
-        """
-        print("Enabling backend optimizations...")
-
-        # torch.compile related
-        torch._dynamo.config.capture_scalar_outputs = True
-        torch._dynamo.config.cache_size_limit = 128  # Allow more compilations
-
-        torch.set_float32_matmul_precision('high')  # Use TF32 for faster matmul
-
-        if torch.cuda.is_available():
-            # Enable global PyTorch optimizations
-            torch.backends.cudnn.benchmark = True
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-
-            # Enable Flash Attention for scaled_dot_product (significant speedup)
-            torch.backends.cuda.enable_flash_sdp(True)
-            torch.backends.cuda.enable_mem_efficient_sdp(True)
-            torch.backends.cuda.enable_math_sdp(False)  # Force optimized paths only
-
-            print("✓ Enabled cudnn benchmark, TF32, Flash Attention, and CUDA optimizations")
-        else:
-            print("✓ Enabled TF32 optimizations (CPU mode)")
-
-    def enable_optimizations(self, compile_mode: str = "default"):
-        """
-        Enable performance optimizations for inference.
-
-        WARNING: Do NOT use this during training with Hugging Face Trainer!
-        The torch.compile calls conflict with Accelerate's model unwrapping.
-        For training, use enable_backend_optimizations() instead.
-        """
-        print(f"Enabling optimizations (compile_mode={compile_mode})...")
-
-        # First enable backend optimizations
-        self.enable_backend_optimizations()
-
-        if not torch.cuda.is_available():
-            # Fix for CPU torch.compile inductor bug with missing variable declarations
-            torch._dynamo.config.suppress_errors = True
-            torch._inductor.config.cpp.simdlen = None  # Disable vectorization that causes the bug
-
-        # Compile _decode (called repeatedly in generation loop)
-        print("  Compiling _decode...")
-        # Store original method before compilation
-        original_decode = self.__class__._decode
-        # Compile the unbound method and bind it to this instance
-        compiled_decode = torch.compile(original_decode, mode=compile_mode)
-        # Replace instance method with compiled version
-        self._decode = compiled_decode.__get__(self, type(self))
-
-        # Compile encoder_mapping (small but called frequently)
-        print("  Compiling mapping layers...")
-        self.encoder_mapping = torch.compile(self.encoder_mapping, mode=compile_mode)
-
-        # Compile bytes_decoder forward (called in character generation loop)
-        print("  Compiling bytes_decoder...")
-        self.bytes_decoder.forward = torch.compile(self.bytes_decoder.forward, mode=compile_mode)
-
-        print("  Compiling logits processor...")
-        self._logits_processor = torch.compile(self.logits_processor, mode=compile_mode)
-
-        # Compile bytes_encoder forward (called in _encode_words per word)
-        if self.bytes_encoder is not None:
-            print("  Compiling bytes_encoder...")
-            self.bytes_encoder.forward = torch.compile(self.bytes_encoder.forward, mode=compile_mode)
-
-        self._compile_enabled = True
-        print("✓ Optimizations enabled")
-
-    def _prefill(self, encoded_input: torch.Tensor, attention_mask: torch.Tensor,
-                 num_words: torch.Tensor, position_ids: torch.Tensor | None = None) -> tuple[Any, torch.Tensor]:
-        """
-        Prefill stage: Process the full input sequence and build the KV-cache.
-
-        Args:
-            encoded_input: Full encoded input (B, L, hidden_dim)
-            attention_mask: 4D attention mask (B, 1, L, L) with causal + padding masking
-            num_words: Number of valid words per batch item (B,)
-            position_ids: Optional position IDs (B, L) for handling variable-length sequences
-
-        Returns:
-            past_key_values: KV-cache for subsequent decode steps
-            mapped_latent: Mapped latent state for the last word (B, 1, bytes_decoder_dim)
-        """
-        latent_output = self.latent_transformer(
-            inputs_embeds=encoded_input,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            use_cache=True,
-        )
-
-        # LM head (decoder_mapping) is applied internally, output via .logits
-        logits = self.decoder_norm(latent_output.logits)  # (B, L, bytes_decoder_dim)
-        batch_indices = torch.arange(logits.size(0), device=logits.device)
-        mapped_latent = logits[batch_indices, num_words - 1].unsqueeze(1)  # (B, 1, bytes_decoder_dim)
-
-        return latent_output.past_key_values, mapped_latent, logits
-
-    def _decode(self, past_key_values: Any, new_embedding: torch.Tensor,
-                attention_mask: torch.Tensor, position_ids: torch.Tensor | None = None) -> tuple[Any, torch.Tensor]:
-        """
-        Decode stage: Process a single new token using the KV-cache.
-
-        Args:
-            past_key_values: KV-cache from prefill or previous decode step
-            new_embedding: Embedding for the new token (B, 1, hidden_dim)
-            attention_mask: 2D attention mask (B, seq_len) indicating which cached positions to attend to
-            position_ids: Optional position IDs (B, 1) for the new tokens
-
-        Returns:
-            past_key_values: Updated KV-cache
-            mapped_latent: Mapped latent state (B, 1, bytes_decoder_dim)
-        """
-        latent_output = self.latent_transformer(
-            inputs_embeds=new_embedding,
-            attention_mask=attention_mask,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-            use_cache=True,
-        )
-
-        return latent_output.past_key_values, self.decoder_norm(latent_output.logits)
-
-    def _generate_word_bytes(
-            self,
-            latents: torch.Tensor,
-            tokenizer: UTF8Tokenizer,
-            bos_embed: torch.Tensor,
-            bytes_generation_config: GenerationConfig | None = None,
-            stopping_criteria: list | None = None,
-            prefix_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        batch_size = latents.size(0)
-        embed_layer = self.bytes_decoder.get_input_embeddings()
-
-        if prefix_ids is not None:
-            # Mid-word generation only supports batch_size=1 (checked in generate())
-            # Trim prefix_ids to actual length (remove trailing PAD tokens)
-            prefix_len = (prefix_ids[0] != tokenizer.pad_token_id).sum().item()
-            trimmed_ids = prefix_ids[:, :prefix_len]
-
-            prefix_embeds = embed_layer(trimmed_ids)
-            inputs_embeds = torch.cat([latents, prefix_embeds], dim=1)
-            attention_mask = None  # No padding, no mask needed
-        else:
-            bos_embeds = bos_embed.expand(batch_size, -1, -1)
-            inputs_embeds = torch.cat([latents, bos_embeds], dim=1)
-            attention_mask = None
-
-        return self.bytes_decoder.generate(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            generation_config=bytes_generation_config,
-            tokenizer=tokenizer,
-            logits_processor=[self.logits_processor],
-            stopping_criteria=stopping_criteria,
-        )
-
-    def _encode_words(self, words: list[str], processor: TextImageProcessor, device: torch.device) -> torch.Tensor:
-        """Encode words into embeddings for the next decode step."""
-        tokenized_words = processor.tokenize_words(words, device=device)
-        new_input_ids = tokenized_words.input_ids.unsqueeze(1)
-        new_attention_mask = tokenized_words.attention_mask.unsqueeze(1)
-
-        new_input_images, new_input_images_dimensions = processor.render_texts(words, device=device)
-        new_input_images = new_input_images.unsqueeze(1)
-        new_input_images_dimensions = new_input_images_dimensions.unsqueeze(1)
-
-        return self.encode_input(new_input_ids, new_attention_mask,
-                                 new_input_images, new_input_images_dimensions).squeeze(1)  # (B, hidden_dim)
-
-    def _prep_bytes_generation_config(self,
-                                      max_word_length: int,
-                                      tokenizer: UTF8Tokenizer,
-                                      bytes_generation_config: GenerationConfig | None = None) -> GenerationConfig:
-        defaults = dict(
-            max_new_tokens=max_word_length,
-            bos_token_id=tokenizer.bos_token_id,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-        if bytes_generation_config is not None:
-            defaults.update(bytes_generation_config.to_diff_dict())
-
-        return GenerationConfig(**defaults)
-
-    @torch.inference_mode()
-    def generate(
-            self,
-            input_ids: torch.Tensor,
-            input_attention_mask: torch.Tensor,
-            input_images: torch.Tensor,
-            input_images_dimensions: torch.Tensor,
-            attention_mask: torch.Tensor,
-            processor: TextImageProcessor,
-            max_generated_words: int = 50,
-            bytes_generation_config: GenerationConfig | None = None,
-            return_entropy: bool = False,
-            prompt_words: list[str] | None = None,
-            **_unused_kwargs):
-        """
-        Generate text using prefill/decode with KV-cache.
-
-        1. Prefill: encode input and process full sequence to build KV-cache
-        2. Decode loop: for each word, encode it, run single decode step, generate bytes
-
-        Args:
-            input_ids: (B, L, T) - text input tokens
-            input_attention_mask: (B, L, T) - attention within each word
-            input_images: (B, L, C, H, W) - input images
-            input_images_dimensions: (B, L, 2) - original image dimensions
-            attention_mask: (B, 1, L, L) - causal attention across words
-            processor: TextImageProcessor for tokenization and rendering
-            max_generated_words: maximum words to generate
-            bytes_generation_config: optional GenerationConfig for bytes_decoder
-            return_entropy: if True, also return per-byte entropy (batch_size must be 1)
-            prompt_words: original prompt words (from processor.pretokenize), needed for prompt entropy
-        """
-        tokenizer = processor.tokenizer
-        device = input_ids.device
-        batch_size = len(input_images)
-
-        bytes_generation_config = self._prep_bytes_generation_config(
-            processor.max_word_length, tokenizer, bytes_generation_config)
-        stopping_criteria = [WordStoppingCriteria(tokenizer)]
-        bos_embed = self.bytes_decoder.get_input_embeddings()(
-            torch.tensor([[tokenizer.bos_token_id]], device=device))
-
-        # Prefill: encode input and build KV-cache
-        initial_num_words = self._num_words_per_datum(input_attention_mask)
-        encoded_input = self.encode_input(input_ids, input_attention_mask, input_images, input_images_dimensions)
-
-        prefix_ids = self._get_partial_word_prefix(
-                input_ids, input_attention_mask, initial_num_words, tokenizer)
-        if prefix_ids is not None:
-            if batch_size > 1:
-                raise ValueError("Mid-word generation with prefix_ids is only supported for batch_size=1")
-            # Exclude the partial word from prefill - we use it as generation prefix instead
-            encoded_input = encoded_input[:, :-1]
-            attention_mask = attention_mask[:, :, :-1, :-1]
-            initial_num_words = initial_num_words - 1
-
-        # Use default position_ids for prefill (sequential), attention mask handles padding
-        max_initial = initial_num_words.max().item()
-        past_key_values, latents, prefill_logits = self._prefill(encoded_input, attention_mask, initial_num_words)
-
-        # Pre-allocate decode attention mask (1s everywhere except padding positions)
-        decode_mask_full = torch.ones((batch_size, max_initial + max_generated_words), device=device,
-                                      dtype=attention_mask.dtype)
-        positions = torch.arange(decode_mask_full.size(1), device=device)
-        padding_mask = (positions >= initial_num_words.unsqueeze(1)) & (positions < max_initial)
-        decode_mask_full.masked_fill_(padding_mask, 0)
-
-        # Generation loop
-        all_generated_words = [[] for _ in range(batch_size)]
-        word_latents = []
-        words = None
-
-        for step_idx in range(max_generated_words):
-            if words is not None:
-                # Decode: encode new words and run single transformer step
-                new_embedding = self._encode_words(words, processor, device).unsqueeze(1)
-                decode_mask = decode_mask_full[:, :past_key_values.get_seq_length() + 1]
-
-                # Compute position_ids for each batch item: continuing from their last valid position
-                # position_id = initial_num_words + (step_idx - 1), since step 0 doesn't do decode
-                decode_position_ids = (initial_num_words + step_idx - 1).unsqueeze(1)  # (B, 1)
-
-                past_key_values, latents = self._decode(
-                    past_key_values, new_embedding, decode_mask, decode_position_ids
-                )
-
-            if return_entropy:
-                word_latents.append(latents.detach())
-
-            # Generate bytes from latents
-            generated_bytes = self._generate_word_bytes(
-                latents, tokenizer, bos_embed, bytes_generation_config, stopping_criteria,
-                prefix_ids=prefix_ids)
-            prefix_ids = None  # Only use prefix for the first generated word
-            words = tokenizer.batch_decode(generated_bytes, skip_special_tokens=True)
-
-            if all(len(w) == 0 for w in words):
-                break
-
-            # Collect words (skip if previous word was empty = EOS for that sample)
-            for word, collected in zip(words, all_generated_words, strict=False):
-                if not collected or collected[-1]:
-                    collected.append(word)
-
-        texts = ["".join(words) for words in all_generated_words]
-
-        if return_entropy:
-            entropies, byte_labels, prompt_byte_count = self._compute_entropy_for_generation(
-                prefill_logits, initial_num_words, prompt_words,
-                word_latents, all_generated_words[0], tokenizer, device)
-            return texts, entropies, byte_labels, prompt_byte_count
-
-        return texts
-
-    def _compute_entropy_for_generation(
-            self, prefill_logits, initial_num_words, prompt_words,
-            word_latents, generated_words, tokenizer, device):
-        """Combine teacher-forced prompt and generated-word entropy."""
-        if prefill_logits.shape[0] != 1:
-            raise ValueError(f"return_entropy=True requires batch_size=1, got {prefill_logits.shape[0]}")
-        prompt_entropies, prompt_byte_labels = [], []
-        if prompt_words is not None and len(prompt_words) > 1:
-            num_prompt = min(initial_num_words[0].item(), len(prompt_words))
-            prompt_latents = [prefill_logits[:, i:i+1, :] for i in range(num_prompt - 1)]
-            prompt_entropies, prompt_byte_labels = self._compute_generation_entropy(
-                prompt_latents, prompt_words[1:num_prompt], tokenizer, device)
-        gen_entropies, gen_byte_labels = self._compute_generation_entropy(
-            word_latents, generated_words, tokenizer, device)
-        return (prompt_entropies + gen_entropies,
-                prompt_byte_labels + gen_byte_labels,
-                len(prompt_entropies))
-
-    def _compute_generation_entropy(
-            self,
-            word_latents: list[torch.Tensor],
-            generated_words: list[str],
-            tokenizer,
-            device: torch.device,
-    ) -> tuple[list[float], list[str]]:
-        """Compute per-byte entropy for generated words using teacher-forced decoding."""
-        # Filter to non-empty words and their corresponding latents
-        valid = [(lat, w) for lat, w in zip(word_latents, generated_words, strict=False) if w]
-        if not valid:
-            return [], []
-
-        latents_list, words_list = zip(*valid, strict=True)
-        tokenized = tokenizer.torch(list(words_list), padding=True, add_special_tokens=True, device=device)
-        labels_input = tokenized.input_ids[:, :-1].unsqueeze(0)
-        labels_mask = tokenized.attention_mask[:, :-1].unsqueeze(0)
-        word_byte_ids = [list(w.encode(tokenizer.encoding)) for w in words_list]
-        bytes_per_token = {"UTF-8": 1, "UTF-16": 2, "UTF-32": 4}[self.config.encoding]
-
-        # Stack latents: (1, num_words, hidden_dim)
-        latents_stacked = torch.cat(list(latents_list), dim=1)
-
-        # Teacher-forced forward pass to get logits
-        logits = self.parallel_causal_decode(latents_stacked, labels_input, labels_mask)
-        # logits: (1, num_words, max_len, vocab_size)
-
-        # Character decoders predict a separate 256-way distribution per byte.
-        if bytes_per_token > 1:
-            logits = logits.reshape(*logits.shape[:-1], bytes_per_token, 256)
-        probs = torch.softmax(logits.float(), dim=-1)
-        log2_probs = torch.log2(probs + 1e-10)
-        entropy = -(probs * log2_probs).sum(dim=-1)
-        entropy = entropy.reshape(1, len(words_list), -1)
-
-        # Flatten per-byte entropies and create display labels
-        byte_entropies = []
-        byte_labels = []
-        for i, ids in enumerate(word_byte_ids):
-            for j, byte_val in enumerate(ids):
-                byte_entropies.append(entropy[0, i, j].item())
-                if 32 <= byte_val < 127:
-                    byte_labels.append(chr(byte_val))
-                else:
-                    byte_labels.append(f"\\x{byte_val:02x}")
-
-        return byte_entropies, byte_labels
-
-
-AutoConfig.register(WordLatentTransformerConfig.model_type, WordLatentTransformerConfig)
-AutoModel.register(WordLatentTransformerConfig, WordLatentTransformer)
-AutoModelForCausalLM.register(WordLatentTransformerConfig, WordLatentTransformerForCausalLM)
+        word_embeds = self.encode_words(input_ids, input_attention_mask, input_patches, input_patches_shape)
+        latents = self.latent(word_embeds, attention_mask)
+
+        # Only decode words that have a label
+        has_label = labels_attention_mask.flatten(0, 1).any(dim=-1)
+        latents = latents.flatten(0, 1)[has_label]
+        labels_input = labels_input.flatten(0, 1)[has_label]
+        labels_output = labels_output.flatten(0, 1)[has_label]
+
+        logits, mask = self.decode(latents, labels_input, labels_attention_mask.flatten(0, 1)[has_label])
+        # Position t (input byte t-1, or the latent for t=0) predicts output byte t-1
+        targets = F.pad(labels_output, (1, 0), value=self.config.pad_token_id)
+        packed_targets = targets[mask]
+        # (S, B, V) logits and (B, S) labels, Megatron's cross entropy
+        packed_losses = self.bytes_decoder.compute_language_model_loss(packed_targets[None], logits[:, None])[0]
+
+        losses = torch.zeros_like(targets, dtype=packed_losses.dtype)
+        losses[mask] = packed_losses
+        correct = torch.zeros_like(targets, dtype=torch.bool)
+        correct[mask] = logits.detach().argmax(dim=-1) == packed_targets
+        return losses[:, 1:], correct[:, 1:], labels_output

@@ -10,6 +10,7 @@ on:
 
 jobs:
   test:
+    # Megatron-Bridge and vLLM tests need a GPU and the NeMo container (see the Dockerfile), and are skipped here
     name: Test
     runs-on: ubuntu-latest
 
@@ -23,4 +24,4 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           WANDB_MODE: disabled
-        run: pytest -n auto --dist loadscope
+        run: pytest

@@ -1,210 +1,90 @@
-import tempfile
-
+"""Overfit a tiny WeLT on a few texts, and check it learned character, word, and byte level conditioning."""
 import pytest
-from transformers import Trainer, TrainerCallback, TrainingArguments, set_seed
-from trl import pack_dataset
+import torch
+from datasets import Dataset
 
-from tests.test_model import make_dataset, predict_dataset, setup_tiny_model
+pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
+
+from tests.conftest import build_model  # noqa: E402
+from welt.collator import collate_fn  # noqa: E402
+from welt.processor import TextImageProcessor  # noqa: E402
+from welt_training.data_utils import pack_words  # noqa: E402
+
+TRAIN_TEXTS = ["a b", "b a", "a cat", "a dog"]
 
 
-class ResetTrainingSeed(TrainerCallback):
-    def on_step_begin(self, args, state, control, **kwargs):
-        # Seed after the first batch is prepared: lazy setup in Transformers 5
-        # may consume RNG state before that point on the first training run.
-        if state.global_step == 0:
-            set_seed(args.seed)
+def train(model, processor, packed: bool, steps: int = 600):
+    if packed:
+        words = Dataset.from_dict({"text": TRAIN_TEXTS}).map(lambda e: {"words": processor.pretokenize(e["text"])})
+        examples = pack_words({"words": words["words"]}, seq_length=7)
+        batch = collate_fn([processor.process_single_example(w, lengths)
+                            for w, lengths in zip(examples["words"], examples["seq_lengths"], strict=True)])
+    else:
+        batch = processor(TRAIN_TEXTS)
+    batch = {k: v.cuda() for k, v in batch.items()}
 
-
-# TODO: this training is flaky due to https://github.com/huggingface/transformers/issues/40219
-def train_model(setup_function,
-                num_epochs=10,
-                train_texts=None,
-                packing=False,
-                **setup_kwargs):
-    model, processor, collator = setup_function(**setup_kwargs)
-
-    if train_texts is None:
-        train_texts = ["a b", "b a", "a cat", "a dog"]
-
-    train_dataset = make_dataset(train_texts)
-
-    if packing:
-        train_dataset = processor.pretokenize_dataset(train_dataset)
-        train_dataset = pack_dataset(train_dataset, seq_length=7)
-
-    train_dataset = train_dataset.with_transform(processor)
-
-    # Setup training arguments with more epochs for overfitting
-    training_args = TrainingArguments(
-        output_dir=tempfile.mktemp(),
-        num_train_epochs=num_epochs,
-        per_device_train_batch_size=len(train_texts),
-        logging_steps=1,
-        logging_strategy="steps",
-        save_strategy="no",  # Disable saving to avoid shared tensor issues
-        remove_unused_columns=False,
-        dataloader_drop_last=False,
-        warmup_steps=0,  # No warmup for immediate learning
-        weight_decay=0.0,  # No regularization for overfitting
-        learning_rate=5e-4,
-        lr_scheduler_type="constant",  # Keep learning rate constant
-        use_cpu=True,
-        data_seed=42,  # Seed Accelerate's sampler explicitly across Transformers versions.
-        report_to="none",
-    )
-
-    # Initialize trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        processing_class=processor,
-        train_dataset=train_dataset,
-        data_collator=collator,
-        callbacks=[ResetTrainingSeed()],
-    )
-
-    # Train the model
-    print("Training model on texts:", train_texts)
-    trainer.train()
-
-    # Set to eval mode
+    torch.manual_seed(0)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=0.0)
+    model.train()
+    for _ in range(steps):
+        losses, _, labels = model(**batch)
+        loss = (losses * (labels != 0)).sum() / (labels != 0).sum()
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
     model.eval()
 
-    return model, processor, collator
+
+def text_losses(model, processor, texts: list[str]) -> dict[str, float]:
+    """Mean byte loss of each text, on its own."""
+    results = {}
+    for text in texts:
+        batch = {k: v.cuda() for k, v in processor([text]).items()}
+        with torch.no_grad():
+            losses, _, labels = model(**batch)
+        mask = labels != 0
+        results[text] = ((losses * mask).sum() / mask.sum()).item()
+    return results
 
 
-@pytest.fixture(scope="module")
-def trained_models():
-    """Train the model once and reuse for all tests."""
-    # Packed examples need longer to learn character conditioning on CPU with
-    # Transformers 5; keep the same strict conditioning assertions on all hosts.
-    num_epochs = 600
-    kwargs = dict(image_encoder_name="NaViT-tiny", modality_dropout=0.15)
-    return {
-        "packed": train_model(setup_tiny_model, num_epochs=num_epochs, packing=True, **kwargs),
-        "unpacked": train_model(setup_tiny_model, num_epochs=num_epochs, packing=False, **kwargs)
-    }
+@pytest.fixture(scope="module", params=["packed", "unpacked"])
+def trained(request, megatron, tiny_config):
+    torch.manual_seed(0)
+    model = build_model(tiny_config).float()
+    model.config.modality_dropout = 0.15
+    processor = TextImageProcessor.create(max_word_length=16, render_images=True)
+    train(model, processor, packed=request.param == "packed")
+    return model, processor
 
 
-@pytest.fixture
-def model_configuration(request, trained_models):
-    """Configure model based on the test parameter."""
-    model_type, config_name = request.param
-    model, processor, collator = trained_models[model_type]
-
-    # Store original encoders
-    original_bytes_encoder = model.bytes_encoder
-    original_image_encoder = model.image_encoder
-
-    # Apply configuration
-    if config_name == "full_model":
-        print("\n[Configuration: Full model with all encoders]")
-        # No changes needed
-    elif config_name == "no_bytes_encoder":
-        print("\n[Configuration: Model without bytes encoder]")
-        model.bytes_encoder = None
-    elif config_name == "no_image_encoder":
-        print("\n[Configuration: Model without image encoder]")
-        model.image_encoder = None
-
-    # Yield the configured model
-    yield model, processor, collator
-
-    # Restore original encoders after test
-    model.bytes_encoder = original_bytes_encoder
-    model.image_encoder = original_image_encoder
+@pytest.fixture(params=["full_model", "no_bytes_encoder", "no_image_encoder"])
+def configured(request, trained, monkeypatch):
+    """Drops a modality like modality dropout does: its embedding is zeroed and the other one is rescaled."""
+    model, processor = trained
+    keep = {"full_model": [1.0, 1.0], "no_bytes_encoder": [2.0, 0.0], "no_image_encoder": [0.0, 2.0]}[request.param]
+    monkeypatch.setattr(model, "_modality_scale", lambda num, device: torch.tensor(keep, device=device))
+    return model, processor, request.param
 
 
-MODEL_CONFIGURATIONS = [
-    # Packed setups
-    ("packed", "full_model"),
-    ("packed", "no_bytes_encoder"),
-    ("packed", "no_image_encoder"),
-
-    # Unpacked setups
-    ("unpacked", "full_model"),
-    ("unpacked", "no_bytes_encoder"),
-    ("unpacked", "no_image_encoder"),
-]
-
-# A tiny image encoder cannot distinguish single-character renders ("a" vs "b"),
-# but CAN distinguish multi-character words ("cat" vs "dat"). See word/byte tests.
-CHAR_LEVEL_CONFIGURATIONS = [c for c in MODEL_CONFIGURATIONS if c[1] != "no_bytes_encoder"]
-
-MODEL_IDs = [f"{config} / {model_type}" for config, model_type in MODEL_CONFIGURATIONS]
-CHAR_LEVEL_IDs = [f"{config} / {model_type}" for config, model_type in CHAR_LEVEL_CONFIGURATIONS]
-
-parameterization = pytest.mark.parametrize("model_configuration", MODEL_CONFIGURATIONS, indirect=True, ids=MODEL_IDs)
-char_level_parameterization = pytest.mark.parametrize(
-    "model_configuration", CHAR_LEVEL_CONFIGURATIONS, indirect=True, ids=CHAR_LEVEL_IDs)
+def test_character_level_conditioning(configured):
+    model, processor, name = configured
+    if name == "no_bytes_encoder":
+        pytest.skip("A tiny image encoder cannot distinguish single-character renders ('a' vs 'b')")
+    losses = text_losses(model, processor, ["a b", "b a", "a a", "b b"])
+    assert losses["a b"] < losses["a a"]
+    assert losses["b a"] < losses["b b"]
 
 
-@char_level_parameterization
-def test_character_level_conditioning(model_configuration):
-    """Test 1: Character-level conditioning (a b vs a a, b a vs b b)"""
-    model, processor, collator = model_configuration
-
-    print("\n=== Test 1: Character-level conditioning ===")
-
-    test_texts_char = ["a b", "b a", "a a", "b b"]
-    losses, predictions = predict_dataset(test_texts_char, model, processor, collator)
-
-    # Check conditioning: trained sequences should have lower loss
-    assert losses['a b'] < losses['a a'], \
-        f"'a b' should have lower loss than 'a a': {losses['a b']:.4f} vs {losses['a a']:.4f}"
-
-    assert losses['b a'] < losses['b b'], \
-        f"'b a' should have lower loss than 'b b': {losses['b a']:.4f} vs {losses['b b']:.4f}"
-
-    print("✅ Character-level conditioning test passed!")
+def test_word_level_conditioning(configured):
+    model, processor, _ = configured
+    losses = text_losses(model, processor, ["a cat", "a dog", "a dat", "a cog"])
+    assert losses["a cat"] < losses["a dat"]
+    assert losses["a dog"] < losses["a cog"]
 
 
-@parameterization
-def test_word_level_conditioning(model_configuration):
-    """Test 2: Word-level conditioning (a cat vs a dat, a dog vs a cog)"""
-    model, processor, collator = model_configuration
-
-    print("\n=== Test 2: Word-level conditioning ===")
-
-    test_texts_word = ["a cat", "a dog", "a dat", "a cog", "a bat", "a fog"]
-    losses, predictions = predict_dataset(test_texts_word, model, processor, collator)
-
-    # Check conditioning: trained sequences should have lower loss
-    assert losses['a cat'] < losses['a dat'], \
-        f"'a cat' should have lower loss than 'a dat': {losses['a cat']:.4f} vs {losses['a dat']:.4f}"
-
-    assert losses['a dog'] < losses['a cog'], \
-        f"'a dog' should have lower loss than 'a cog': {losses['a dog']:.4f} vs {losses['a cog']:.4f}"
-
-    print("✅ Word-level conditioning test passed!")
-
-
-@parameterization
-def test_byte_level_conditioning(model_configuration):
-    """Test 3: Byte-level conditioning within words"""
-    model, processor, collator = model_configuration
-
-    print("\n=== Test 3: Byte-level conditioning within words ===")
-
-    # For "a cat" and "a dog", after seeing "a c" or "a d", the model should be confident about the rest
-    # This tests that the byte decoder is properly conditioned on previous bytes
-
-    # Create a special test to check conditional probabilities
-    test_conditional = ["a cat", "a cog", "a dog", "a dat"]
-    losses, predictions = predict_dataset(test_conditional, model, processor, collator)
-
-    # After 'a c', 'cat' should be more likely than 'cog'
-    assert losses['a cat'] < losses['a cog'], \
-        (f"'a cat' should have lower loss than 'a cog': "
-         f"{losses['a cat']:.4f} vs {losses['a cog']:.4f}")
-
-    # After 'a d', 'dog' should be more likely than 'dat'
-    assert losses['a dog'] < losses['a dat'], \
-        (f"'a dog' should have lower loss than 'a dat': "
-         f"{losses['a dog']:.4f} vs {losses['a dat']:.4f}")
-
-    print("✅ Byte-level conditioning test passed!")
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_byte_level_conditioning(configured):
+    """After 'c', 'cat' is more likely than 'cog', and after 'd', 'dog' than 'dat'."""
+    model, processor, _ = configured
+    losses = text_losses(model, processor, ["a cat", "a cog", "a dog", "a dat"])
+    assert losses["a cat"] < losses["a cog"]
+    assert losses["a dog"] < losses["a dat"]

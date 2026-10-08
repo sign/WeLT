@@ -1,10 +1,64 @@
+"""Text datasets for WeLT: load, format, pretokenize into words and pack. Independent of Megatron."""
 import glob
 import logging
 import os
+from dataclasses import dataclass
+from itertools import islice
 
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
+
+from welt.processor import TextImageProcessor
 
 logger = logging.getLogger(__name__)
+
+PAD_WORD = "\x00"
+
+
+@dataclass(kw_only=True)
+class TextDataConfig:
+    """Where the texts come from, and how they are formatted."""
+    seq_length: int  # Words (WeLT) or tokens (baseline) per packed example
+
+    dataset_name: str | None = None
+    dataset_config_name: str | None = None
+    # A python format string over dataset columns, or [prefix, completion] which are concatenated for training
+    dataset_text_template: str | list[str] | None = None
+    train_file: str | None = None
+    validation_file: str | None = None
+    prepared_data_path: str | None = None  # Shards made by welt-prepare-data
+    validation_split_percentage: int = 5
+    streaming: bool = False  # Streams the dataset, materializing max_train_samples / max_eval_samples
+    max_train_samples: int | None = None
+    max_eval_samples: int | None = None
+    preprocessing_num_workers: int | None = None
+    trust_remote_code: bool = False
+    samples_per_eval: int | None = None  # Set from the validation config: each evaluation covers the dataset once
+
+
+def repeated_length(num_examples: int, min_length: int) -> int:
+    """The smallest number of samples >= min_length that repeats every example equally often."""
+    if num_examples == 0:
+        raise ValueError("Empty dataset (e.g. fewer texts than one packed example)")
+    return -(-max(min_length, 1) // num_examples) * num_examples
+
+
+def dataset_lengths(datasets: dict, context, samples_per_eval: int | None) -> dict[str, int]:
+    """Samples drawn from each split: train repeats examples equally up to the train samples. Validation has
+    samples_per_eval samples, so that every evaluation (one epoch of Megatron's sampler) covers the whole set."""
+    lengths = {}
+    if "train" in datasets:
+        lengths["train"] = repeated_length(len(datasets["train"]), context.train_samples)
+    if "validation" in datasets:
+        num_examples = len(datasets["validation"])
+        lengths["validation"] = samples_per_eval or repeated_length(num_examples, context.valid_samples)
+        if samples_per_eval is not None and samples_per_eval < num_examples:
+            logger.warning(f"Evaluations see {samples_per_eval} of {num_examples} validation examples, "
+                           "increase validation.eval_iters to see them all")
+    return lengths
+
+
+def _take(load_args: dict, split: str, skip: int, limit: int):
+    yield from islice(load_dataset(**load_args, split=split, streaming=True).skip(skip), limit)
 
 
 def extract_text(example: dict, text_column: str = "text", text_template: str | None = None) -> str:
@@ -59,3 +113,93 @@ def load_prepared_data(prepared_data_path: str):
         f"{len(validation_files)} validation shard(s) from {prepared_data_path}"
     )
     return result
+
+
+def pack_words(batch: dict[str, list], seq_length: int) -> dict[str, list]:
+    """Greedily pack word sequences (truncated to seq_length) into blocks of exactly seq_length words.
+    Each block is right-padded with PAD words, each its own sequence, for constant shapes."""
+    packed = {"words": [], "seq_lengths": []}
+
+    def flush(words, lengths):
+        if words:
+            pad = seq_length - len(words)
+            packed["words"].append(words + [PAD_WORD] * pad)
+            packed["seq_lengths"].append(lengths + [1] * pad)
+
+    words, lengths = [], []
+    for sequence in batch["words"]:
+        sequence = sequence[:seq_length]
+        if len(words) + len(sequence) > seq_length:
+            flush(words, lengths)
+            words, lengths = [], []
+        words += sequence
+        lengths.append(len(sequence))
+    flush(words, lengths)
+    return packed
+
+
+def pack_dataset(processor: TextImageProcessor, dataset: Dataset, seq_length: int, num_proc: int | None = None):
+    dataset = dataset.map(lambda example: {"words": processor.pretokenize(example["text"])},
+                          remove_columns=dataset.column_names, num_proc=num_proc, desc="Pretokenizing texts into words")
+    # ponytail: greedy in-order packing; best-fit-decreasing would waste fewer PAD words
+    return dataset.map(pack_words, batched=True, batch_size=1000, remove_columns=dataset.column_names,
+                       fn_kwargs={"seq_length": seq_length}, num_proc=num_proc, desc="Packing words")
+
+
+def load_raw_datasets(args: TextDataConfig) -> dict:
+    if args.prepared_data_path is not None:
+        return load_prepared_data(args.prepared_data_path)
+
+    if args.dataset_name is not None:
+        load_args = dict(path=args.dataset_name, name=args.dataset_config_name,
+                         trust_remote_code=args.trust_remote_code)
+    else:
+        data_files = {}
+        if args.train_file is not None:
+            data_files["train"] = args.train_file
+        if args.validation_file is not None:
+            data_files["validation"] = args.validation_file
+        extension = next(iter(data_files.values())).split(".")[-1]
+        load_args = dict(path="text" if extension == "txt" else extension, data_files=data_files)
+
+    if args.streaming:
+        if args.max_train_samples is None or args.max_eval_samples is None:
+            raise ValueError("streaming requires max_train_samples and max_eval_samples")
+        # Without a validation split, the first examples of the train stream are held out for validation
+        has_validation = "validation" in load_dataset(**load_args, streaming=True)
+        splits = {"train": ("train", 0 if has_validation else args.max_eval_samples, args.max_train_samples),
+                  "validation": ("validation" if has_validation else "train", 0, args.max_eval_samples)}
+        # Materialized to (cached, memory-mapped) arrow files
+        return {name: Dataset.from_generator(_take, gen_kwargs=dict(load_args=load_args, split=split, skip=skip,
+                                                                    limit=limit))
+                for name, (split, skip, limit) in splits.items()}
+
+    raw = load_dataset(**load_args)
+    if "validation" not in raw:
+        split = raw["train"].train_test_split(test_size=args.validation_split_percentage / 100, seed=42)
+        raw = {"train": split["train"], "validation": split["test"]}
+    return dict(raw)
+
+
+def load_text_datasets(args: TextDataConfig) -> dict[str, Dataset]:
+    """Load the train and validation splits, as datasets with a single 'text' column."""
+    raw = load_raw_datasets(args)
+
+    template = args.dataset_text_template
+    if isinstance(template, list | tuple):
+        template = "".join(template)
+
+    limits = {"train": args.max_train_samples, "validation": args.max_eval_samples}
+    texts = {}
+    for split in ("train", "validation"):
+        if split not in raw:
+            continue
+        dataset = raw[split]
+        if limits[split] is not None and limits[split] < len(dataset):
+            dataset = dataset.select(range(limits[split]))
+        text_column = "text" if "text" in dataset.column_names else dataset.column_names[0]
+        dataset = dataset.map(lambda example, column=text_column: {"text": extract_text(example, column, template)},
+                              remove_columns=dataset.column_names, num_proc=args.preprocessing_num_workers,
+                              desc=f"Formatting {split} split")
+        texts[split] = dataset.filter(lambda example: len(example["text"]) > 0)
+    return texts

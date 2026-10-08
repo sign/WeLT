@@ -1,18 +1,15 @@
+import contextlib
+
 import pytest
 import torch
 from utf8_tokenizer.control import ControlTokens
 
-from welt.attention import (
-    add_self_attention_blocks,
-    get_attention_mask_for_packed_sequence,
-    get_position_ids_for_packed_sequence,
-    get_shift_blocks,
-)
+from welt.attention import get_attention_mask_for_packed_sequence, get_shift_blocks
 
 
 def test_get_attention_mask_for_packed_sequence_single_sequence():
     seq_lengths = [3]
-    mask = get_attention_mask_for_packed_sequence(seq_lengths)
+    mask = get_attention_mask_for_packed_sequence(seq_lengths, ["x"] * sum(seq_lengths))
 
     expected = torch.tensor([[
         [True, False, False],
@@ -26,7 +23,7 @@ def test_get_attention_mask_for_packed_sequence_single_sequence():
 
 def test_get_attention_mask_for_packed_sequence_two_sequences():
     seq_lengths = [2, 2]
-    mask = get_attention_mask_for_packed_sequence(seq_lengths)
+    mask = get_attention_mask_for_packed_sequence(seq_lengths, ["x"] * sum(seq_lengths))
 
     expected = torch.tensor([[
         [True, False, False, False],
@@ -39,117 +36,21 @@ def test_get_attention_mask_for_packed_sequence_two_sequences():
     assert mask.shape == (1, 4, 4)
 
 
-def test_get_position_ids_for_packed_sequence_single_sequence():
-    seq_lengths = [3]
-    position_ids = get_position_ids_for_packed_sequence(seq_lengths)
-
-    expected = torch.tensor([0, 1, 2])
-
-    assert torch.equal(position_ids, expected)
-    assert position_ids.shape == (3,)
-
-
-def test_get_position_ids_for_packed_sequence_two_sequences():
-    seq_lengths = [2, 2]
-    position_ids = get_position_ids_for_packed_sequence(seq_lengths)
-
-    expected = torch.tensor([0, 1, 0, 1])
-
-    assert torch.equal(position_ids, expected)
-    assert position_ids.shape == (4,)
-
-
-def test_add_self_attention_blocks_basic_shift_block():
-    mask = torch.zeros((1, 5, 5), dtype=torch.bool)
-    words = ["hello", ControlTokens.ShiftOut, "world", ControlTokens.ShiftIn, "end"]
-
-    add_self_attention_blocks(mask, words)
-
-    expected = torch.zeros((1, 5, 5), dtype=torch.bool)
-    expected[0, 1:4, 1:4] = True
-
-    assert torch.equal(mask, expected)
-
-
-def test_add_self_attention_blocks_multiple_shift_blocks():
-    mask = torch.zeros((1, 8, 8), dtype=torch.bool)
-    words = [
-        "start",
-        ControlTokens.ShiftOut, "first", "block", ControlTokens.ShiftIn,
-        "middle",
-        ControlTokens.ShiftOut, "second", ControlTokens.ShiftIn
-    ]
-
-    add_self_attention_blocks(mask, words)
-
-    expected = torch.zeros((1, 8, 8), dtype=torch.bool)
-    expected[0, 1:5, 1:5] = True
-    expected[0, 6:8, 6:8] = True
-
-    assert torch.equal(mask, expected)
-
-
-def test_add_self_attention_blocks_no_shift_tokens():
-    mask = torch.zeros((1, 3, 3), dtype=torch.bool)
-    words = ["hello", "world", "test"]
-
-    original_mask = mask.clone()
-    add_self_attention_blocks(mask, words)
-
-    assert torch.equal(mask, original_mask)
-
-
-def test_add_self_attention_blocks_only_shift_out():
-    mask = torch.zeros((1, 3, 3), dtype=torch.bool)
-    words = ["hello", ControlTokens.ShiftOut, "world"]
-
-    original_mask = mask.clone()
-    with pytest.warns(UserWarning, match="Missing corresponding Shift In"):
-        add_self_attention_blocks(mask, words)
-
-    assert torch.equal(mask, original_mask)
-
-
-def test_add_self_attention_blocks_shift_in_without_out():
-    mask = torch.zeros((1, 3, 3), dtype=torch.bool)
-    words = ["hello", ControlTokens.ShiftIn, "world"]
-
-    original_mask = mask.clone()
-
-    with pytest.warns(UserWarning, match="Skipping self-attention block."):
-        add_self_attention_blocks(mask, words)
-
-    assert torch.equal(mask, original_mask)
-
-
-def test_add_self_attention_blocks_single_token_block():
-    mask = torch.zeros((1, 3, 3), dtype=torch.bool)
-    words = [ControlTokens.ShiftOut, ControlTokens.ShiftIn, "end"]
-
-    add_self_attention_blocks(mask, words)
-
-    expected = torch.zeros((1, 3, 3), dtype=torch.bool)
-    expected[0, 0:2, 0:2] = True
-
-    assert torch.equal(mask, expected)
-
-
-def test_add_self_attention_blocks_nested_shift_out():
-    mask = torch.zeros((1, 6, 6), dtype=torch.bool)
-    words = [
-        "start",
-        ControlTokens.ShiftOut, "outer",
-        ControlTokens.ShiftOut, "inner",
-        ControlTokens.ShiftIn
-    ]
-
-    with pytest.warns(UserWarning, match="Nested shift blocks are not allowed."):
-        add_self_attention_blocks(mask, words)
-
-    expected = torch.zeros((1, 6, 6), dtype=torch.bool)
-    expected[0, 3:6, 3:6] = True
-
-    assert torch.equal(mask, expected)
+@pytest.mark.parametrize(("words", "warning", "blocks"), [
+    (["a", ControlTokens.ShiftOut, "b", ControlTokens.ShiftIn, "c"], None, [(1, 4)]),
+    ([ControlTokens.ShiftOut, ControlTokens.ShiftIn, "c"], None, [(0, 2)]),
+    (["a", ControlTokens.ShiftOut, "b"], "Missing corresponding Shift In", []),
+    (["a", ControlTokens.ShiftIn, "b"], "Skipping self-attention block", []),
+    (["a", ControlTokens.ShiftOut, "b", ControlTokens.ShiftOut, "c", ControlTokens.ShiftIn],
+     "Nested shift blocks are not allowed", [(3, 6)]),
+])
+def test_shift_blocks_are_bidirectional(words, warning, blocks):
+    with pytest.warns(UserWarning, match=warning) if warning else contextlib.nullcontext():
+        mask = get_attention_mask_for_packed_sequence([len(words)], words)
+    expected = torch.ones(len(words), len(words), dtype=torch.bool).tril()
+    for start, end in blocks:
+        expected[start:end, start:end] = True
+    assert torch.equal(mask[0], expected)
 
 
 def test_get_attention_mask_for_packed_sequence_with_shift_blocks():
@@ -206,7 +107,3 @@ def test_get_shift_blocks_no_blocks():
     blocks = list(get_shift_blocks(words))
 
     assert len(blocks) == 0
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
