@@ -103,6 +103,9 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 172 | 29 min | 0.626 | 64.8% | 5.9% | 41.0 | 441 |
 
 Generation is greedy, on 256 validation examples, with vLLM (batched over all examples).
+Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
+transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine
+translation trains a 70m latent transformer with both encoders.
 
 The causal LM [baseline](../welt_training/experiments/machine-translation/baseline.yaml) (the same 6-layer 512-wide
 transformer over Pythia BPE tokens, same data and batch size, 10000 steps) reaches **1.016** validation bits per byte

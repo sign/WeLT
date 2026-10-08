@@ -6,5 +6,10 @@ config=$1; output=$2; shift 2
 mkdir -p "$output"
 torchrun --nproc_per_node=1 -m welt_training.train "$config" output_dir="$output" "$@" 2>&1 | tee "$output/train.log"
 welt-export "$output/checkpoints" --output "$output/export"
-welt-evaluate "$output/export" --output "$output/eval.json"
+port=${PORT:-8080}
+welt-serve "$output/export" --port $port > "$output/serve.log" 2>&1 &
+server=$!
+trap 'kill $server' EXIT
+until curl -sf localhost:$port/health > /dev/null; do kill -0 $server; sleep 5; done  # Fails if it exited
+welt-evaluate "$output/export/welt.yaml" --url http://localhost:$port --output "$output/eval.json"
 python benchmarks/summarize.py "$config" "$output" >> benchmarks/tasks.csv
