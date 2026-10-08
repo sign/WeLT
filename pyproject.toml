@@ -67,5 +67,10 @@ testpaths = [
 ]
 
 [project.scripts]
+welt-export = "welt.export:main"
+welt-generate = "welt.inference:main"
 welt-prepare-data = "welt_training.prepare_data:main"
 welt-verify-data = "welt_training.verify_data:main"
+
+[project.entry-points."vllm.general_plugins"]
+welt = "welt.vllm_plugin:register"
