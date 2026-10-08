@@ -15,5 +15,5 @@ runs:
     - name: Install dependencies
       shell: bash -el {0}
       run: |
-        pip install ".[dev,train]"
+        pip install ".[dev]"
         echo "$CONDA_PREFIX/bin" >> "$GITHUB_PATH"  # The environment's python, pytest and ruff for later steps
