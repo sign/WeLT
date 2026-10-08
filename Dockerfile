@@ -5,11 +5,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Text rendering (pango, cairo)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends pkg-config \
-      libgirepository-1.0-1 libcairo2 gir1.2-pango-1.0 libcairo2-dev libgirepository1.0-dev && \
-    rm -rf /var/lib/apt/lists/*
+# Text rendering: the latest Pango, cairo and PyGObject from conda-forge (as pixel-renderer installs them),
+# in their own prefix, on the path of the container's Python
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-$(uname -m | sed s/x86_64/64/)/latest | \
+      tar -xj -C /usr/local bin/micromamba && \
+    micromamba create -y -p /opt/pango -c conda-forge python=3.12 pango pycairo pygobject && \
+    micromamba clean -a -y && \
+    echo /opt/pango/lib/python3.12/site-packages > "$(python -c 'import site; print(site.getsitepackages()[0])')/pango.pth"
 
 WORKDIR /app
 # Dependencies first, for layer caching (python -m pip: the NeMo image has a separate system pip)
