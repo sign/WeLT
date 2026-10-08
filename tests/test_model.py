@@ -132,3 +132,11 @@ def test_masked_attention_matches_sdpa(megatron):
     expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
     torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
 
+
+def test_checkpoint_shards_every_transformer(megatron, tiny_config):
+    """Every transformer's weights are saved as tensor parallel shards (by its own sharded_state_dict),
+    not as full tensors replicated across ranks."""
+    sharded = build_model(tiny_config).sharded_state_dict()
+    for name in ["bytes_encoder.transformer", "image_encoder.transformer", "latent_transformer", "bytes_decoder"]:
+        weight = sharded[f"{name}.decoder.layers.0.self_attention.linear_proj.weight"]
+        assert weight.key == f"{name}.decoder.layers.self_attention.linear_proj.weight"  # Megatron's layer stacking
