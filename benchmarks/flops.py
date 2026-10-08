@@ -32,12 +32,13 @@ def transformer_flops(config, lengths) -> float:
     return 6 * params * tokens + 12 * layers * width * sum(n * n for n in lengths)
 
 
-def step_flops(config: dict, batches: int = 20) -> tuple[float, float]:
+def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
     model, data = config["model"], config["data"]
     provider = build_dataset_provider(model, data)
     train, _, _ = provider.build_datasets(DatasetBuildContext(0, 0, 0))
-    micro_batch = (config.get("train") or {}).get("micro_batch_size", 32)
-    global_batch = (config.get("train") or {}).get("global_batch_size", micro_batch)
+    train_config = config.get("train") or {}
+    micro_batch = train_config.get("micro_batch_size", 32)
+    global_batch = train_config.get("global_batch_size", micro_batch)
     configs = {name: hf_config(model[name], model.get("trust_remote_code", False)) for name in
                ["bytes_encoder", "image_encoder", "latent_transformer", "bytes_decoder"] if model.get(name)}
 
@@ -59,8 +60,7 @@ def step_flops(config: dict, batches: int = 20) -> tuple[float, float]:
             if "image_encoder" in configs:
                 flops += transformer_flops(configs["image_encoder"], [p + 1 for _, _, p in encoded])
             totals[kind] += flops
-    scale = global_batch / micro_batch / batches
-    return totals["model"] * scale, totals["hardware"] * scale
+    return {kind: flops * global_batch / micro_batch / batches for kind, flops in totals.items()}
 
 
 def main():
@@ -69,7 +69,7 @@ def main():
     parser.add_argument("--batches", type=int, default=20)
     parser.add_argument("--ms_per_step", type=float, help="Also print achieved TFLOP/s")
     args = parser.parse_args()
-    for kind, flops in zip(["model", "hardware"], step_flops(load_yaml(args.config), args.batches), strict=True):
+    for kind, flops in step_flops(load_yaml(args.config), args.batches).items():
         line = f"{kind} TFLOPs per step: {flops / 1e12:.3f}"
         if args.ms_per_step:
             line += f", {flops / 1e12 / (args.ms_per_step / 1000):.2f} TFLOP/s"

@@ -62,11 +62,11 @@ occurrence, "hardware" FLOPs encode each distinct word once.
 
 | Config | ms / step | Model TFLOPs / step | Model TFLOP/s | Hardware TFLOP/s |
 |--------|----------:|-------------------:|--------------:|-----------------:|
-| Bench | 127 | 2.76 | 21.8 | - |
-| Machine translation | 172 | 3.06 | 17.8 | 14.5 |
+| Bench | 127 | 2.76 | 21.8 | 14.8 |
+| Machine translation (task run) | 172 | 3.06 | 17.8 | 14.5 |
 
 The remaining time is dominated by memory-bound kernels (SwiGLU, RoPE, norms) of the narrow (128-512 wide)
-transformers, which GB10's bandwidth limits. Larger micro batches help a little (batch 128: 10% more samples/s).
+transformers, which GB10's bandwidth limits.
 
 ### Multiple GPUs
 
@@ -79,7 +79,7 @@ transformers, which GB10's bandwidth limits. Larger micro batches help a little 
 | Data parallel (DP=2) | 101 | 0.933 |
 | Tensor + sequence parallel (TP=2) | 254 | 0.938 |
 
-Data parallelism scales 1.9x. Tensor parallelism is slower for these narrow (128-512 wide) transformers: use it only
+Data parallelism scales 1.9x. Tensor parallelism is slower for these narrow transformers: use it only
 for models that do not fit on one GPU. Its checkpoints export (resharded) to the same vLLM format.
 
 With micro batch 64, a step takes 103 ms on one H100 vs. 167 ms on the GB10: only 1.6x faster. A profile shows the
@@ -102,11 +102,12 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **letter-count**: count the letters of a word (Muon) | 3000 | 67 | 3.4 min | 0.0001 | 100% | 99.2% | 99.7 | 1336 |
 | **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 172 | 29 min | 0.626 | 64.8% | 5.9% | 41.0 | 441 |
 
-Generation is greedy, on 256 validation examples, with vLLM (batched over all examples).
+Generation is greedy, on 256 validation examples, with vLLM (batched over all examples). Reproduce a row with e.g.
+`WANDB_MODE=disabled benchmarks/run_task.sh welt_training/experiments/easy-tasks/string-repetition.yaml
+output/string-repetition train.train_iters=1500`.
+
+These tasks (and the multiple GPU runs above) were measured before the review fixes of the migration's stacked PRs;
+a re-run with the final code, and Muon for every task, follows.
 Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
 transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine
 translation trains a 70m latent transformer with both encoders.
-
-The causal LM [baseline](../welt_training/experiments/machine-translation/baseline.yaml) (the same 6-layer 512-wide
-transformer over Pythia BPE tokens, same data and batch size, 10000 steps) reaches **1.016** validation bits per byte
-at 729 ms / step, vs. **0.626** for WeLT at 172 ms / step.

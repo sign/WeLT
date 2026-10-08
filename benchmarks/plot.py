@@ -37,7 +37,7 @@ for ax, (config, title) in zip(axes, panels.items(), strict=True):
     ax.spines["bottom"].set_color(MUTED)
 axes[-1].set_xlabel("ms per training step on GB10 (lower is better); speedup vs. the panel's first row",
                     color=MUTED, fontsize=9)
-fig.legend(handles=[Patch(facecolor=ORANGE, label="HF Trainer (main)"),
+fig.legend(handles=[Patch(facecolor=ORANGE, label="HF Trainer (huggingface-transformers tag)"),
                     Patch(facecolor=BLUE, label="Megatron-Bridge, kept"),
                     Patch(facecolor="none", edgecolor=BLUE, hatch="///", label="tried, not kept / option")],
            loc="upper left", bbox_to_anchor=(0.005, 0.955), frameon=False, fontsize=9, ncol=3)

@@ -11,10 +11,8 @@ iterations = re.findall(r"iteration\s+(\d+)/", log)[-1]
 validation = re.findall(r"validation loss at iteration \d+ on validation set \| (.*)", log)[-1]
 metrics = {k.strip(): v for k, v in re.findall(r"([a-z ]+) value: ([\d.E+-]+)", validation)}
 evaluation = json.loads((output / "eval.json").read_text())
-print(",".join(str(v) for v in [
+print(",".join([
     Path(config).stem, iterations, f"{sum(step_times) / len(step_times):.1f}",
-    f"{float(metrics['lm loss']):.4f}", f"{float(metrics['bits per byte']):.4f}",
-    f"{float(metrics['byte accuracy']):.4f}",
-    f"{float(metrics['word accuracy']):.4f}",
+    *(f"{float(metrics[name]):.4f}" for name in ("lm loss", "bits per byte", "byte accuracy", "word accuracy")),
     f"{evaluation['exact_match']:.4f}", f"{evaluation['chrf']:.2f}", f"{evaluation['generated_words_per_second']:.1f}",
 ]))

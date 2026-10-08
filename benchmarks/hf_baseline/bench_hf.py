@@ -1,4 +1,4 @@
-"""Steady-state throughput of the HF Trainer WeLT stack (main branch)."""
+"""Steady-state throughput of the HF Trainer WeLT stack (the huggingface-transformers tag)."""
 import json
 import sys
 import time
