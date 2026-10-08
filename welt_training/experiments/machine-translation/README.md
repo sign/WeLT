@@ -14,7 +14,10 @@ torchrun --nproc_per_node=1 -m welt_training.train welt_training/experiments/mac
 torchrun --nproc_per_node=1 -m welt_training.baseline welt_training/experiments/machine-translation/baseline.yaml
 ```
 
-Both log `bits per byte` to the same W&B project (`welt-machine-translation`): the loss of every prediction
-except the end of a document (WeLT's word ends included), per UTF-8 byte of text, so their validation values
-compare directly. Generation quality of the WeLT model (chrF, exact match) comes from
+The baseline ([`welt_training/baseline.py`](../../baseline.py)) is a causal LM over a standard tokenizer, trained by
+Megatron-Bridge on the same data. Its `model` section is `transformer` (HF id/path or JSON config), `tokenizer` and
+`load_pretrained`, and `data.seq_length` counts tokens.
+
+Both log [`bits per byte`](../../../README.md#train) to the same W&B project (`welt-machine-translation`), so their
+validation values compare directly. Generation quality of the WeLT model (chrF, exact match) comes from
 `welt-export`, `welt-serve` and `welt-evaluate`, see the [README](../../../README.md#export-serve--generate).

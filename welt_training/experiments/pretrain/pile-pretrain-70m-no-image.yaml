@@ -1,4 +1,4 @@
-# Pretraining on prepared data shards (see `welt-prepare-data` in the README)
+# Pretraining on prepared data shards (see `welt-prepare-data` in welt_training/README.md)
 output_dir: ./output/welt-pile-pretrain
 
 model:

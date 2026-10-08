@@ -33,13 +33,8 @@ model id/path, or as a JSON HuggingFace config to train from scratch
 With `load_pretrained: true`, transformers given by id/path start from their weights.
 Their token embeddings and LM heads are replaced: words are given as embeddings, and bytes have their own embeddings.
 
-| Name  | Bytes Encoder                                                     | Latent Transformer                                                  | Bytes Decoder                                                     |
-|-------|-------------------------------------------------------------------|---------------------------------------------------------------------|-------------------------------------------------------------------|
-| tiny  | [utf8-lm-tiny](https://huggingface.co/sign/utf8-lm-tiny)          | [tiny-lm](https://huggingface.co/sbintuitions/tiny-lm)              | [utf8-lm-tiny](https://huggingface.co/sign/utf8-lm-tiny)          |
-| small | [utf8-lm-tiny](https://huggingface.co/sign/utf8-lm-tiny)          | [SmolLM2-360M](https://huggingface.co/HuggingFaceTB/SmolLM2-360M)   | [SmolLM2-135M](https://huggingface.co/HuggingFaceTB/SmolLM2-135M) |
-| large | [SmolLM2-135M](https://huggingface.co/HuggingFaceTB/SmolLM2-135M) | [Llama-3.2-1B](https://huggingface.co/meta-llama/Llama-3.2-1B)      | [SmolLM2-135M](https://huggingface.co/HuggingFaceTB/SmolLM2-135M) |
-
-Either encoder can be turned off (`bytes_encoder: null` or `image_encoder: null`), not both.
+Each encoder is optional (omit it or set it to `null`), but at least one is required.
+See the [experiments](welt_training/experiments) for configs.
 
 ## Install
 
@@ -60,24 +55,29 @@ docker run -it --rm --gpus all --ipc=host \
 The repository is installed in editable mode at `/app`, so mounting your checkout there runs your code.
 All commands below run inside the container. Run the tests with `pytest` (GPU tests are skipped without a GPU).
 
+Without the container, the CPU tests run in a Python 3.12 environment with Pango
+(Megatron and vLLM tests are skipped):
+
+```shell
+micromamba create -n welt -c conda-forge python=3.12 pango pycairo pygobject
+micromamba activate welt
+pip install ".[dev]"
+pytest
+```
+
 ## Train
 
 ```shell
 torchrun --nproc_per_node=1 -m welt_training.train welt_training/experiments/easy-tasks/string-repetition.yaml
 ```
 
-Any config value can be overridden as `section.key=value`, parsed as YAML
-(e.g. `output_dir=./output/test train.train_iters=500 logger.wandb_project=null`, the latter to run without W&B).
-A config has a `model` and a `data` section, plus any Megatron-Bridge section (`train`, `optimizer`, `scheduler`,
-`validation`, `checkpoint`, `logger`, `ddp`, `rng`). See [welt_training/README.md](welt_training/README.md)
-for the config reference, data sources, parallelism and optimizers, and the
-[experiments](welt_training/experiments) for ready configs.
+See [welt_training/README.md](welt_training/README.md) for config overrides, the config reference, data sources
+and preparation, parallelism, optimizers and the run directory.
 
-The run directory (`output_dir`) holds the config (`welt.yaml`), the `processor/`, `tensorboard/` logs and Megatron
-`checkpoints/`, from which a rerun resumes automatically.
 Training and validation log `lm loss` (per byte), `bits per byte`, `byte accuracy` and `word accuracy`.
-Bits per byte count every byte prediction, including the end of each word (like a space in a causal LM) but not
-the end of a document, per UTF-8 byte of text, so they are comparable to the [baseline](#baseline)'s.
+Bits per byte count every byte prediction, including the end of each word (like a space in a causal LM), per UTF-8
+byte of text, except the end of a document and the text inside shift blocks (`\x0E...\x0F`, e.g. the source
+sentence), which neither WeLT nor the [baseline](#baseline) predicts, so the two are comparable.
 
 ## Export, Serve & Generate
 
@@ -98,16 +98,13 @@ curl localhost:8080/generate -H "Content-Type: application/json" \
   -d '{"texts": ["<text>\u000eHello world\u000f<repeat> "], "max_generated_words": 50, "temperature": 0.0}'
 ```
 
-`welt-serve` ([`welt/server.py`](welt/server.py)) answers `GET /health` and `POST /generate`, one generation at a time
-(all texts of a request are batched; a busy server answers 503 with `Retry-After`), and tags responses with
-`X-Model-Tag` from the `MODEL_TAG` environment variable. In Python, `welt.server.generate(url, texts)` is the client,
-and `welt.inference.WeLTGenerator(export_dir).generate(texts)` runs the model in-process.
-
-Each generation step encodes the new words (vLLM pooling, cached per word), runs the latent transformer over all
-word embeddings (vLLM pooling with prefix caching; bidirectional shift blocks via [a vLLM plugin](welt/vllm_plugin.py)),
-and generates the next word's bytes (vLLM generation, [valid UTF-8 only](welt/utf8.py)). Decoding is greedy
-(`temperature=0`) or sampled; there is no beam search. A prompt ending mid-word continues that word.
-Generation stops at an empty word or `max_generated_words`.
+`welt-serve` ([`welt/server.py`](welt/server.py)) answers `GET /health` and `POST /generate`, whose JSON body has
+`texts` (a list of prompts), and optionally `max_generated_words` (default 50), `temperature` (default 0, greedy)
+and `seed`. Invalid requests, and prompts whose words plus `max_generated_words` exceed the latent transformer's
+context, get a 400. Decoding is greedy or sampled, valid UTF-8 only, with no beam search; a prompt ending mid-word
+continues that word. In Python, `welt.server.generate(url, texts)` is the client, and
+`welt.inference.WeLTGenerator(export_dir).generate(texts)` runs the model in-process
+(see [`welt/inference.py`](welt/inference.py) for how generation works).
 
 ## Evaluate
 
@@ -117,61 +114,25 @@ With the model served:
 welt-evaluate output/string-repetition-tiny/export/welt.yaml --url http://localhost:8080 --max_samples 256 --output results.json
 ```
 
-Generates completions for the validation prefixes of the run's dataset, and reports exact match, chrF and
-generated words per second. It needs `data.dataset_text_template` as `[prefix, completion]` in the config.
+Generates completions for the validation prefixes of the run's dataset (see [Data](welt_training/README.md#data)),
+and reports exact match, chrF and generated words per second.
 [`benchmarks/run_task.sh`](benchmarks/run_task.sh) trains, exports, serves and evaluates a config in one go.
 
 ## Baseline
 
-A causal LM over a standard tokenizer, trained by Megatron-Bridge on the same data, reporting comparable bits per byte:
-
-```shell
-torchrun --nproc_per_node=1 -m welt_training.baseline welt_training/experiments/machine-translation/baseline.yaml
-```
-
-Its `model` section is `transformer` (HF id/path or JSON config), `tokenizer` and `load_pretrained`, and
-`data.seq_length` counts tokens. See [machine translation](welt_training/experiments/machine-translation).
-
-## Data Preparation
-
-For large-scale training, `welt-prepare-data` streams a HuggingFace dataset (shuffled), chunks documents into
-examples of words, and writes sharded `.jsonl.gz` files; several datasets can share one directory.
-Match the training config: `--max_seq_length` is `data.seq_length - 1` (training adds a BOS word), and
-`--max_bytes_per_word` is `data.max_word_length - 2`.
-
-```shell
-welt-prepare-data \
-    --dataset_name HuggingFaceFW/fineweb --dataset_config sample-10BT --language eng_Latn \
-    --train_split_units 3200000000 --validation_split_units 100000000 --num_units_per_file 100000000 \
-    --max_seq_length 511 --max_bytes_per_word 30 \
-    --output_path /scratch/data/pretrain
-welt-verify-data --data_path /scratch/data/pretrain
-torchrun --nproc_per_node=8 -m welt_training.train welt_training/experiments/pretrain/pile-pretrain-70m-no-image.yaml \
-    data.prepared_data_path=/scratch/data/pretrain
-```
-
-This writes `{dataset}-{config}-{split}-{index}.jsonl.gz` shards and a `{dataset}-{config}-{split}-metadata.json`
-per split. Units are words (or `--unit_type chars`); validation is filled first, then train.
-`welt-verify-data` checks shard and example counts against the metadata, and warns when train and validation of the
-same source were prepared separately (risking overlap). See `welt-prepare-data --help` for all options
-(`--text_column`, `--text_template`, `--id_column`, `--drop_remainder`, `--seed`, ...).
+`welt_training.baseline` trains a causal LM over a standard tokenizer on the same data, reporting comparable bits per
+byte; see [machine translation](welt_training/experiments/machine-translation).
 
 ## Training Speed
 
-On the same model and data, a training step takes 127 ms with Megatron-Bridge vs. 1227 ms with the previous
-HuggingFace Trainer implementation (9.7x faster, on a GB10). See [benchmarks](./benchmarks) for details,
-each optimization along the way, and the results of the example tasks.
-
-![Time per training step](benchmarks/step_time.png)
-
-The HuggingFace Trainer implementation is kept at the `huggingface-transformers` git tag.
+A training step is 9.7x faster than with the HuggingFace Trainer implementation, kept at the
+`huggingface-transformers` git tag; see [benchmarks](benchmarks).
 
 ## Contributing
 
 See [open issues](https://github.com/search?q=repo%3Asign%2FWeLT+%22%2Fissues%2F%22&type=code)
 and [TODOs](https://github.com/search?q=repo%3Asign%2FWeLT%20TODO&type=code) in the codebase.
 
-During the creation of this repository, we created several others to support it:
 - [`sign/words-segmentation`](https://github.com/sign/words-segmentation) as a universal word level pretokenizer.
 - [`sign/utf8-tokenizer`](https://github.com/sign/utf8-tokenizer) as a robust byte-level tokenizer.
 - [`sign/pixel-renderer`](https://github.com/sign/pixel-renderer) as a reproducible text-to-image renderer.

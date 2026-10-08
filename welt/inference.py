@@ -5,6 +5,9 @@ Each generation step runs, for all active prompts at once:
 1. the encoders (vLLM pooling) on new words -> word embeddings (cached per word)
 2. the latent transformer (vLLM pooling, prefix cached) on all word embeddings -> latent of the last word
 3. the bytes decoder (vLLM generation, valid UTF-8 only) from the latent -> bytes of the next word
+Shift blocks (\x0E...\x0F) attend bidirectionally in the latent transformer, via the vLLM plugin (welt/vllm_plugin.py).
+Decoding is greedy (temperature 0) or sampled; there is no beam search. A prompt ending mid-word continues that word.
+Generation stops at an empty word or after max_generated_words.
 
 vLLM engines run in spawned processes, so a script creating a WeLTGenerator needs an `if __name__ == "__main__":`
 guard.
