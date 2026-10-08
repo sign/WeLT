@@ -154,3 +154,23 @@ class TestBPBTokenizerIntegration:
         # Must equal the analytical formula
         expected = loss * num_tokens / (decoded_bytes * math.log(2))
         assert bpb == pytest.approx(expected)
+
+
+def test_welt_loss_func_metrics():
+    pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
+    import torch
+
+    from welt_training import train
+
+    pad, eos = train.TOKENIZER.pad_token_id, train.TOKENIZER.eos_token_id
+    # Words "ab", "c", then the end of the document (an empty word)
+    labels = torch.tensor([[97, 98, eos, pad], [99, eos, pad, pad], [eos, pad, pad, pad]])
+    losses = torch.tensor([[1.0, 2.0, 3.0, 9.0], [4.0, 5.0, 9.0, 9.0], [6.0, 9.0, 9.0, 9.0]])
+    correct = torch.tensor([[True, True, True, False], [True, False, False, False], [True, False, False, False]])
+    loss, num_tokens, report = train.loss_func(losses, correct, labels)
+    assert num_tokens == 6
+    assert loss == 21.0  # Padding excluded
+    # Word ends are predicted (like spaces in the baseline), the document end is not, per byte of text
+    assert report["bits per byte"].tolist() == pytest.approx([(1 + 2 + 3 + 4 + 5) / math.log(2), 3])
+    assert report["byte accuracy"].tolist() == [5, 6]
+    assert report["word accuracy"].tolist() == [2, 3]

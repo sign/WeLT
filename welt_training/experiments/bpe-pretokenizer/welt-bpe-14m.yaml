@@ -1,50 +1,20 @@
-# Model Setup
-image_encoder_model_name_or_path: null
-bytes_encoder_model_name_or_path: prajjwal1/bert-tiny
-latent_transformer_model_name_or_path: EleutherAI/pythia-14m
-bytes_decoder_model_name_or_path: sbintuitions/tiny-lm
-pretokenizer_name: EleutherAI/pythia-14m
-
-# Dataset setup
-dataset_name: Helsinki-NLP/opus-100
-dataset_config_name: en-he
-dataset_text_template: "<text>\x0E{translation[en]}\x0F<repeat> {translation[en]}"
-max_sequence_length: 128
-max_word_length: 16
-
-max_eval_samples: 32
-
-# Data Loader
-dataloader_num_workers: 8
-dataloader_prefetch_factor: 4
-dataloader_pin_memory: true
-dataloader_persistent_workers: true
-
-# Training setup
-remove_unused_columns: false # Necessary
-per_device_train_batch_size: 32
-per_device_eval_batch_size: 32
-auto_find_batch_size: true
 output_dir: ./output/welt-bpe-14m
-do_train: true
-max_steps: 1000
-learning_rate: 3.0e-4
-optim: adamw_torch_fused
 
-# Evaluation
-do_eval: false
-eval_on_start: true
-eval_strategy: steps
-eval_steps: 100
-metric_for_best_model: accuracy
+model:
+  bytes_encoder: sign/utf8-lm-tiny
+  latent_transformer: welt_training/experiments/models/latent-70m.json
+  bytes_decoder: sbintuitions/tiny-lm
+  pretokenizer: EleutherAI/pythia-14m
 
-# Logging
-logging_steps: 10
-logging_strategy: steps
-include_tokens_per_second: true
-include_num_input_tokens_seen: true
-report_to: none
+data:
+  dataset_name: Helsinki-NLP/opus-100
+  dataset_config_name: en-he
+  dataset_text_template: "<text>\x0E{translation[en]}\x0F<repeat> {translation[en]}"
+  seq_length: 128
+  max_word_length: 16
+  max_eval_samples: 32
+  num_workers: 8
 
-# Dtype
-bf16: true
-dtype: bfloat16
+validation:
+  eval_interval: 100
+  eval_iters: 1

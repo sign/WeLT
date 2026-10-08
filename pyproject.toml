@@ -16,6 +16,7 @@ dependencies = [
     "safetensors",
     "huggingface_hub",
     "datasets>=4", # Older releases break with current pyarrow
+    "pyyaml",
     "cachetools", # For LRU cache in processor
     # Our packages
     "words-segmentation>=0.0.5", # For pre-tokenization into words
