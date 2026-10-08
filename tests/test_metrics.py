@@ -39,6 +39,18 @@ def test_baseline_byte_lengths_and_chunks():
     assert [t for chunk in chunks for t in chunk] == flat[:len(chunks) * 4]
 
 
+@pytest.mark.parametrize("name", ["TinyLlama/TinyLlama-1.1B-Chat-v1.0", "Qwen/Qwen2.5-0.5B"])
+def test_baseline_byte_lengths_other_tokenizers(name):
+    """SentencePiece (with byte fallback) and Sequence-wrapped byte-level BPE vocabularies."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(name)
+    lengths = baseline.token_byte_lengths(tokenizer)
+    for text in ["Hello wörld", "שלום עולם 👋"]:
+        ids = torch.tensor(tokenizer(text, add_special_tokens=False).input_ids)
+        assert int(lengths[ids].sum()) - len(text.encode("utf-8")) in (0, 1)  # SentencePiece's dummy prefix space
+
+
 def test_baseline_loss_func_bits_per_byte():
     losses = torch.tensor([[2.0, 3.0, 1.0]])
     label_bytes = torch.tensor([[1, 4, 0]])  # The last label is EOS

@@ -10,7 +10,9 @@ The YAML is like WeLT's (see `experiments/machine-translation/baseline.yaml`), w
     load_pretrained: whether to initialize the transformer from its HF weights
 and `data.seq_length` counting tokens. Documents are concatenated (separated by EOS) and split into chunks.
 """
+import json
 import math
+import re
 from dataclasses import dataclass
 from functools import partial
 
@@ -26,10 +28,12 @@ from welt_training.train import build_config, main, report, to_cuda
 
 
 def token_byte_lengths(tokenizer) -> torch.Tensor:
-    """UTF-8 bytes of the text of each token id, 0 for special tokens."""
+    """UTF-8 bytes of the text of each token id, 0 for special tokens. Exact for byte-level BPE vocabularies
+    (GPT-2, Pythia, Llama 3, Qwen) and SentencePiece ones ("▁" for spaces, <0xNN> byte fallback; their dummy
+    prefix space counts as a byte)."""
     vocab = tokenizer.convert_ids_to_tokens(list(range(len(tokenizer))))
-    decoder = getattr(getattr(tokenizer, "backend_tokenizer", None), "decoder", None)
-    byte_level = decoder is not None and type(decoder).__name__ == "ByteLevel"
+    decoder = json.loads(tokenizer.backend_tokenizer.to_str())["decoder"] if tokenizer.is_fast else None
+    byte_level = '"ByteLevel"' in json.dumps(decoder)  # Also within a Sequence of decoders
     special = set(tokenizer.all_special_ids)
     lengths = []
     for token_id, token in enumerate(vocab):
@@ -37,8 +41,10 @@ def token_byte_lengths(tokenizer) -> torch.Tensor:
             lengths.append(0)
         elif byte_level:
             lengths.append(len(token))  # ByteLevel maps each byte to one character
+        elif re.fullmatch(r"<0x[0-9A-Fa-f]{2}>", token):
+            lengths.append(1)
         else:
-            lengths.append(len(tokenizer.convert_tokens_to_string([token]).encode("utf-8")))
+            lengths.append(len(token.replace("▁", " ").encode("utf-8")))
     return torch.tensor(lengths, dtype=torch.long)
 
 
@@ -98,7 +104,9 @@ def loss_func(losses: torch.Tensor, label_bytes: torch.Tensor):
 
 def forward_step(state, data_iterator, model, return_schedule_plan: bool = False):
     batch = to_cuda(next(data_iterator))
-    losses = model(input_ids=batch["input_ids"], position_ids=None, attention_mask=None, labels=batch["labels"])
+    input_ids = batch["input_ids"]
+    position_ids = torch.arange(input_ids.size(1), device=input_ids.device).expand_as(input_ids)
+    losses = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None, labels=batch["labels"])
     return losses, partial(loss_func, label_bytes=batch["label_bytes"])
 
 
