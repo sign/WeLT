@@ -15,7 +15,7 @@ dependencies = [
     "tokenizers",
     "safetensors",
     "huggingface_hub",
-    "datasets",
+    "datasets>=4", # Older releases break with current pyarrow
     "pyyaml",
     "cachetools", # For LRU cache in processor
     "sacrebleu", # For generation evaluation metrics
