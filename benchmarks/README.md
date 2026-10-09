@@ -100,9 +100,10 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 66 | 1.6 min | 0.014 | 99.3% | 93.8% | 98.7 | 856 |
 | **ocr**: write a sentence seen only as rendered word images | 3000 | 74 | 3.7 min | 0.014 | 99.1% | 88.3% | 97.1 | 1055 |
 | **letter-count**: count the letters of a word | 3000 | 64 | 3.2 min | 0.0001 | 100% | 100% | 100 | 1378 |
-| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 192 | 32 min | 0.542 | 67.5% | 8.6% | 46.2 | 571 |
+| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 189 | 31 min | 0.544 | 67.6% | 9.0% | 45.4 | 509 |
+| **machine-translation**, bytes encoder only | 10000 | 170 | 28 min | 0.537 | 68.0% | 9.0% | 46.5 | 616 |
 | **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 5940 (10 epochs) | 142 | 14 min | 0.953 | 67.8% | 0.0% | 5.1 | 471 |
-| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 5940 (10 epochs) | 404 | 40 min | 1.296 | 63.0% | 1.6% | 10.4 | 413 |
+| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 5940 (10 epochs) | 262 | 26 min | 1.282 | 62.7% | 1.6% | 9.6 | 384 |
 
 All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
 examples, with vLLM (batched over all examples). Reproduce a row with e.g.
@@ -118,6 +119,12 @@ but rarely the right one (see the examples below; vLLM matches the trained Megat
 The image encoder (over SignWriting rendered by pixel-renderer, from scratch) did not help: its bits per byte are
 worse than with bytes only. Signs are whole words since words-segmentation 0.0.6; an earlier bytes-only run, on
 signs split into fragments, reached chrF 19.5, a hint that symbol-level inputs may suit a small model better.
+
+Neither does it help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
+reaches 0.537 bits per byte and chrF 46.5 (vs. 0.544 and 45.4 with it), 10% faster per step. The image encoder
+packs each batch's patches (no padding to the largest image) and embeds patch rows and columns: before, padding
+signs (28 patches on average) to the batch's largest (~105) copied 425 MB per batch to the GPU and made a
+SignWriting step 404 ms; packed, 41 MB and 262 ms.
 
 Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
 transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine
@@ -166,11 +173,21 @@ The first 5 validation examples of each task (`␎` and `␏` stand for the shif
 
 | Input | Expected | Generated |
 |---|---|---|
-| `<en>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<he> ` | `האם לא יהיה זה אכזרי יותר מצד החברה, לתת לאנשים למות... כאשר עם מאמץ מה ניתן להצילם?` | `לא יהיה אכזרי יותר לחברה לתת לאנשים למות... כשמאית שתוכל להציל אותם?` |
+| `<en>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<he> ` | `האם לא יהיה זה אכזרי יותר מצד החברה, לתת לאנשים למות... כאשר עם מאמץ מה ניתן להצילם?` | `האם זה לא יהיה יותר אכזרי לחברה לתת לאנשים למות... כשמטופל מספר זה יכול להציל אותם?` |
 | `<en>␎YOu dOn't know the half Of it.␏<he> ` | `אתה לא יודע חצי מזה.` | `אתה לא יודע חצי מזה.` |
-| `<en>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<he> ` | `ההפך הגמור של סופרמן מי שחי בעולם Bizarro אחורה.` | `הפוסימין הוא המופע היחיד שחי בעולם הביזרק האחורי.` |
-| `<en>␎- The apology, so- - We're keeping the robot.␏<he> ` | `-ההתנצלות, אז... אנחנו שומרים את הרובוט.` | `ההתנצלות, אז... אנחנו שומרים את הרובוט.` |
-| `<en>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<he> ` | `כמובן שתמיד היו החברים של אמא שלי, אבל כשלמדתי את שמותיהם, אמא הייתה מעיפה אותם, והייתה מברשת שיניים חדשה באמבטיה.` | `כמובן, היו תמיד החברים של אמא, אבל ברגע שאני אלמד את השמות שלהם, אמא תבעט בהם, ויהיו שיניים חדשות בשירותים.` |
+| `<en>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<he> ` | `ההפך הגמור של סופרמן מי שחי בעולם Bizarro אחורה.` | `ההפך המדויק של סופרמן שגר בעולם האחורי בייזרוו.` |
+| `<en>␎- The apology, so- - We're keeping the robot.␏<he> ` | `-ההתנצלות, אז... אנחנו שומרים את הרובוט.` | `אנחנו שומרים על הרובוט.` |
+| `<en>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<he> ` | `כמובן שתמיד היו החברים של אמא שלי, אבל כשלמדתי את שמותיהם, אמא הייתה מעיפה אותם, והייתה מברשת שיניים חדשה באמבטיה.` | `כמובן, היו תמיד חברים של אמא, אבל ברגע שאלמד את שמם, אמא הייתה מבעטת אותם החוצה, והייתה מברשת שיניים חדשה בשירותים.` |
+
+**machine-translation, bytes**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<en>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<he> ` | `האם לא יהיה זה אכזרי יותר מצד החברה, לתת לאנשים למות... כאשר עם מאמץ מה ניתן להצילם?` | `זה לא יהיה יותר אכזרי לחברה לתת לאנשים למות... מתי שיש מאמץ זה יכול להציל אותם?` |
+| `<en>␎YOu dOn't know the half Of it.␏<he> ` | `אתה לא יודע חצי מזה.` | `אתה לא יודע מה החלק המוזר.` |
+| `<en>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<he> ` | `ההפך הגמור של סופרמן מי שחי בעולם Bizarro אחורה.` | `הסופר המדויק ביותר שחי בעולם ביאזרו.` |
+| `<en>␎- The apology, so- - We're keeping the robot.␏<he> ` | `-ההתנצלות, אז... אנחנו שומרים את הרובוט.` | `-אנחנו שומרים את הרובוט.` |
+| `<en>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<he> ` | `כמובן שתמיד היו החברים של אמא שלי, אבל כשלמדתי את שמותיהם, אמא הייתה מעיפה אותם, והייתה מברשת שיניים חדשה באמבטיה.` | `כמובן שהיו חברים של אמא, אבל ברגע שאלמד את שמותיהם, אמא הייתה מכסחת שיניים והיא הייתה מחסום שיניים חדשים בחדר האמבטיה.` |
 
 **signed-to-spoken, bytes**
 
@@ -186,8 +203,8 @@ The first 5 validation examples of each task (`␎` and `␏` stand for the shif
 
 | Input | Expected | Generated |
 |---|---|---|
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `cara` |
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `cara` |
-| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Carlos Carla de Almeida` |
-| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `contradicción` |
-| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `CM14_MD_Dorso_VF` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `carretera` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `carretera` |
+| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `conseguir` |
+| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `contra` |
+| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `C` |
