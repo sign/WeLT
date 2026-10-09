@@ -52,8 +52,8 @@ The run directory (`output_dir`) holds the config (`welt.yaml`), the `processor/
 
 `model` keys other than the four transformers, `load_pretrained`, `pretokenizer` and `trust_remote_code` are set on
 the `WeLTModelProvider` ([`welt/model.py`](../welt/model.py)), the latent transformer's Megatron config, e.g.
-`modality_dropout` (default 0.15: with both encoders, each one's embeddings are dropped with this probability per
-step, rescaling the other), `tensor_model_parallel_size`, `sequence_parallel`, or `recompute_granularity`.
+`modality_dropout` (default 0.15: with both encoders, each word's embedding from each encoder is dropped with this
+probability, replaced by the encoder's learned missing embedding), `tensor_model_parallel_size`, `sequence_parallel`, or `recompute_granularity`.
 Parallelism, precision and recomputation settings are shared with the other transformers
 (`SHARED_CONFIG_FIELDS`); other fields, e.g. `hidden_dropout`, only apply to the latent transformer.
 
