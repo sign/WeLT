@@ -101,6 +101,7 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **ocr**: write a sentence seen only as rendered word images | 3000 | 74 | 3.7 min | 0.014 | 99.1% | 88.3% | 97.1 | 1055 |
 | **letter-count**: count the letters of a word | 3000 | 64 | 3.2 min | 0.0001 | 100% | 100% | 100 | 1378 |
 | **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 192 | 32 min | 0.542 | 67.5% | 8.6% | 46.2 | 571 |
+| **signed-to-spoken**: SignWriting to text in many languages ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 10000 | 136 | 23 min | 1.079 | 68.9% | 6.3% | 19.5 | 308 |
 
 All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
 examples, with vLLM (batched over all examples). Reproduce a row with e.g.
