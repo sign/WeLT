@@ -3,6 +3,7 @@ import glob
 import logging
 import os
 from dataclasses import dataclass
+from importlib.metadata import version
 from itertools import islice
 
 from datasets import Dataset, load_dataset
@@ -148,7 +149,10 @@ def pack_words(batch: dict[str, list], seq_length: int) -> dict[str, list]:
 
 
 def pack_dataset(processor: TextImageProcessor, dataset: Dataset, seq_length: int, num_proc: int | None = None):
-    dataset = dataset.map(lambda example: {"words": processor.pretokenize(example["text"])},
+    # The cache fingerprint hashes the processor's state, not its code: the words-segmentation version keeps the cache
+    # from serving words split by an older version
+    dataset = dataset.map(lambda example, segmentation_version: {"words": processor.pretokenize(example["text"])},
+                          fn_kwargs={"segmentation_version": version("words-segmentation")},
                           remove_columns=dataset.column_names, num_proc=num_proc, desc="Pretokenizing texts into words")
     # ponytail: greedy in-order packing; best-fit-decreasing would waste fewer PAD words
     return dataset.map(pack_words, batched=True, batch_size=1000, remove_columns=dataset.column_names,
