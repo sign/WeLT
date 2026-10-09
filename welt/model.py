@@ -399,10 +399,10 @@ class WeLTModel(MegatronModule):
         encoders = [e for e in (self.image_encoder, self.bytes_encoder) if e is not None]
         encoder_dim = sum(e.hidden_size for e in encoders)
         self.encoder_mapping = nn.Linear(encoder_dim, config.hidden_size)
-        # Each modality's learned stand-in for its dropped embeddings (only with modalities to drop: unused parameters
-        # would break DDP)
+        # Each modality's learned stand-in for its dropped embeddings, only when dropping (unused parameters break DDP)
+        dropping = len(encoders) > 1 and config.modality_dropout > 0
         self.missing_embeddings = nn.ParameterList(nn.Parameter(torch.randn(e.hidden_size) * 0.02) for e in encoders
-                                                   if len(encoders) > 1)
+                                                   if dropping)
         self.encoder_norm = nn.RMSNorm(config.hidden_size, eps=1e-6)
         self.decoder_mapping = nn.Linear(config.hidden_size, decoder_config.hidden_size)
         self.decoder_norm = nn.RMSNorm(decoder_config.hidden_size, eps=1e-6)
@@ -412,7 +412,7 @@ class WeLTModel(MegatronModule):
 
     def _modality_drop(self, num_modalities: int, num_words: int, device) -> torch.Tensor | None:
         """(modalities, words, 1) mask of the modalities dropped for each word during training, or None."""
-        if not (self.training and num_modalities > 1 and self.config.modality_dropout > 0):
+        if not (self.training and self.missing_embeddings):
             return None
         drop = torch.rand(num_modalities, num_words, 1, device=device) < self.config.modality_dropout
         # Words that dropped all modalities keep one at random
