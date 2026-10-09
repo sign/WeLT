@@ -63,7 +63,7 @@ occurrence, "hardware" FLOPs encode each distinct word once.
 | Config | ms / step | Model TFLOPs / step | Model TFLOP/s | Hardware TFLOP/s |
 |--------|----------:|-------------------:|--------------:|-----------------:|
 | Bench | 127 | 2.76 | 21.8 | 14.8 |
-| Machine translation (task run) | 172 | 3.06 | 17.8 | 14.5 |
+| Machine translation (Muon, task run) | 192 | 3.04 | 15.8 | 12.9 |
 
 The remaining time is dominated by memory-bound kernels (SwiGLU, RoPE, norms) of the narrow (128-512 wide)
 transformers, which GB10's bandwidth limits.
@@ -75,11 +75,11 @@ transformers, which GB10's bandwidth limits.
 
 | Parallelism | ms / step | Val. loss after 200 steps |
 |-------------|----------:|--------------------------:|
-| 1 GPU (2 micro batches) | 189 | 0.933 |
-| Data parallel (DP=2) | 101 | 0.933 |
-| Tensor + sequence parallel (TP=2) | 254 | 0.938 |
+| 1 GPU (2 micro batches) | 225 | 0.935 |
+| Data parallel (DP=2) | 122 | 0.929 |
+| Tensor + sequence parallel (TP=2) | 312 | 0.938 |
 
-Data parallelism scales 1.9x. Tensor parallelism is slower for these narrow transformers: use it only
+Data parallelism scales 1.8x (median step times; Modal hosts vary). Tensor parallelism is slower for these narrow transformers: use it only
 for models that do not fit on one GPU. Its checkpoints export (resharded) to the same vLLM format.
 
 With micro batch 64, a step takes 103 ms on one H100 vs. 167 ms on the GB10: only 1.6x faster. A profile shows the
@@ -97,17 +97,97 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 
 | Task | Steps | ms / step | Train time | Val. bits / byte | Val. word acc. | Gen. exact match | Gen. chrF | Gen. words / s |
 |------|------:|----------:|-----------:|-----------------:|---------------:|-----------------:|----------:|---------------:|
-| **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 50 | 1.3 min | 0.017 | 99.2% | 93.4% | 98.5 | 776 |
-| **ocr**: write a sentence seen only as rendered word images | 3000 | 62 | 3.1 min | 0.038 | 97.7% | 80.5% | 95.4 | 867 |
-| **letter-count**: count the letters of a word (Muon) | 3000 | 67 | 3.4 min | 0.0001 | 100% | 99.2% | 99.7 | 1336 |
-| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 172 | 29 min | 0.626 | 64.8% | 5.9% | 41.0 | 441 |
+| **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 66 | 1.6 min | 0.014 | 99.3% | 93.8% | 98.7 | 856 |
+| **ocr**: write a sentence seen only as rendered word images | 3000 | 74 | 3.7 min | 0.014 | 99.1% | 88.3% | 97.1 | 1055 |
+| **letter-count**: count the letters of a word | 3000 | 64 | 3.2 min | 0.0001 | 100% | 100% | 100 | 1378 |
+| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 192 | 32 min | 0.542 | 67.5% | 8.6% | 46.2 | 571 |
+| **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 5940 (10 epochs) | 142 | 14 min | 0.953 | 67.8% | 0.0% | 5.1 | 471 |
+| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 5940 (10 epochs) | 404 | 40 min | 1.296 | 63.0% | 1.6% | 10.4 | 413 |
 
-Generation is greedy, on 256 validation examples, with vLLM (batched over all examples). Reproduce a row with e.g.
+All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
+examples, with vLLM (batched over all examples). Reproduce a row with e.g.
 `WANDB_MODE=disabled benchmarks/run_task.sh welt_training/experiments/easy-tasks/string-repetition.yaml
 output/string-repetition train.train_iters=1500`.
 
-These tasks (and the multiple GPU runs above) were measured before the review fixes of the migration's stacked PRs;
-a re-run with the final code, and Muon for every task, follows.
+Compared to the same tasks trained with Adam (before the review fixes), Muon improves every task: e.g. ocr from
+80.5% to 88.3% exact match, machine translation from 0.626 to 0.542 bits per byte (chrF 41.0 to 46.2), at 10-30%
+more time per step (its orthogonalization).
+
+SignWriting to text is far from solved at this scale: both models generate fluent words of the target language,
+but rarely the right one (see the examples below; vLLM matches the trained Megatron models on these prompts).
+The image encoder (over SignWriting rendered by pixel-renderer, from scratch) did not help: its bits per byte are
+worse than with bytes only. Signs are whole words since words-segmentation 0.0.6; an earlier bytes-only run, on
+signs split into fragments, reached chrF 19.5, a hint that symbol-level inputs may suit a small model better.
+
 Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
 transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine
 translation trains a 70m latent transformer with both encoders.
+
+The causal LM [baseline](../welt_training/experiments/machine-translation/baseline.yaml) (the same 6-layer 512-wide
+transformer over Pythia BPE tokens, the same data, batch size, steps and Muon) scores the same bytes as WeLT (not the
+source sentences in shift blocks): **0.599** validation bits per byte at 633 ms / step, vs. **0.542** for WeLT at
+192 ms / step.
+
+### Examples
+
+The first 5 validation examples of each task (`␎` and `␏` stand for the shift block controls `\x0E` and `\x0F`).
+
+**string-repetition**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<text>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<repeat> ` | `Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?` | `Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?` |
+| `<text>␎YOu dOn't know the half Of it.␏<repeat> ` | `YOu dOn't know the half Of it.` | `You don't know the half Of it.` |
+| `<text>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<repeat> ` | `Superman's exact opposite who lives in the backwards Bizarro World.` | `Superman's exact opposite who lives in the backwards Bizarro World.` |
+| `<text>␎- The apology, so- - We're keeping the robot.␏<repeat> ` | `- The apology, so- - We're keeping the robot.` | `- The apology, so- - We're keeping the robot.` |
+| `<text>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<repeat> ` | `Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.` | `Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.` |
+
+**ocr (the model sees only the rendered words)**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<text>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<repeat> ` | `Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?` | `Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?` |
+| `<text>␎YOu dOn't know the half Of it.␏<repeat> ` | `YOu dOn't know the half Of it.` | `YOu daNt! know the half Of it.` |
+| `<text>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<repeat> ` | `Superman's exact opposite who lives in the backwards Bizarro World.` | `Superman's exact opposite who lives in the backwards Bizarro World.` |
+| `<text>␎- The apology, so- - We're keeping the robot.␏<repeat> ` | `- The apology, so- - We're keeping the robot.` | `- The apology, so- - We're keeping the robot.` |
+| `<text>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<repeat> ` | `Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.` | `Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.` |
+
+**letter-count**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<text>␎Morel␏<count> ` | `M1 O1 R1 E1 L1` | `M1 O1 R1 E1 L1` |
+| `<text>␎neurosis␏<count> ` | `N1 E1 U1 R1 O1 S2 I1` | `N1 E1 U1 R1 O1 S2 I1` |
+| `<text>␎mydaleine␏<count> ` | `M1 Y1 D1 A1 L1 E2 I1 N1` | `M1 Y1 D1 A1 L1 E2 I1 N1` |
+| `<text>␎forgetter␏<count> ` | `F1 O1 R2 G1 E2 T2` | `F1 O1 R2 G1 E2 T2` |
+| `<text>␎fiddley␏<count> ` | `F1 I1 D2 L1 E1 Y1` | `F1 I1 D2 L1 E1 Y1` |
+
+**machine-translation**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<en>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<he> ` | `האם לא יהיה זה אכזרי יותר מצד החברה, לתת לאנשים למות... כאשר עם מאמץ מה ניתן להצילם?` | `לא יהיה אכזרי יותר לחברה לתת לאנשים למות... כשמאית שתוכל להציל אותם?` |
+| `<en>␎YOu dOn't know the half Of it.␏<he> ` | `אתה לא יודע חצי מזה.` | `אתה לא יודע חצי מזה.` |
+| `<en>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<he> ` | `ההפך הגמור של סופרמן מי שחי בעולם Bizarro אחורה.` | `הפוסימין הוא המופע היחיד שחי בעולם הביזרק האחורי.` |
+| `<en>␎- The apology, so- - We're keeping the robot.␏<he> ` | `-ההתנצלות, אז... אנחנו שומרים את הרובוט.` | `ההתנצלות, אז... אנחנו שומרים את הרובוט.` |
+| `<en>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<he> ` | `כמובן שתמיד היו החברים של אמא שלי, אבל כשלמדתי את שמותיהם, אמא הייתה מעיפה אותם, והייתה מברשת שיניים חדשה באמבטיה.` | `כמובן, היו תמיד החברים של אמא, אבל ברגע שאני אלמד את השמות שלהם, אמא תבעט בהם, ויהיו שיניים חדשות בשירותים.` |
+
+**signed-to-spoken, bytes**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `llegar de la cabeza` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `llegar de la cabeza` |
+| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Para frente para baixo - pare` |
+| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `cl` |
+| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `Para baixo do circular` |
+
+**signed-to-spoken, bytes + image**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `cara` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `cara` |
+| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Carlos Carla de Almeida` |
+| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `contradicción` |
+| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `CM14_MD_Dorso_VF` |
