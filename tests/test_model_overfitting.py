@@ -56,10 +56,11 @@ def trained(request, megatron, tiny_config):
 
 @pytest.fixture(params=["full_model", "no_bytes_encoder", "no_image_encoder"])
 def configured(request, trained, monkeypatch):
-    """Drops a modality like modality dropout does: its embedding is zeroed and the other one is rescaled."""
+    """Drops a modality like modality dropout does: its embeddings are replaced by its learned missing embedding."""
     model, processor = trained
-    keep = {"full_model": [1.0, 1.0], "no_bytes_encoder": [2.0, 0.0], "no_image_encoder": [0.0, 2.0]}[request.param]
-    monkeypatch.setattr(model, "_modality_scale", lambda num, device: torch.tensor(keep, device=device))
+    drop = {"full_model": None, "no_bytes_encoder": [False, True], "no_image_encoder": [True, False]}[request.param]
+    monkeypatch.setattr(model, "_modality_drop", lambda num, words, device: None if drop is None else
+                        torch.tensor(drop, device=device)[:, None, None].expand(num, words, 1))
     return model, processor, request.param
 
 
