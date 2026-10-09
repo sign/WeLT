@@ -1,6 +1,7 @@
 output_dir: ./output/signed-to-spoken
 
 model:
+  image_encoder: welt_training/experiments/models/image-encoder-tiny.json  # Signs rendered as SignWriting
   bytes_encoder: sign/utf8-lm-tiny
   latent_transformer: welt_training/experiments/models/latent-70m.json
   bytes_decoder: sbintuitions/tiny-lm
@@ -14,10 +15,10 @@ data:
   seq_length: 64
   max_word_length: 128  # SignWriting has lots of bytes per sign
   max_eval_samples: 256
-  num_workers: 8
+  num_workers: 4  # Rendering SignWriting in more workers takes more memory than a GB10 has to spare
 
 train:
-  train_iters: 10000
+  train_iters: 5940  # 10 epochs of the 57006 packed examples
   micro_batch_size: 96
   global_batch_size: 96
 
