@@ -33,6 +33,8 @@ from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 from transformers import AutoConfig
 
+from welt.processor import MAX_PATCH_POSITION, patch_positions
+
 PATCH_DIM = 16 * 16 * 3
 
 register_allowed_target_prefix("welt")  # Checkpoints' run_config.yaml instantiate WeLTModelProvider
@@ -294,13 +296,12 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
     return model, embeddings
 
 
-def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Runs the valid positions of (N, S, H) right-padded sequences, packed without padding (THD format).
+def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, lengths: torch.Tensor, max_length: int
+                           ) -> torch.Tensor:
+    """Runs (T, H) packed sequences (THD format) of the given lengths (at most max_length).
     Returns this tensor parallel rank's part of the packed outputs (sequence parallel), (T / tp, 1, H), including
-    the final layer norm. T counts the valid positions, and a dummy sequence padding them to a multiple of tp."""
-    lengths = mask.sum(dim=-1, dtype=torch.int32)
-    hidden = hidden[mask]
-    max_length = mask.size(1)
+    the final layer norm. T counts the packed positions, and a dummy sequence padding them to a multiple of tp."""
+    lengths = lengths.int()
     padding = -len(hidden) % model.config.tensor_model_parallel_size
     if padding:
         hidden = F.pad(hidden, (0, 0, 0, padding))
@@ -322,12 +323,15 @@ class WordEncoder(MegatronModule):  # Its sharded_state_dict recurses into the (
         self.embed = embed(embeddings)  # Initialized from the (possibly pretrained) input embeddings
         self.hidden_size = provider.hidden_size
 
-    def forward(self, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """inputs: (N, T, ...), mask: (N, T) True = valid, right padded -> (N, H)"""
-        hidden = run_packed_transformer(self.transformer, self.embed(inputs), mask)
+    def encode(self, hidden: torch.Tensor, lengths: torch.Tensor, max_length: int) -> torch.Tensor:
+        """(T, H) packed sequences of the given lengths -> (N, H) outputs of their first positions"""
+        hidden = run_packed_transformer(self.transformer, hidden, lengths, max_length)
         hidden = gather_from_sequence_parallel_region(hidden, tensor_parallel_output_grad=False)
-        first_positions = F.pad(mask.sum(dim=-1).cumsum(0), (1, 0))[:-1]
-        return hidden[first_positions, 0]
+        return hidden[F.pad(lengths.cumsum(0), (1, 0))[:-1], 0]
+
+    def forward(self, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        """inputs: (N, T) bytes, mask: (N, T) True = valid, right padded -> (N, H)"""
+        return self.encode(self.embed(inputs)[mask], mask.sum(dim=-1), mask.size(1))
 
 
 class PatchImageEncoder(WordEncoder):
@@ -337,24 +341,35 @@ class PatchImageEncoder(WordEncoder):
         super().__init__(provider, hf_path, lambda embeddings: PatchEmbedding(embeddings.size(1)))
 
     def forward(self, patches: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
-        """(N, P, 768) uint8 patches, (N, 2) patch rows and columns of each image -> (N, H)"""
-        counts = shapes.prod(dim=-1)
-        mask = torch.arange(patches.size(1) + 1, device=counts.device)[None, :] <= counts[:, None]  # With CLS
-        return super().forward(patches, mask)
+        """(total patches, 768) uint8 patches of N images, packed; (N, 2) patch rows and columns of each -> (N, H)"""
+        lengths = shapes.prod(dim=-1) + 1  # With CLS
+        return self.encode(self.embed(patches, shapes), lengths, int(lengths.max()))
 
 
 class PatchEmbedding(nn.Module):
-    """uint8 16x16 RGB patches -> CLS + linear patch embeddings."""
+    """uint8 16x16 RGB patches -> CLS + linear patch embeddings, plus the embeddings of their row and column in the
+    image (images of words in several rows, e.g. SignWriting, are 2D; the transformer only sees a 1D sequence)."""
 
     def __init__(self, dim: int):
         super().__init__()
         self.proj = nn.Linear(PATCH_DIM, dim)
         self.cls = nn.Parameter(torch.randn(dim) * 0.02)
+        self.rows = nn.Parameter(torch.randn(MAX_PATCH_POSITION, dim) * 0.02)
+        self.columns = nn.Parameter(torch.randn(MAX_PATCH_POSITION, dim) * 0.02)
         nn.init.xavier_uniform_(self.proj.weight)  # Like PIXEL / ViT-MAE patch embeddings
 
-    def forward(self, patches: torch.Tensor) -> torch.Tensor:
-        embeds = self.proj(patches.to(self.proj.weight.dtype) / 127.5 - 1)
-        return torch.cat([self.cls.expand(len(embeds), 1, -1), embeds], dim=1)
+    def forward(self, patches: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
+        """(total patches, 768) packed patches, (N, 2) rows and columns of patches of each image -> (total + N, H),
+        each image's CLS followed by its patch embeddings"""
+        rows, columns = patch_positions(shapes)
+        embeds = self.proj(patches.to(self.proj.weight.dtype) / 127.5 - 1) + self.rows[rows] + self.columns[columns]
+        lengths = shapes.prod(dim=-1) + 1
+        is_cls = torch.zeros(len(embeds) + len(lengths), dtype=torch.bool, device=embeds.device)
+        is_cls[F.pad(lengths.cumsum(0), (1, 0))[:-1]] = True
+        hidden = embeds.new_empty(len(is_cls), embeds.size(-1))
+        hidden[is_cls] = self.cls.to(embeds.dtype)
+        hidden[~is_cls] = embeds
+        return hidden
 
 
 class WeLTModel(MegatronModule):
@@ -408,7 +423,8 @@ class WeLTModel(MegatronModule):
                      input_attention_mask: torch.Tensor,
                      input_patches: torch.Tensor | None = None,
                      input_patches_shape: torch.Tensor | None = None) -> torch.Tensor:
-        """Word embeddings in the latent space: (B, L, T) bytes [+ (B, L, P, 768) patches] -> (B, L, H)"""
+        """Word embeddings in the latent space: (B, L, T) bytes [+ (B, P, 768) patches, packed per example, and their
+        (B, L, 2) rows and columns per word] -> (B, L, H)"""
         B, L, T = input_ids.shape  # noqa: N806
         input_ids = input_ids.view(B * L, T)
         words_mask = input_attention_mask.view(B * L, T).bool()
@@ -422,8 +438,17 @@ class WeLTModel(MegatronModule):
 
         embeds = []
         if self.image_encoder is not None:
-            patches = input_patches.view(B * L, *input_patches.shape[2:])[rows]
-            embeds.append(self.image_encoder(patches, input_patches_shape.view(B * L, 2)[rows]))
+            # Each example's words' patches are packed in turn: gather the patches of the distinct words
+            shapes = input_patches_shape.view(B * L, 2)
+            counts = shapes.prod(dim=-1)
+            starts = F.pad(counts.view(B, L).cumsum(dim=1), (1, 0))[:, :-1]
+            starts = (starts + torch.arange(B, device=starts.device)[:, None] * input_patches.size(1)).view(B * L)
+            counts, starts = counts[rows], starts[rows]
+            offsets = F.pad(counts.cumsum(0), (1, 0))[:-1]
+            index = (torch.arange(int(counts.sum()), device=counts.device)
+                     + torch.repeat_interleave(starts - offsets, counts))
+            patches = input_patches.view(-1, input_patches.size(-1))[index]
+            embeds.append(self.image_encoder(patches, shapes[rows]))
         if self.bytes_encoder is not None:
             embeds.append(self.bytes_encoder(input_ids[rows], words_mask[rows]))
 
@@ -449,7 +474,8 @@ class WeLTModel(MegatronModule):
         embeds = torch.cat([latents[:, None], self.bytes_decoder_embedding(labels_input)], dim=1)
         mask = F.pad(labels_mask.bool(), (1, 0), value=True)
         # The output layer gathers the sequence, its outputs are split across tensor parallel ranks by vocabulary
-        logits, _ = self.bytes_decoder.output_layer(run_packed_transformer(self.bytes_decoder, embeds, mask))
+        hidden = run_packed_transformer(self.bytes_decoder, embeds[mask], mask.sum(dim=-1), mask.size(1))
+        logits, _ = self.bytes_decoder.output_layer(hidden)
         return logits[:int(mask.sum()), 0], mask  # Without the sequence parallel padding
 
     def forward(self,
@@ -469,7 +495,7 @@ class WeLTModel(MegatronModule):
             labels_input: (B, L, T') bytes decoder inputs (next word, without EOS)
             labels_attention_mask: (B, L, T')
             labels_output: (B, L, T') bytes decoder targets (next word, without BOS)
-            input_patches: (B, L, P, 768) uint8 patches of the rendered words
+            input_patches: (B, P, 768) uint8 patches of the rendered words, each word's in turn (without padding)
             input_patches_shape: (B, L, 2) rows and columns of patches of each word
 
         Returns:
