@@ -1,0 +1,17 @@
+# Subword causal LM baseline for wikitext-welt.yaml: the same text, transformer and training
+$extends: ../machine-translation/baseline.yaml
+
+output_dir: ./output/lm-wikitext-baseline
+
+data:
+  dataset_name: Salesforce/wikitext
+  dataset_config_name: wikitext-103-raw-v1
+  dataset_text_template: null  # The text column
+  seq_length: 288  # Tokens: as much text as wikitext-welt.yaml's 256 words (1.14 Pythia tokens per word)
+
+train:
+  micro_batch_size: 32
+  global_batch_size: 32
+
+logger:
+  wandb_project: welt-language-modeling
