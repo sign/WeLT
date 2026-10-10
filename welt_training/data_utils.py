@@ -99,12 +99,14 @@ def build_iterators(config, make_examples: Callable[[Iterable[str]], Iterator[di
     """Megatron's (external) train and validation iterators of micro batches, for a DatasetProvider with dataloader
     options (num_workers, pin_memory, persistent_workers). Validation: the examples of the validation texts, split
     across ranks, repeated to fill config.eval_micro_batches, the same ones at every evaluation."""
-    train = torch.utils.data.DataLoader(
+    # The workers fork here, before this process makes (e.g. renders) any example: a fork while another thread holds
+    # a lock (e.g. Pango's) deadlocks the children
+    train = iter(torch.utils.data.DataLoader(
         TrainExamples(config, make_examples, rank, world_size), batch_size=config.micro_batch_size,
         collate_fn=collate_fn, num_workers=config.num_workers, pin_memory=config.pin_memory,
-        persistent_workers=config.persistent_workers and config.num_workers > 0)
+        persistent_workers=config.persistent_workers and config.num_workers > 0))
     if config.eval_micro_batches == 0:  # No evaluation
-        return iter(train), None
+        return train, None
 
     texts = [example["text"] for example in config.texts("validation")]
     examples = list(make_examples(texts))[rank::world_size]
@@ -116,7 +118,7 @@ def build_iterators(config, make_examples: Callable[[Iterable[str]], Iterator[di
         logger.warning(f"Evaluations see {config.eval_micro_batches} of {len(batches)} validation micro batches, "
                        "increase validation.eval_iters to see them all")
     validation = [batches[i % len(batches)] for i in range(config.eval_micro_batches)]
-    return iter(train), cycle(validation)
+    return train, cycle(validation)
 
 
 def pack_words(sequences: Iterable[list[str]], seq_length: int) -> Iterator[tuple[list[str], list[int]]]:
