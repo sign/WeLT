@@ -39,7 +39,7 @@ def test_baseline_scores_the_bytes_welt_scores():
     """Every token is a label once (chunks overlap by one token); shift blocks are not scored, as in WeLT."""
     from transformers import AutoTokenizer
 
-    from welt.processor import TextImageProcessor
+    from welt.processor import TextImageProcessor, next_word_labels
 
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
     texts = ["<en>\x0eHello world\x0f<he> שלום עולם", "no shift block here", "<a>\x0eb\x0f c"]
@@ -53,7 +53,9 @@ def test_baseline_scores_the_bytes_welt_scores():
     welt_bytes = 0
     for text in texts:
         words = processor.pretokenize(text)
-        labels = processor.process_single_example(words, [len(words)])["labels_output"]
+        example = processor.process_single_example(words, [len(words)])
+        labels = next_word_labels(*(example[k][None] for k in ("input_ids", "sequence_ids", "label_mask")),
+                                  bos=2, eos=3, pad=0)[:, :, 1:]  # Without BOS
         welt_bytes += int(((labels != train.TOKENIZER.pad_token_id) & (labels != train.TOKENIZER.eos_token_id)).sum())
     assert baseline_bytes == welt_bytes == sum(len(baseline.SHIFT_BLOCK.sub("\x0e", t).encode()) for t in texts)
 

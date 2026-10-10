@@ -11,7 +11,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
-from welt.attention import get_attention_mask_for_packed_sequence, get_shift_blocks
+from welt.attention import get_shift_blocks
 
 PROCESSOR_CONFIG_NAME = "processor_config.json"
 PATCH_SIZE = 16  # pixel_renderer renders lines of 16px height, widths rounded to 16px
@@ -33,6 +33,19 @@ def patch_positions(shapes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     """Stack examples' tensors, right-padding every dimension to the largest size with zeros."""
     return {key: torch.nested.nested_tensor([item[key] for item in batch]).to_padded_tensor(0) for key in batch[0]}
+
+
+def next_word_labels(input_ids: torch.Tensor, sequence_ids: torch.Tensor, label_mask: torch.Tensor,
+                     bos: int, eos: int, pad: int) -> torch.Tensor:
+    """(B, L, T) bytes of each word -> the bytes each word predicts: the next word of its sequence, an empty word
+    (BOS, EOS) after the last word of a sequence, and nothing (PAD) for words without a label (label_mask)."""
+    labels = input_ids.roll(-1, dims=1)
+    last = sequence_ids != sequence_ids.roll(-1, dims=1)
+    last[:, -1] = True
+    empty = torch.full_like(input_ids[0, 0], pad)
+    empty[:2] = torch.tensor([bos, eos])
+    labels = torch.where(last[..., None], empty, labels)
+    return labels.masked_fill(~label_mask[..., None], pad)
 
 
 def patchify(image, patch_size: int = PATCH_SIZE) -> torch.Tensor:
@@ -107,16 +120,6 @@ class TextImageProcessor:
         starts = sorted({0, *(start for start, _ in offsets)})
         return [text[start:end] for start, end in zip(starts, [*starts[1:], len(text)], strict=True) if end > start]
 
-    @staticmethod
-    def get_sequence_labels(words: list[str], seq_lengths: list[int]) -> list[str]:
-        """The next word of each word, per packed sequence. The last word of each sequence has an empty label."""
-        labels = []
-        offset = 0
-        for length in seq_lengths:
-            labels += words[offset + 1:offset + length] + [""]
-            offset += length
-        return labels
-
     def tokenize_words(self, words: list[str]):
         return self.tokenizer.torch(
             words,
@@ -128,34 +131,17 @@ class TextImageProcessor:
         )
 
     def process_single_example(self, words: list[str], seq_lengths: list[int]):
-        labels = self.get_sequence_labels(words, seq_lengths)
-
-        # Tokenize words with BOS and EOS tokens
-        tokenized = self.tokenize_words(words)  # Tokenized inputs
-        tokenized_labels = self.tokenize_words(labels)  # Tokenized outputs
-
-        # Packed fixed-size chunks use PAD words as isolated sequences. Their
-        # empty labels would otherwise contribute synthetic EOS targets.
-        for index, word in enumerate(words):
-            if word == self.tokenizer.pad_token:
-                tokenized_labels.input_ids[index] = self.tokenizer.pad_token_id
-                tokenized_labels.attention_mask[index] = 0
-
-        # Mask labels inside shift blocks (except for ShiftIn token)
-        # Tokens inside shift blocks are visible via self-attention, so they are "known".
-        for start, end in get_shift_blocks(words):
-            tokenized_labels.input_ids[start:end] = self.tokenizer.pad_token_id
-            tokenized_labels.attention_mask[start:end] = 0
-
-        example = {
-            "input_ids": tokenized.input_ids,
-            "input_attention_mask": tokenized.attention_mask,  # Attention within each word
-            # Attention across words
-            "attention_mask": get_attention_mask_for_packed_sequence(seq_lengths, words=words),
-            "labels_input": tokenized_labels.input_ids[:, :-1],  # Remove EOS token from input labels
-            "labels_attention_mask": tokenized_labels.attention_mask[:, :-1],
-            "labels_output": tokenized_labels.input_ids[:, 1:]  # Remove BOS token from output labels
-        }
+        """A packed example's words (with BOS and EOS), and per word: its sequence and shift block (ids from 1, 0 for
+        none), and whether it predicts the next word. PAD words (padding packed examples, each its own sequence) do not,
+        nor do the words of a shift block before its ShiftIn: they are visible to each other (bidirectional)."""
+        sequence_ids = torch.repeat_interleave(torch.arange(1, len(seq_lengths) + 1), torch.tensor(seq_lengths))
+        block_ids = torch.zeros(len(words), dtype=torch.long)
+        label_mask = torch.tensor([word != self.tokenizer.pad_token for word in words])
+        for block, (start, end) in enumerate(get_shift_blocks(words), start=1):
+            block_ids[start:end + 1] = block
+            label_mask[start:end] = False
+        example = {"input_ids": self.tokenize_words(words).input_ids, "sequence_ids": sequence_ids,
+                   "block_ids": block_ids, "label_mask": label_mask}
         if self.renderer is not None:
             example["input_patches"], example["input_patches_shape"] = self.render_texts(words)
         return example
