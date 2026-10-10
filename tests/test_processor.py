@@ -56,7 +56,7 @@ def test_processor_single_text_value(processor):
 
 
 def test_patch_positions():
-    from welt.processor import patch_positions
+    from welt.patches import patch_positions
 
     rows, columns = patch_positions(torch.tensor([[1, 3], [2, 2]]))  # A 1x3 image, then a 2x2 one
     assert rows.tolist() == [0, 0, 0, 0, 0, 1, 1]

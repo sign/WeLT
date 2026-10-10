@@ -3,7 +3,6 @@ import os
 import warnings
 
 import torch
-import torch.nn.functional as F  # noqa: N812
 from cachetools import LRUCache
 from font_download import FontConfig
 from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
@@ -13,21 +12,9 @@ from utf8_tokenizer.control import ControlTokens
 from utf8_tokenizer.tokenizer import BOS_TOKEN_ID, EOS_TOKEN_ID, PAD_TOKEN_ID, UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
+from welt.patches import PATCH_SIZE, patchify
+
 PROCESSOR_CONFIG_NAME = "processor_config.json"
-PATCH_SIZE = 16  # pixel_renderer renders lines of 16px height, widths rounded to 16px
-
-
-MAX_PATCH_POSITION = 256  # Rows and columns of patches beyond it share its position embedding
-
-
-def patch_positions(shapes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """(N, 2) rows and columns of patches of N images -> the row and column of each of their row-major patches,
-    packed: two (total patches,) tensors, capped at MAX_PATCH_POSITION - 1."""
-    counts = shapes.prod(dim=-1)
-    within = torch.arange(int(counts.sum()), device=shapes.device) - torch.repeat_interleave(
-        F.pad(counts.cumsum(0), (1, 0))[:-1], counts)
-    columns = torch.repeat_interleave(shapes[:, 1], counts)
-    return (within // columns).clamp(max=MAX_PATCH_POSITION - 1), (within % columns).clamp(max=MAX_PATCH_POSITION - 1)
 
 
 def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
@@ -65,14 +52,6 @@ def get_shift_blocks(words: list[str]):
                 shift_out = None
     if shift_out is not None:
         warnings.warn("ShiftOut without ShiftIn at the end of the sequence", stacklevel=2)
-
-
-def patchify(image, patch_size: int = PATCH_SIZE) -> torch.Tensor:
-    """(H, W, C) uint8 render -> (H/p * W/p, p*p*C) uint8 patches, row-major."""
-    image = torch.from_numpy(image)
-    h, w, c = image.shape
-    patches = image.reshape(h // patch_size, patch_size, w // patch_size, patch_size, c)
-    return patches.permute(0, 2, 1, 3, 4).reshape(-1, patch_size * patch_size * c)
 
 
 class TextImageProcessor:

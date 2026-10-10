@@ -29,9 +29,9 @@ from transformers import AutoConfig
 from utf8_tokenizer.byte_embeddings import BitEmbedding
 from utf8_tokenizer.tokenizer import PAD_TOKEN_ID
 
-from welt.processor import MAX_PATCH_POSITION, next_word_labels, patch_positions
+from welt.patches import PatchEmbedding
+from welt.processor import next_word_labels
 
-PATCH_DIM = 16 * 16 * 3
 VOCAB_SIZE = 256  # Bytes
 
 register_allowed_target_prefix("welt")  # Checkpoints' run_config.yaml instantiate WeLTModelProvider
@@ -276,32 +276,6 @@ class PatchImageEncoder(WordEncoder):
         """(total patches, 768) uint8 patches of N images, packed; (N, 2) patch rows and columns of each -> (N, H)"""
         lengths = shapes.prod(dim=-1) + 1  # With CLS
         return self.encode(self.embed(patches, shapes), lengths, int(lengths.max()))
-
-
-class PatchEmbedding(nn.Module):
-    """uint8 16x16 RGB patches -> CLS + linear patch embeddings, plus the embeddings of their row and column in the
-    image (images of words in several rows, e.g. SignWriting, are 2D; the transformer only sees a 1D sequence)."""
-
-    def __init__(self, dim: int):
-        super().__init__()
-        self.proj = nn.Linear(PATCH_DIM, dim)
-        self.cls = nn.Parameter(torch.randn(dim) * 0.02)
-        self.rows = nn.Parameter(torch.randn(MAX_PATCH_POSITION, dim) * 0.02)
-        self.columns = nn.Parameter(torch.randn(MAX_PATCH_POSITION, dim) * 0.02)
-        nn.init.xavier_uniform_(self.proj.weight)  # Like PIXEL / ViT-MAE patch embeddings
-
-    def forward(self, patches: torch.Tensor, shapes: torch.Tensor) -> torch.Tensor:
-        """(total patches, 768) packed patches, (N, 2) rows and columns of patches of each image -> (total + N, H),
-        each image's CLS followed by its patch embeddings"""
-        rows, columns = patch_positions(shapes)
-        embeds = self.proj(patches.to(self.proj.weight.dtype) / 127.5 - 1) + self.rows[rows] + self.columns[columns]
-        lengths = shapes.prod(dim=-1) + 1
-        is_cls = torch.zeros(len(embeds) + len(lengths), dtype=torch.bool, device=embeds.device)
-        is_cls[F.pad(lengths.cumsum(0), (1, 0))[:-1]] = True
-        hidden = embeds.new_empty(len(is_cls), embeds.size(-1))
-        hidden[is_cls] = self.cls.to(embeds.dtype)
-        hidden[~is_cls] = embeds
-        return hidden
 
 
 class WeLTModel(MegatronModule):
