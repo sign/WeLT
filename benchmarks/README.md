@@ -77,10 +77,8 @@ transformers, which GB10's bandwidth limits.
 |-------------|----------:|--------------------------:|
 | 1 GPU (2 micro batches) | 225 | 0.935 |
 | Data parallel (DP=2) | 122 | 0.929 |
-| Tensor + sequence parallel (TP=2) | 312 | 0.938 |
 
-Data parallelism scales 1.8x (median step times; Modal hosts vary). Tensor parallelism is slower for these narrow transformers: use it only
-for models that do not fit on one GPU. Its checkpoints export (resharded) to the same vLLM format.
+Data parallelism scales 1.8x (median step times; Modal hosts vary).
 
 With micro batch 64, a step takes 103 ms on one H100 vs. 167 ms on the GB10: only 1.6x faster. A profile shows the
 H100 is host bound: its kernels take ~30 ms of a ~125 ms step, the rest is the CPU launching ~1500 small kernels
