@@ -114,7 +114,7 @@ under half the exact matches).
 
 An earlier comparison (bytes only 0.953 bits per byte, better than with images) was wrong: configs without images read
 signs split into fragments by words-segmentation 0.0.5 from the datasets cache, which did not invalidate on the
-upgrade to 0.0.6 (its version is now part of the cache fingerprint).
+upgrade to 0.0.6 (data is now streamed and split into words on the fly, without a cache).
 
 Images do not help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
 reaches 0.537 bits per byte and chrF 46.5 (vs. 0.547 and 45.4 with it), 14% faster
