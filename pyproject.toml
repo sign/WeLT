@@ -24,7 +24,7 @@ dependencies = [
     "gunicorn", # welt-serve
     # Our packages
     "words-segmentation>=0.0.6", # For pre-tokenization into words
-    "utf8-tokenizer[fast]>=0.8.2", # For tokenization of bytes
+    "utf8-tokenizer[fast]>=0.8.4", # For tokenization and embedding of bytes
     "pixel-renderer[pangocairo]>=0.1.5", # For text rendering into images (thread safe)
 ]
 
