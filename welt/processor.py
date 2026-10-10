@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -8,10 +9,9 @@ from font_download import FontConfig
 from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
 from pixel_renderer import PixelRendererProcessor
 from transformers import AutoTokenizer, PreTrainedTokenizer
+from utf8_tokenizer.control import ControlTokens
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
-
-from welt.attention import get_shift_blocks
 
 PROCESSOR_CONFIG_NAME = "processor_config.json"
 PATCH_SIZE = 16  # pixel_renderer renders lines of 16px height, widths rounded to 16px
@@ -46,6 +46,26 @@ def next_word_labels(input_ids: torch.Tensor, sequence_ids: torch.Tensor, label_
     empty[:2] = torch.tensor([bos, eos])
     labels = torch.where(last[..., None], empty, labels)
     return labels.masked_fill(~label_mask[..., None], pad)
+
+
+def get_shift_blocks(words: list[str]):
+    """(start, end) of each shift block: a ShiftOut word, up to the next ShiftIn word (inclusive). Warns about
+    unmatched ShiftOut and ShiftIn words, which start or end no block."""
+    shift_out = None
+    for i, word in enumerate(words):
+        if word == ControlTokens.ShiftOut:
+            if shift_out is not None:
+                warnings.warn("ShiftOut after ShiftOut without ShiftIn: nested shift blocks are not allowed",
+                              stacklevel=2)
+            shift_out = i
+        elif word == ControlTokens.ShiftIn:
+            if shift_out is None:
+                warnings.warn("ShiftIn without ShiftOut: skipping the shift block", stacklevel=2)
+            else:
+                yield shift_out, i
+                shift_out = None
+    if shift_out is not None:
+        warnings.warn("ShiftOut without ShiftIn at the end of the sequence", stacklevel=2)
 
 
 def patchify(image, patch_size: int = PATCH_SIZE) -> torch.Tensor:

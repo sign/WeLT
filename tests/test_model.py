@@ -7,7 +7,7 @@ import torch.nn.functional as F  # noqa: N812
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
 from tests.conftest import ORACLE_TEXTS, PAD, build_model, oracle_mask  # noqa: E402
-from welt.model import PackedAttention  # noqa: E402
+from welt.model import FlexCoreAttention, latent_block_mask, packed_block_mask  # noqa: E402
 from welt.processor import TextImageProcessor, collate_fn  # noqa: E402
 from welt_training.data_utils import pack_words  # noqa: E402
 
@@ -95,7 +95,8 @@ def test_packed_attention_matches_padded_attention(megatron, causal, lengths, kv
     cu_seqlens = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     params = PackedSeqParams(qkv_format="thd", cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
                              max_seqlen_q=int(lengths.max()), max_seqlen_kv=int(lengths.max()))
-    packed = PackedAttention(ATTENTION_CONFIG, causal=causal)(query, key, value, packed_seq_params=params)
+    params.block_mask = packed_block_mask(cu_seqlens, causal)
+    packed = FlexCoreAttention(ATTENTION_CONFIG)(query, key, value, packed_seq_params=params)
 
     expected = []
     for start, end in zip(cu_seqlens[:-1].tolist(), cu_seqlens[1:].tolist(), strict=True):
@@ -114,10 +115,8 @@ def packed_batch(processor, seq_length: int):
 def test_latent_mask_matches_an_oracle_of_the_words(megatron, processor):
     from torch.nn.attention.flex_attention import create_mask
 
-    from welt.model import latent_block_mask
-
     batch, packed = packed_batch(processor, seq_length=40)
-    block_mask = latent_block_mask(batch["sequence_ids"].cuda(), batch["block_ids"].cuda())._welt_block_mask
+    block_mask = latent_block_mask(batch["sequence_ids"].cuda(), batch["block_ids"].cuda())
     dense = create_mask(block_mask.mask_mod, len(packed), None, 40, 40, device="cuda")[:, 0].cpu()
     for i, (words, seq_lengths) in enumerate(packed):
         torch.testing.assert_close(dense[i], oracle_mask(words, seq_lengths))
@@ -125,8 +124,6 @@ def test_latent_mask_matches_an_oracle_of_the_words(megatron, processor):
 
 def test_masked_attention_matches_sdpa(megatron, processor):
     """FlexAttention with the latent mask (its sparse blocks too) against SDPA with the oracle's dense mask."""
-    from welt.model import MaskedAttention, latent_block_mask
-
     torch.manual_seed(0)
     seq, heads, dim = 200, 4, 16  # Over one 128-word block
     batch, packed = packed_batch(processor, seq_length=seq)
@@ -134,8 +131,9 @@ def test_masked_attention_matches_sdpa(megatron, processor):
     allowed = torch.stack([oracle_mask(words, lengths) for words, lengths in packed]).cuda()[:, None]
     query, key, value = (torch.randn(seq, len(packed), heads, dim, device="cuda", dtype=torch.bfloat16)
                          for _ in range(3))
-    mask = latent_block_mask(batch["sequence_ids"], batch["block_ids"])
-    out = MaskedAttention(ATTENTION_CONFIG)(query, key, value, attention_mask=mask)
+    mask = torch.empty(0)
+    mask.block_mask = latent_block_mask(batch["sequence_ids"], batch["block_ids"])
+    out = FlexCoreAttention(ATTENTION_CONFIG)(query, key, value, attention_mask=mask)
 
     q, k, v = (t.permute(1, 2, 0, 3) for t in (query, key, value))
     expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)

@@ -1,3 +1,4 @@
+import contextlib
 import pickle
 import tempfile
 
@@ -6,8 +7,8 @@ import torch
 from utf8_tokenizer.control import ControlTokens
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
-from tests.conftest import ORACLE_TEXTS, oracle_labels
-from welt.processor import TextImageProcessor, collate_fn, next_word_labels
+from tests.conftest import ORACLE_TEXTS, SI, SO, oracle_labels
+from welt.processor import TextImageProcessor, collate_fn, get_shift_blocks, next_word_labels
 from welt_training.data_utils import pack_words
 
 
@@ -195,3 +196,18 @@ def test_labels_match_an_oracle_of_the_words(text_processor, seq_length):
         tokenized = text_processor.tokenize_words([label for label in expected if label is not None]).input_ids
         assert torch.equal(labels[:, :tokenized.size(1)], tokenized)
         assert (labels[:, tokenized.size(1):] == 0).all()
+
+
+@pytest.mark.parametrize(("words", "warning", "blocks"), [
+    (["a", "b", "c"], None, []),
+    (["a", SO, "b", SI, "c"], None, [(1, 3)]),
+    ([SO, SI, "c"], None, [(0, 1)]),
+    (["a", SO, "b", SI, "c", SO, "d", SI], None, [(1, 3), (5, 7)]),
+    (["a", SO, "b"], "ShiftOut without ShiftIn", []),
+    (["a", SI, "b"], "ShiftIn without ShiftOut", []),
+    (["a", SO, "b", SO, "c", SI], "nested shift blocks", [(3, 5)]),
+])
+def test_shift_blocks(words, warning, blocks):
+    """Shift blocks span ShiftOut to ShiftIn, inclusive."""
+    with pytest.warns(UserWarning, match=warning) if warning else contextlib.nullcontext():
+        assert list(get_shift_blocks(words)) == blocks
