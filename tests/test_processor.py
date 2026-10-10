@@ -27,8 +27,7 @@ expected_tensor_keys = ["input_ids", "sequence_ids", "block_ids", "label_mask", 
 
 def labels_of(example: dict) -> torch.Tensor:
     """Each word's label bytes (BOS, ..., EOS), PAD for words without a label."""
-    return next_word_labels(example["input_ids"][None], example["sequence_ids"][None], example["label_mask"][None],
-                            bos=2, eos=3, pad=0)[0]
+    return next_word_labels(example["input_ids"][None], example["sequence_ids"][None], example["label_mask"][None])[0]
 
 
 def test_processor_multiprocessing_pickle(processor):

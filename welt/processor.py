@@ -10,7 +10,7 @@ from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
 from pixel_renderer import PixelRendererProcessor
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from utf8_tokenizer.control import ControlTokens
-from utf8_tokenizer.tokenizer import UTF8Tokenizer
+from utf8_tokenizer.tokenizer import BOS_TOKEN_ID, EOS_TOKEN_ID, PAD_TOKEN_ID, UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 PROCESSOR_CONFIG_NAME = "processor_config.json"
@@ -35,17 +35,16 @@ def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     return {key: torch.nested.nested_tensor([item[key] for item in batch]).to_padded_tensor(0) for key in batch[0]}
 
 
-def next_word_labels(input_ids: torch.Tensor, sequence_ids: torch.Tensor, label_mask: torch.Tensor,
-                     bos: int, eos: int, pad: int) -> torch.Tensor:
+def next_word_labels(input_ids: torch.Tensor, sequence_ids: torch.Tensor, label_mask: torch.Tensor) -> torch.Tensor:
     """(B, L, T) bytes of each word -> the bytes each word predicts: the next word of its sequence, an empty word
     (BOS, EOS) after the last word of a sequence, and nothing (PAD) for words without a label (label_mask)."""
     labels = input_ids.roll(-1, dims=1)
     last = sequence_ids != sequence_ids.roll(-1, dims=1)
     last[:, -1] = True
-    empty = torch.full_like(input_ids[0, 0], pad)
-    empty[:2] = torch.tensor([bos, eos])
+    empty = torch.full_like(input_ids[0, 0], PAD_TOKEN_ID)
+    empty[:2] = torch.tensor([BOS_TOKEN_ID, EOS_TOKEN_ID])
     labels = torch.where(last[..., None], empty, labels)
-    return labels.masked_fill(~label_mask[..., None], pad)
+    return labels.masked_fill(~label_mask[..., None], PAD_TOKEN_ID)
 
 
 def get_shift_blocks(words: list[str]):
