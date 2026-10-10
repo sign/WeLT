@@ -26,6 +26,8 @@ that trace back to tokenization.
 - What is the real root of suffering? **Tokenization**.
 
 What if we encoded text as images of pre-tokenized words (alongside bytes)?
+Each word would be embedded on its own, from what it looks like and how it is spelled, with no subword tokenizer
+or vocabulary.
 
 - ✅ LLMs should be able to spell words, they see the characters.
 - ✅ LLMs should be able to do string processing tasks, they see the characters.

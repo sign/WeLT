@@ -20,6 +20,7 @@ from functools import partial
 import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
+from megatron.bridge.training.losses import masked_next_token_loss
 from megatron.core import parallel_state
 from transformers import AutoTokenizer
 
@@ -96,10 +97,8 @@ class TokensDatasetProvider(TextDataConfig, DatasetProvider):
 def loss_func(losses: torch.Tensor, loss_mask: torch.Tensor, label_bytes: torch.Tensor):
     """Per-token cross entropy, plus bits per byte over the scored text tokens (not EOS)."""
     losses = losses.float()
-    loss = (losses * loss_mask).sum()
-    num_tokens = loss_mask.sum().int()
-    return loss, num_tokens, {
-        "lm loss": report(loss, num_tokens),
+    loss, num_tokens, metrics = masked_next_token_loss(loss_mask, losses)  # With NaN / Inf checks
+    return loss, num_tokens, metrics | {
         "bits per byte": report((losses * (label_bytes > 0)).sum() / math.log(2), label_bytes.sum()),
     }
 

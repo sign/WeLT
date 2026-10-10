@@ -16,7 +16,7 @@ import shutil
 
 import torch
 from megatron.bridge import AutoBridge
-from megatron.bridge.training.model_load_save import load_megatron_model
+from megatron.bridge.training.model_load_save import load_megatron_model, temporary_distributed_context
 from safetensors.torch import save_file
 
 from welt.model import WeLTModel, hf_config
@@ -120,18 +120,8 @@ def main():
     parser.add_argument("--output", required=True, help="Export directory")
     args = parser.parse_args()
 
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "29500")
-    os.environ.setdefault("RANK", "0")
-    os.environ.setdefault("WORLD_SIZE", "1")
-    from megatron.core import parallel_state
-    torch.distributed.init_process_group("nccl")
-    parallel_state.initialize_model_parallel()
-    try:
+    with temporary_distributed_context("nccl"):
         export(args.checkpoint, args.output)
-    finally:
-        parallel_state.destroy_model_parallel()
-        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

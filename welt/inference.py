@@ -28,14 +28,13 @@ from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 from welt.attention import get_shift_blocks  # noqa: E402
 from welt.processor import TextImageProcessor, patch_positions  # noqa: E402
 from welt.utf8 import UTF8LogitsProcessor  # noqa: E402
-from welt.vllm_plugin import RANGES_KEY, restore_opentelemetry_context  # noqa: E402
+from welt.vllm_plugin import RANGES_KEY  # noqa: E402
 
 
 class WeLTGenerator:
     def __init__(self, path: str, kv_cache_gib: float = 1.0, device: str = "cuda"):
         """kv_cache_gib: KV cache memory of each vLLM engine. A fixed size (rather than a fraction of the GPU) skips
         vLLM's memory profiling, which fails when other processes use the GPU."""
-        restore_opentelemetry_context()
         self.processor = TextImageProcessor.from_pretrained(os.path.join(path, "processor"))
         self.tokenizer = self.processor.tokenizer
         self.device = device

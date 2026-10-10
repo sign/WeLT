@@ -1,20 +1,10 @@
+# string-repetition, with words that are Pythia BPE tokens instead of words-segmentation words
+$extends: ../easy-tasks/string-repetition.yaml
+
 output_dir: ./output/welt-bpe-14m
 
 model:
-  bytes_encoder: sign/utf8-lm-tiny
-  latent_transformer: welt_training/experiments/models/latent-70m.json
-  bytes_decoder: sbintuitions/tiny-lm
   pretokenizer: EleutherAI/pythia-14m
 
-data:
-  dataset_name: Helsinki-NLP/opus-100
-  dataset_config_name: en-he
-  dataset_text_template: "<text>\x0E{translation[en]}\x0F<repeat> {translation[en]}"
-  seq_length: 128
-  max_word_length: 16
-  max_eval_samples: 32
-  num_workers: 8
-
-validation:
-  eval_interval: 100
-  eval_iters: 1
+logger:
+  wandb_project: welt-bpe-pretokenizer

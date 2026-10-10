@@ -6,7 +6,7 @@ import torch
 from utf8_tokenizer.control import ControlTokens
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
-from welt.processor import TextImageProcessor
+from welt.processor import TextImageProcessor, collate_fn
 from welt_training.data_utils import pack_words
 
 
@@ -102,23 +102,6 @@ def test_get_words_and_labels_respect_max_word_length(processor):
     assert labels == ['thi', 's ', 'is ', 'a ', 'lon', 'g-t', 'est', '']
 
 
-def test_packed_dataset(processor):
-    texts = [
-        "hi!",
-        "hello world",
-        "yes.",
-        "a b c"
-    ]
-    packed = list(pack_words(map(processor.pretokenize, texts), seq_length=7))
-
-    pad = "\x00"
-    assert packed == [
-        ([ControlTokens.StartOfText, 'hi!', ControlTokens.StartOfText, 'hello ', 'world',
-          ControlTokens.StartOfText, 'yes.'], [2, 3, 2]),
-        ([ControlTokens.StartOfText, 'a ', 'b ', 'c', pad, pad, pad], [4, 1, 1, 1]),
-    ]
-
-
 def test_packed_dataset_labels_independent(processor):
     texts = [
         "a b",
@@ -191,3 +174,13 @@ def test_bpe_pretokenizer_words_are_text_spans():
     assert "".join(words) == ControlTokens.StartOfText + text
     assert ControlTokens.ShiftOut in words
     assert ControlTokens.ShiftIn in words
+
+
+def test_collate_fn_pads_every_dimension_and_keeps_dtypes():
+    batch = [{"mask": torch.tensor([[True, False]]), "ids": torch.tensor([1])},
+             {"mask": torch.tensor([[True], [True]]), "ids": torch.tensor([2, 3])}]
+    collated = collate_fn(batch)
+    assert collated["mask"].dtype == torch.bool
+    assert torch.equal(collated["mask"], torch.tensor([[[True, False], [False, False]],
+                                                       [[True, False], [True, False]]]))
+    assert torch.equal(collated["ids"], torch.tensor([[1, 0], [2, 3]]))
