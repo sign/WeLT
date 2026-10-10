@@ -134,8 +134,8 @@ def test_masked_attention_matches_sdpa(megatron):
 
 
 def test_checkpoint_shards_every_transformer(megatron, tiny_config):
-    """Every transformer's weights are saved as tensor parallel shards (by its own sharded_state_dict),
-    not as full tensors replicated across ranks."""
+    """Every transformer's weights are saved by its own sharded_state_dict (Megatron's distributed checkpoint
+    format, e.g. its layers stacked), not as plain tensors."""
     sharded = build_model(tiny_config).sharded_state_dict()
     for name in ["bytes_encoder.transformer", "image_encoder.transformer", "latent_transformer", "bytes_decoder"]:
         weight = sharded[f"{name}.decoder.layers.0.self_attention.linear_proj.weight"]
