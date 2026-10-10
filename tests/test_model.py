@@ -27,10 +27,9 @@ def word_losses(model, processor, texts: list[str]) -> torch.Tensor:
     batch = {k: v.cuda() for k, v in processor(texts).items()}
     with torch.no_grad():
         losses, _, labels = model(**batch)
-    has_label = batch["labels_attention_mask"].flatten(0, 1).any(dim=-1)
-    per_word = torch.zeros(has_label.shape, device=losses.device)
-    per_word[has_label] = (losses * (labels != 0)).sum(dim=-1)
-    return per_word.view(batch["labels_attention_mask"].shape[:2])
+    per_word = torch.zeros(batch["label_mask"].shape, device=losses.device)
+    per_word[batch["label_mask"]] = (losses * (labels != 0)).sum(dim=-1)
+    return per_word
 
 
 def test_forward_is_finite(model, processor):
@@ -105,26 +104,26 @@ def test_packed_attention_matches_padded_attention(megatron, causal, lengths, kv
 
 
 def test_masked_attention_matches_sdpa(megatron):
-    from welt.attention import get_attention_mask_for_packed_sequence
-    from welt.model import MaskedAttention
+    from welt.model import MaskedAttention, latent_block_mask
 
     torch.manual_seed(0)
-    words = ["\x02", "<en>", "\x0e", "hello", "world", "\x0f", "<he>", "\x02", "x"]
-    allowed = torch.stack([get_attention_mask_for_packed_sequence([7, 2], words=words)] * 2).cuda()  # (B, 1, S, S)
-    seq, batch, heads, dim = allowed.size(-1), 2, 4, 16
+    # Words: BOS <en> SO hello world SI <he> | BOS x | (batch padding), the second example without the shift block
+    sequence_ids = torch.tensor([[1, 1, 1, 1, 1, 1, 1, 2, 2, 0], [1, 1, 1, 1, 1, 1, 1, 2, 2, 0]], device="cuda")
+    block_ids = torch.tensor([[0, 0, 1, 1, 1, 1, 0, 0, 0, 0], [0] * 10], device="cuda")
+    q_index, k_index = torch.arange(10, device="cuda")[:, None], torch.arange(10, device="cuda")[None]
+    same_sequence = (sequence_ids[:, :, None] == sequence_ids[:, None]) & (sequence_ids[:, :, None] > 0)
+    same_block = (block_ids[:, :, None] == block_ids[:, None]) & (block_ids[:, :, None] > 0)
+    allowed = (same_sequence & ((k_index <= q_index) | same_block))[:, None]  # (B, 1, S, S)
+    allowed[:, :, -1, -1] = True  # SDPA has no fully masked rows: let batch padding attend to itself
+
+    seq, batch, heads, dim = 10, 2, 4, 16
     query, key, value = (torch.randn(seq, batch, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3))
-    attention = MaskedAttention(ATTENTION_CONFIG)
-    out = attention(query, key, value, attention_mask=~allowed)
+    mask = latent_block_mask(sequence_ids, block_ids)
+    out = MaskedAttention(ATTENTION_CONFIG)(query, key, value, attention_mask=mask)
 
     q, k, v = (t.permute(1, 2, 0, 3) for t in (query, key, value))
     expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
-    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
-
-    # Another mask: the block mask cached for the first one must not be reused
-    allowed = torch.stack([get_attention_mask_for_packed_sequence([seq], words=["x"] * seq)] * 2).cuda()
-    out = attention(query, key, value, attention_mask=~allowed)
-    expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
-    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(out[:-1], expected[:-1], atol=2e-2, rtol=2e-2)  # Without the batch padding word
 
 
 def test_checkpoint_shards_every_transformer(megatron, tiny_config):
