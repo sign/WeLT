@@ -33,9 +33,9 @@ def test_null_sections_and_model_overrides():
     from welt_training import train
 
     config = load_yaml("welt_training/experiments/easy-tasks/string-repetition.yaml",
-                       ["optimizer=null", "model.tensor_model_parallel_size=2"])
+                       ["optimizer=null", "model.hidden_dropout=0.2"])
     cfg, _ = train.build(config)
-    assert cfg.model.tensor_model_parallel_size == 2
+    assert cfg.model.hidden_dropout == 0.2
     with pytest.raises(TypeError, match="unexpected keyword"):
         train.build(load_yaml("welt_training/experiments/easy-tasks/string-repetition.yaml", ["train.typo=1"]))
     with pytest.raises(ValueError, match="Unknown config sections"):

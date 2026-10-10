@@ -23,7 +23,7 @@ model:
   load_pretrained: ...    # Initialize id/path transformers from their HF weights
   pretokenizer: ...       # A HF tokenizer splitting words, defaults to sign/words-segmentation
   trust_remote_code: ...
-  hidden_dropout: ...     # Any other WeLTModelProvider field, e.g. tensor_model_parallel_size
+  hidden_dropout: ...     # Any other WeLTModelProvider field, e.g. recompute_granularity
 data:
   dataset_name: ...
   dataset_config_name: ...
@@ -52,8 +52,8 @@ The run directory (`output_dir`) holds the config (`welt.yaml`), the `processor/
 
 `model` keys other than the four transformers, `load_pretrained`, `pretokenizer` and `trust_remote_code` are set on
 the `WeLTModelProvider` ([`welt/model.py`](../welt/model.py)), the latent transformer's Megatron config, e.g.
-`tensor_model_parallel_size`, `sequence_parallel`, or `recompute_granularity`.
-Parallelism, precision and recomputation settings are shared with the other transformers
+`hidden_dropout` or `recompute_granularity`.
+Precision and recomputation settings are shared with the other transformers
 (`SHARED_CONFIG_FIELDS`); other fields, e.g. `hidden_dropout`, only apply to the latent transformer.
 
 For the image encoder (described in the [README](../README.md#model-setup)), see
@@ -115,15 +115,9 @@ the validation set small, and raise `eval_iters` to cover it.
 
 ## Parallelism
 
-- **Data parallel**: `torchrun --nproc_per_node=N` (and Megatron's distributed optimizer). `train.global_batch_size`
-  must be a multiple of `micro_batch_size` × the data parallel size; larger multiples accumulate gradients.
-- **Tensor parallel**: `model.tensor_model_parallel_size=T` with `model.sequence_parallel=true` (required).
-  T must divide `seq_length`, each transformer's attention heads and query groups, and 256 (the byte vocabulary).
-  Data parallel size is then `N / T`.
-- Pipeline and context parallelism are not supported.
-
-[`benchmarks/parity.sh`](../benchmarks/parity.sh) checks that 1 GPU, DP=2 and TP=2 (with sequence parallelism)
-train alike, on 2 GPUs.
+Data parallel only: `torchrun --nproc_per_node=N` (and Megatron's distributed optimizer). `train.global_batch_size`
+must be a multiple of `micro_batch_size` × N; larger multiples accumulate gradients.
+[`benchmarks/parity.sh`](../benchmarks/parity.sh) checks that 1 GPU and DP=2 train alike, on 2 GPUs.
 
 ## Optimizers
 
