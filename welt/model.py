@@ -26,6 +26,7 @@ from megatron.core.transformer.module import MegatronModule
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 from transformers import AutoConfig
+from utf8_tokenizer.byte_embeddings import BitEmbedding
 
 from welt.processor import MAX_PATCH_POSITION, patch_positions
 
@@ -70,25 +71,6 @@ def safetensors_checkpoint(name_or_path: str) -> str:
         except OSError:  # Another process converted it first
             shutil.rmtree(temporary)
     return path
-
-
-class ByteEmbedding(nn.Module):
-    """Embedding table plus an additive (zero-initialized) projection of each token's 8 bits."""
-
-    def __init__(self, weight: torch.Tensor):
-        super().__init__()
-        num_embeddings, dim = weight.shape
-        self.weight = nn.Parameter(weight.detach().clone())
-        self.bit_proj = nn.Parameter(torch.zeros(dim, 8))
-        shifts = torch.arange(7, -1, -1)
-        self.register_buffer("bits", (torch.arange(num_embeddings)[:, None] >> shifts & 1).float(), persistent=False)
-
-    def folded_weight(self) -> torch.Tensor:
-        """Equivalent plain embedding table (used for export)."""
-        return self.weight + self.bits.to(self.weight.dtype) @ self.bit_proj.T.to(self.weight.dtype)
-
-    def forward(self, ids: torch.Tensor) -> torch.Tensor:
-        return F.embedding(ids, self.folded_weight())
 
 
 @dataclass
@@ -350,7 +332,7 @@ class WeLTModel(MegatronModule):
         self.bytes_encoder = None
         if config.bytes_encoder is not None:
             config.bytes_encoder.vocab_size = config.num_tokens
-            self.bytes_encoder = WordEncoder(config.bytes_encoder, config.bytes_encoder_hf_path, ByteEmbedding)
+            self.bytes_encoder = WordEncoder(config.bytes_encoder, config.bytes_encoder_hf_path, BitEmbedding)
 
         self.image_encoder = None
         if config.image_encoder is not None:
@@ -363,7 +345,7 @@ class WeLTModel(MegatronModule):
         decoder_config.vocab_size = config.num_tokens
         self.bytes_decoder, embeddings = build_transformer(decoder_config, config.bytes_decoder_hf_path, "causal",
                                                            keep_output_layer=True)
-        self.bytes_decoder_embedding = ByteEmbedding(embeddings)
+        self.bytes_decoder_embedding = BitEmbedding(embeddings)
 
         # Mapping layers
         encoders = [e for e in (self.image_encoder, self.bytes_encoder) if e is not None]
