@@ -5,6 +5,7 @@ model:
   bytes_encoder: sign/utf8-lm-tiny
   latent_transformer: welt_training/experiments/models/latent-70m.json
   bytes_decoder: sbintuitions/tiny-lm
+  hidden_dropout: 0.2  # In the latent transformer: the small dataset overfits after ~10 epochs
 
 data:
   dataset_name: sign/signbank-plus
@@ -18,7 +19,7 @@ data:
   num_workers: 4  # Rendering SignWriting in more workers takes more memory than a GB10 has to spare
 
 train:
-  train_iters: 5940  # 10 epochs of the 57006 packed examples
+  train_iters: 10000  # 17 epochs of the 57006 packed examples
   micro_batch_size: 96
   global_batch_size: 96
 

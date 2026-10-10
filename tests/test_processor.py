@@ -51,11 +51,19 @@ def test_processor_single_text_value(processor):
     assert torch.equal(inputs["labels_output"][0], torch.tensor([[97, 32, 3], [98, 3, 0], [3, 0, 0]]))
 
 
+def test_patch_positions():
+    from welt.processor import patch_positions
+
+    rows, columns = patch_positions(torch.tensor([[1, 3], [2, 2]]))  # A 1x3 image, then a 2x2 one
+    assert rows.tolist() == [0, 0, 0, 0, 0, 1, 1]
+    assert columns.tolist() == [0, 1, 2, 0, 1, 0, 1]
+
+
 def test_render_images_shape(processor):
     texts = ["short", "a bit longer text"]
     patches, shapes = processor.render_texts(texts)
-    # 16px high renders, split into 16x16 RGB patches
-    assert patches.shape == (2, 7, 16 * 16 * 3)
+    # 16px high renders, split into 16x16 RGB patches, packed: 3 then 7
+    assert patches.shape == (3 + 7, 16 * 16 * 3)
     assert patches.dtype == torch.uint8
     assert torch.equal(shapes, torch.tensor([[1, 3], [1, 7]]))  # (rows, columns) of patches
 

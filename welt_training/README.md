@@ -5,7 +5,7 @@ torchrun --nproc_per_node=<gpus> -m welt_training.train <config.yaml> [section.k
 ```
 
 Overrides are YAML values, at any depth: `output_dir=./output/test`, `train.train_iters=50`,
-`logger.wandb_project=null` (to run without W&B), `model.modality_dropout=0.3`.
+`logger.wandb_project=null` (to run without W&B), `model.hidden_dropout=0.1`.
 Configs can inherit with `$extends: ./other.yaml` (relative to the file), deep-merging their sections.
 
 ## Config
@@ -23,7 +23,7 @@ model:
   load_pretrained: ...    # Initialize id/path transformers from their HF weights
   pretokenizer: ...       # A HF tokenizer splitting words, defaults to sign/words-segmentation
   trust_remote_code: ...
-  modality_dropout: ...   # Any other WeLTModelProvider field, e.g. tensor_model_parallel_size
+  hidden_dropout: ...     # Any other WeLTModelProvider field, e.g. tensor_model_parallel_size
 data:
   dataset_name: ...
   dataset_config_name: ...
@@ -52,8 +52,7 @@ The run directory (`output_dir`) holds the config (`welt.yaml`), the `processor/
 
 `model` keys other than the four transformers, `load_pretrained`, `pretokenizer` and `trust_remote_code` are set on
 the `WeLTModelProvider` ([`welt/model.py`](../welt/model.py)), the latent transformer's Megatron config, e.g.
-`modality_dropout` (default 0.15: with both encoders, each one's embeddings are dropped with this probability per
-step, rescaling the other), `tensor_model_parallel_size`, `sequence_parallel`, or `recompute_granularity`.
+`tensor_model_parallel_size`, `sequence_parallel`, or `recompute_granularity`.
 Parallelism, precision and recomputation settings are shared with the other transformers
 (`SHARED_CONFIG_FIELDS`); other fields, e.g. `hidden_dropout`, only apply to the latent transformer.
 

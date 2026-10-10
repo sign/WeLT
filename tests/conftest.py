@@ -25,12 +25,12 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def build_model(config_path: str, image_encoder=True):
+def build_model(config_path: str, image_encoder=True, bytes_encoder=True):
     """A WeLT model with every transformer from config_path, on GPU, without Megatron DDP."""
     from welt.model import WeLTModelProvider
 
     provider = WeLTModelProvider.from_hf(latent_transformer=config_path, bytes_decoder=config_path,
-                                         bytes_encoder=config_path,
+                                         bytes_encoder=config_path if bytes_encoder else None,
                                          image_encoder=config_path if image_encoder else None)
     provider.bf16 = True
     provider.seq_length = 64
