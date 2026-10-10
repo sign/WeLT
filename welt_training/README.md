@@ -41,9 +41,11 @@ ddp:                      # DistributedDataParallelConfig
 rng:                      # RNGConfig
 ```
 
-Defaults ([`train.py`](train.py) `build_config`): 1000 iterations of batch 32, distributed Adam
-(lr 3e-4 → 3e-5 cosine, betas 0.9/0.95, weight decay 0.01, grad clip 1.0), bf16, evaluation every 500 iterations,
-checkpoints every 1000, seed 42.
+Defaults are Megatron-Bridge's, except ([`train.py`](train.py) `build_config`): 1000 iterations of batch 32,
+distributed Muon (lr 3e-4 → 3e-5 cosine over the iterations, Adam betas 0.9/0.95 for the non-matrix weights), bf16,
+evaluation (10 batches) every 500 iterations, logs every 10, and checkpoints every 1000.
+The weight decay applied is the scheduler's (`start_weight_decay`/`end_weight_decay`), which defaults to the
+optimizer's (Megatron-Bridge's 0.01).
 
 The run directory (`output_dir`) holds the config (`welt.yaml`), the `processor/`, `tensorboard/` logs and Megatron
 `checkpoints/`, from which a rerun resumes automatically.
@@ -93,12 +95,10 @@ must be a multiple of `micro_batch_size` × N; larger multiples accumulate gradi
 
 ## Optimizers
 
-Megatron's optimizers, selected by `optimizer.optimizer`: `adam` (default), `sgd`, and the
-[Emerging-Optimizers](https://github.com/NVIDIA-NeMo/Emerging-Optimizers) `muon`, `adaptive_muon`, `soap`, `scion`,
-`lion`, `polargrad`, ... Muon (2D weights orthogonalized, the rest with Adam) is used by
-the task configs (e.g. [`string-repetition.yaml`](experiments/easy-tasks/string-repetition.yaml),
-[`machine-translation.yaml`](experiments/machine-translation/machine-translation.yaml)); it improved every benchmarked
-task over Adam (see [benchmarks](../benchmarks/README.md#tasks)).
+Megatron's optimizers, selected by `optimizer.optimizer`: `muon` (default), `adam`, `sgd`, and the
+[Emerging-Optimizers](https://github.com/NVIDIA-NeMo/Emerging-Optimizers) `adaptive_muon`, `soap`, `scion`,
+`lion`, `polargrad`, ... Muon (2D weights orthogonalized, the rest with Adam) improved every benchmarked task over
+Adam (see [benchmarks](../benchmarks/README.md#tasks)). Its layer-wise distributed variant (`dist_muon`) fails.
 Their hyperparameters are `OptimizerConfig` fields (e.g. `optimizer.muon_momentum`).
 
 Only UTF-8 bytes are supported; the previous HuggingFace Trainer implementation is at the `huggingface-transformers`

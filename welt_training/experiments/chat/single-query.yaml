@@ -20,7 +20,6 @@ train:
   train_iters: 10000
 
 optimizer:
-  optimizer: muon
   lr: 1.0e-3
   min_lr: 1.0e-4
 
