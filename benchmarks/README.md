@@ -104,6 +104,7 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **machine-translation**, bytes encoder only | 10000 | 170 | 28 min | 0.537 | 68.0% | 9.0% | 46.5 | 616 |
 | **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 10000 | 222 | 37 min | 1.303 | 63.7% | 2.0% | 9.2 | 306 |
 | **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 10000 | 264 | 44 min | 1.304 | 63.8% | 2.3% | 11.9 | 454 |
+| **signed-to-spoken**, image encoder only | 10000 | 164 | 27 min | 1.347 | 62.9% | 2.0% | 12.4 | 337 |
 
 All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
 examples, with vLLM (batched over all examples). Reproduce a row with e.g.
@@ -122,7 +123,7 @@ validation bits per byte from 1.228 to 1.204 with both encoders (from 1.272 to 1
 
 The image encoder (over SignWriting rendered by pixel-renderer, from scratch) helps a little: at their best
 (step 6000) both encoders reach 1.204 bits per byte vs. 1.253 with bytes only, and the image encoder alone is about as
-good as bytes alone (1.285 vs. 1.272, without latent dropout). By the last step, both have overfitted to the same
+good as bytes alone (1.251 vs. 1.253). By the last step, both have overfitted to the same
 1.30. Generation, on 256 examples, is too noisy to rank these (chrF moves by up to 5 between checkpoints).
 Modality dropout (training with one encoder's embeddings dropped at random) was removed: with zeros and rescaling, or
 a learned embedding standing in for the dropped encoder, it was worse than none (1.25 vs. 1.23 bits per byte, and
