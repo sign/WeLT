@@ -25,7 +25,8 @@ from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
 from vllm.config import PoolerConfig  # noqa: E402
 from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
-from welt.processor import TextImageProcessor, get_shift_blocks, patch_positions  # noqa: E402
+from welt.patches import PatchEmbedding  # noqa: E402
+from welt.processor import TextImageProcessor, get_shift_blocks  # noqa: E402
 from welt.utf8 import UTF8LogitsProcessor  # noqa: E402
 from welt.vllm_plugin import RANGES_KEY  # noqa: E402
 
@@ -38,6 +39,8 @@ class WeLTGenerator:
         self.tokenizer = self.processor.tokenizer
         self.device = device
 
+        self.weights = load_file(os.path.join(path, "welt.safetensors"), device=device)  # The layers around them
+
         # gpu_memory_utilization only gates vLLM's startup check of free memory, given kv_cache_memory_bytes
         engine = dict(kv_cache_memory_bytes=int(kv_cache_gib * 2**30), gpu_memory_utilization=0.05, dtype="bfloat16")
         encoder = dict(runner="pooling", convert="embed", **engine,
@@ -46,6 +49,11 @@ class WeLTGenerator:
         image_path, bytes_path = os.path.join(path, "image_encoder"), os.path.join(path, "bytes_encoder")
         if os.path.isdir(image_path):
             self.image_encoder = LLM(image_path, enable_prompt_embeds=True, **encoder)
+            # Its inputs are given as embeddings, by the trained model's patch embedding
+            prefix = "image_encoder.embed."
+            embed = {k.removeprefix(prefix): v for k, v in self.weights.items() if k.startswith(prefix)}
+            self.patch_embedding = PatchEmbedding(len(embed["cls"])).to(device, embed["cls"].dtype)
+            self.patch_embedding.load_state_dict(embed)
         if os.path.isdir(bytes_path):
             self.bytes_encoder = LLM(bytes_path, max_model_len=self.processor.max_word_length, **encoder)
         # Chunked prefill must not split a bidirectional shift block across steps
@@ -56,17 +64,13 @@ class WeLTGenerator:
                            max_model_len=self.processor.max_word_length + 1,
                            logits_processors=[UTF8LogitsProcessor], **engine)
 
-        self.weights = load_file(os.path.join(path, "welt.safetensors"), device=device)  # The layers around them
 
         self.word_embeddings = LRUCache(maxsize=100_000)
 
-    def _linear(self, x: torch.Tensor, name: str) -> torch.Tensor:
-        weight = self.weights[f"{name}.weight"]
-        return F.linear(x.to(weight.dtype), weight, self.weights[f"{name}.bias"])
-
     def _map(self, x: torch.Tensor, name: str) -> torch.Tensor:
         """WeLTModel's {encoder,decoder}_mapping and _norm, between the transformers."""
-        x = self._linear(x, f"{name}_mapping")
+        weight = self.weights[f"{name}_mapping.weight"]
+        x = F.linear(x.to(weight.dtype), weight, self.weights[f"{name}_mapping.bias"])
         return F.rms_norm(x, x.shape[-1:], self.weights[f"{name}_norm.weight"], eps=1e-6)
 
     @staticmethod
@@ -85,13 +89,8 @@ class WeLTGenerator:
         embeds = []
         if self.image_encoder is not None:
             patches, shapes = self.processor.render_texts(words)  # Packed, each word's patches in turn
-            rows, columns = patch_positions(shapes.to(self.device))
-            projected = (self._linear(patches.to(self.device) / 127.5 - 1, "image_encoder.embed.proj")
-                         + self.weights["image_encoder.embed.rows"][rows]
-                         + self.weights["image_encoder.embed.columns"][columns])  # As WeLTModel's PatchEmbedding
-            cls = self.weights["image_encoder.embed.cls"]
-            prompts = [{"prompt_embeds": torch.cat([cls[None], word]).cpu()}
-                       for word in projected.split(shapes.prod(dim=-1).tolist())]
+            hidden = self.patch_embedding(patches.to(self.device), shapes.to(self.device))  # With each word's CLS
+            prompts = [{"prompt_embeds": word.cpu()} for word in hidden.split((shapes.prod(dim=-1) + 1).tolist())]
             embeds.append(self._pooled(self.image_encoder, prompts, params))
         if self.bytes_encoder is not None:
             tokenized = self.processor.tokenize_words(words)
