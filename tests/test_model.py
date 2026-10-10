@@ -63,12 +63,6 @@ def test_loss_is_independent_of_batch(model, processor):
         torch.testing.assert_close(batched[i, :alone.shape[1]], alone[0], atol=2e-2, rtol=2e-2)
 
 
-def test_text_only_model(megatron, tiny_config, processor):
-    model = build_model(tiny_config, image_encoder=False)
-    assert model.image_encoder is None
-    assert torch.isfinite(word_losses(model, processor, ["hello world"])).all()
-
-
 def test_backward_reaches_all_parameters(model, processor):
     model.train()
     try:

@@ -19,7 +19,7 @@ bytes decoder, from scratch. Time per step is the steady-state mean (after warmu
 
 | Stack | ms / step | Speedup | Model TFLOP/s |
 |-------|----------:|--------:|--------------:|
-| HF Trainer (`huggingface-transformers` tag, [`hf_baseline/`](hf_baseline)) | 1227 | 1.0x | 2.3 |
+| HF Trainer (`huggingface-transformers` tag) | 1227 | 1.0x | 2.3 |
 | Megatron-Bridge ([`welt-bench.yaml`](welt-bench.yaml)) | 127 | **9.7x** | 21.8 |
 
 Both learn comparably: after 300 steps the per-byte loss is 0.92 for HF (mean of steps 251-300, linear LR decay)
@@ -32,10 +32,10 @@ Reproduce:
 # Megatron-Bridge
 torchrun --nproc_per_node=1 -m welt_training.train benchmarks/welt-bench.yaml
 
-# HF Trainer: bench_hf.py adds a timing callback to the old welt_training.trainer, so it runs in a checkout of
-# the huggingface-transformers tag (set up per that checkout's README), with hf_baseline/ copied in
+# HF Trainer: benchmarks/hf_baseline/bench_hf.py (removed since, at commit bc057a5) adds a timing callback to the
+# old welt_training.trainer, so it runs in a checkout of the huggingface-transformers tag (set up per its README)
 git worktree add ../WeLT-hf huggingface-transformers
-mkdir -p ../WeLT-hf/benchmarks && cp -r benchmarks/hf_baseline ../WeLT-hf/benchmarks/
+git archive bc057a5 benchmarks/hf_baseline | tar -x -C ../WeLT-hf
 cd ../WeLT-hf && python benchmarks/hf_baseline/bench_hf.py benchmarks/hf_baseline/hf-bench.yaml
 ```
 

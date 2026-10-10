@@ -12,7 +12,6 @@ from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.attention import get_attention_mask_for_packed_sequence, get_shift_blocks
-from welt.collator import collate_fn
 
 PROCESSOR_CONFIG_NAME = "processor_config.json"
 PATCH_SIZE = 16  # pixel_renderer renders lines of 16px height, widths rounded to 16px
@@ -29,6 +28,11 @@ def patch_positions(shapes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         F.pad(counts.cumsum(0), (1, 0))[:-1], counts)
     columns = torch.repeat_interleave(shapes[:, 1], counts)
     return (within // columns).clamp(max=MAX_PATCH_POSITION - 1), (within % columns).clamp(max=MAX_PATCH_POSITION - 1)
+
+
+def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stack examples' tensors, right-padding every dimension to the largest size with zeros."""
+    return {key: torch.nested.nested_tensor([item[key] for item in batch]).to_padded_tensor(0) for key in batch[0]}
 
 
 def patchify(image, patch_size: int = PATCH_SIZE) -> torch.Tensor:
