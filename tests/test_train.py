@@ -31,7 +31,8 @@ def trained(tmp_path_factory, tiny_config):
         # A large latent initialization makes its outputs sensitive to the bidirectional shift blocks (in bf16)
         "model": {"bytes_encoder": tiny_config, "image_encoder": tiny_config,
                   "latent_transformer": tiny_config, "bytes_decoder": tiny_config, "init_method_std": 0.3},
-        "data": {"train_file": str(data), "seq_length": 32, "max_word_length": 16, "num_workers": 1},
+        "data": {"dataset_name": "json", "data_files": str(data), "max_eval_samples": 16, "seq_length": 32,
+                 "max_word_length": 16, "num_workers": 1},
         "train": {"train_iters": 20, "micro_batch_size": 4, "global_batch_size": 4},
         "validation": {"eval_interval": 10, "eval_iters": 1},
         "checkpoint": {"save_interval": 20},
