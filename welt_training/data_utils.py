@@ -9,11 +9,11 @@ from itertools import count, cycle, islice
 import torch
 from datasets import IterableDataset, get_dataset_split_names, load_dataset
 from datasets.distributed import split_dataset_by_node
-from utf8_tokenizer.tokenizer import UTF8Tokenizer
+from utf8_tokenizer.tokenizer import PAD_TOKEN
 
 logger = logging.getLogger(__name__)
 
-PAD_WORD = UTF8Tokenizer().pad_token  # Each its own sequence, without a label (see TextImageProcessor)
+PAD_WORD = PAD_TOKEN  # Each its own sequence, without a label (see TextImageProcessor)
 
 
 @dataclass(kw_only=True)

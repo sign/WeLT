@@ -27,10 +27,12 @@ from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 from transformers import AutoConfig
 from utf8_tokenizer.byte_embeddings import BitEmbedding
+from utf8_tokenizer.tokenizer import PAD_TOKEN_ID
 
 from welt.processor import MAX_PATCH_POSITION, next_word_labels, patch_positions
 
 PATCH_DIM = 16 * 16 * 3
+VOCAB_SIZE = 256  # Bytes
 
 register_allowed_target_prefix("welt")  # Checkpoints' run_config.yaml instantiate WeLTModelProvider
 
@@ -42,14 +44,10 @@ SHARED_CONFIG_FIELDS = (
 )
 
 
-def hf_config(name_or_path: str, trust_remote_code: bool = False):
-    """A HF model id/path, or a JSON file of a HF config (must include "model_type" and "architectures")."""
-    return AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
-
-
 def transformer_provider(name_or_path: str, trust_remote_code: bool = False) -> GPTModelProvider:
-    return AutoBridge.from_hf_config(hf_config(name_or_path, trust_remote_code)).to_megatron_provider(
-        load_weights=False)
+    """A HF model id/path, or a JSON file of a HF config (with "model_type" and "architectures")."""
+    config = AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
+    return AutoBridge.from_hf_config(config).to_megatron_provider(load_weights=False)
 
 
 def safetensors_checkpoint(name_or_path: str) -> str:
@@ -85,11 +83,6 @@ class WeLTModelProvider(GPTModelProvider):
     image_encoder_hf_path: str | None = None
     latent_transformer_hf_path: str | None = None
     bytes_decoder_hf_path: str | None = None
-
-    num_tokens: int = 256
-    pad_token_id: int = 0  # UTF8Tokenizer's
-    bos_token_id: int = 2
-    eos_token_id: int = 3
 
     @classmethod
     def from_hf(cls, latent_transformer: str, bytes_decoder: str,
@@ -318,18 +311,18 @@ class WeLTModel(MegatronModule):
 
         self.bytes_encoder = None
         if config.bytes_encoder is not None:
-            config.bytes_encoder.vocab_size = config.num_tokens
+            config.bytes_encoder.vocab_size = VOCAB_SIZE
             self.bytes_encoder = WordEncoder(config.bytes_encoder, config.bytes_encoder_hf_path, BitEmbedding)
 
         self.image_encoder = None
         if config.image_encoder is not None:
             self.image_encoder = PatchImageEncoder(config.image_encoder, config.image_encoder_hf_path)
 
-        config.vocab_size = config.num_tokens  # Not to build the HF vocabulary's embeddings and output layer, deleted
+        config.vocab_size = VOCAB_SIZE  # Not to build the HF vocabulary's embeddings and output layer, deleted
         self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path)
 
         decoder_config = config.bytes_decoder
-        decoder_config.vocab_size = config.num_tokens
+        decoder_config.vocab_size = VOCAB_SIZE
         self.bytes_decoder, embeddings = build_transformer(decoder_config, config.bytes_decoder_hf_path,
                                                            keep_output_layer=True)
         self.bytes_decoder_embedding = BitEmbedding(embeddings)
@@ -353,7 +346,7 @@ class WeLTModel(MegatronModule):
         (B, L, 2) rows and columns per word] -> (B, L, H)"""
         B, L, T = input_ids.shape  # noqa: N806
         input_ids = input_ids.view(B * L, T)
-        words_mask = input_ids != self.config.pad_token_id  # Within words, bytes are never PAD
+        words_mask = input_ids != PAD_TOKEN_ID  # Within words, bytes are never PAD
         valid = words_mask[:, 0]  # Words have BOS, batch padding words do not
 
         # Encode each distinct word once (about a third of the words in a batch), its embedding is shared
@@ -427,15 +420,13 @@ class WeLTModel(MegatronModule):
         latents = self.latent(word_embeds, sequence_ids, block_ids)
 
         # Only decode words that have a label
-        config = self.config
-        labels = next_word_labels(input_ids, sequence_ids, label_mask, config.bos_token_id, config.eos_token_id,
-                                  config.pad_token_id)[label_mask]
+        labels = next_word_labels(input_ids, sequence_ids, label_mask)[label_mask]
         latents = latents[label_mask]
         labels_input, labels_output = labels[:, :-1], labels[:, 1:]  # The decoder reads BOS..., predicts ...EOS
 
-        logits, mask = self.decode(latents, labels_input, labels_input != config.pad_token_id)
+        logits, mask = self.decode(latents, labels_input, labels_input != PAD_TOKEN_ID)
         # Position t (input byte t-1, or the latent for t=0) predicts output byte t-1
-        targets = F.pad(labels_output, (1, 0), value=self.config.pad_token_id)
+        targets = F.pad(labels_output, (1, 0), value=PAD_TOKEN_ID)
         packed_targets = targets[mask]
         # (S, B, V) logits and (B, S) labels
         packed_losses = self.bytes_decoder.compute_language_model_loss(packed_targets[None], logits[:, None])[0]
