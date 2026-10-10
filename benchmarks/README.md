@@ -5,11 +5,6 @@ The GB10 is memory-bandwidth bound, so on e.g. H100s the relative gains of each 
 
 ## Time per training step
 
-![Time per training step](step_time.png)
-
-[`step_time.csv`](step_time.csv) lists every iteration, including the attempts that were not kept.
-Regenerate the chart with `python benchmarks/plot.py`.
-
 ### Bench config: HuggingFace Trainer vs. Megatron-Bridge
 
 Same model sizes and data in both stacks:
@@ -26,18 +21,8 @@ Both learn comparably: after 300 steps the per-byte loss is 0.92 for HF (mean of
 and 0.86 for Megatron-Bridge (mean of steps 291-300, cosine LR decay).
 The HF baseline encodes bytes with a BERT encoder, Megatron-Bridge with a Llama-like bidirectional encoder of the same size.
 
-Reproduce:
-
-```shell
-# Megatron-Bridge
-torchrun --nproc_per_node=1 -m welt_training.train benchmarks/welt-bench.yaml
-
-# HF Trainer: benchmarks/hf_baseline/bench_hf.py (removed since, at commit bc057a5) adds a timing callback to the
-# old welt_training.trainer, so it runs in a checkout of the huggingface-transformers tag (set up per its README)
-git worktree add ../WeLT-hf huggingface-transformers
-git archive bc057a5 benchmarks/hf_baseline | tar -x -C ../WeLT-hf
-cd ../WeLT-hf && python benchmarks/hf_baseline/bench_hf.py benchmarks/hf_baseline/hf-bench.yaml
-```
+Reproduce with `torchrun --nproc_per_node=1 -m welt_training.train benchmarks/welt-bench.yaml`. The HF Trainer
+harness, and the time per step of every optimization attempt, are in git history (commit bc057a5).
 
 ### What made it faster
 
