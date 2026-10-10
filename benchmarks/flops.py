@@ -8,10 +8,10 @@ Per transformer: 6 * matmul params * tokens (forward + backward), plus attention
 "hardware" FLOPs encode each distinct word of a batch once (as WeLTModel does).
 """
 import argparse
-
-from megatron.bridge.training.config import DatasetBuildContext
+from itertools import islice
 
 from welt.model import hf_config
+from welt_training.data_utils import pack_words, train_texts
 from welt_training.extendable_yaml import load_yaml
 from welt_training.train import build_dataset_provider
 
@@ -35,7 +35,11 @@ def transformer_flops(config, lengths) -> float:
 def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
     model, data = config["model"], config["data"]
     provider = build_dataset_provider(model, data)
-    train, _, _ = provider.build_datasets(DatasetBuildContext(0, 0, 0))
+    processor = provider.processor()
+    # The training examples (of a single data parallel rank), as the dataloader makes them
+    texts = train_texts(provider, rank=0, world_size=1)
+    examples = (processor.process_single_example(words, seq_lengths)
+                for words, seq_lengths in pack_words(map(processor.pretokenize, texts), provider.seq_length))
     train_config = config.get("train") or {}
     micro_batch = train_config.get("micro_batch_size", 32)
     global_batch = train_config.get("global_batch_size", micro_batch)
@@ -43,15 +47,15 @@ def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
                ["bytes_encoder", "image_encoder", "latent_transformer", "bytes_decoder"] if model.get(name)}
 
     totals = {"model": 0.0, "hardware": 0.0}
-    for b in range(batches):
-        examples = [train[(b * micro_batch + i) % len(train)] for i in range(micro_batch)]
-        words = [(tuple(ids[:n].tolist()), n, int(p)) for e in examples
+    for _ in range(batches):
+        batch = list(islice(examples, micro_batch))
+        words = [(tuple(ids[:n].tolist()), n, int(p)) for e in batch
                  for ids, n, p in zip(e["input_ids"], e["input_attention_mask"].sum(-1).tolist(),
                                       e["input_patches_shape"].prod(-1).tolist() if "input_patches_shape" in e
                                       else e["input_attention_mask"].sum(-1).tolist(),
                                       strict=True) if n > 0]
-        common = transformer_flops(configs["latent_transformer"], [len(e["input_ids"]) for e in examples])
-        decoded = [n + 1 for e in examples for n in e["labels_attention_mask"].sum(-1).tolist() if n > 0]
+        common = transformer_flops(configs["latent_transformer"], [len(e["input_ids"]) for e in batch])
+        decoded = [n + 1 for e in batch for n in e["labels_attention_mask"].sum(-1).tolist() if n > 0]
         common += transformer_flops(configs["bytes_decoder"], decoded)
         for kind, encoded in [("model", words), ("hardware", list(dict.fromkeys(words)))]:
             flops = common
