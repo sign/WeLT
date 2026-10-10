@@ -4,6 +4,7 @@ import socket
 
 import pytest
 import torch
+from utf8_tokenizer.control import ControlTokens
 
 TINY_LLAMA = {
     "architectures": ["LlamaForCausalLM"],
@@ -62,3 +63,41 @@ def tiny_config(tmp_path_factory):
     path = tmp_path_factory.mktemp("configs") / "tiny-llama.json"
     path.write_text(json.dumps(TINY_LLAMA))
     return str(path)
+
+
+SO, SI, PAD = ControlTokens.ShiftOut, ControlTokens.ShiftIn, ControlTokens.Null
+ORACLE_TEXTS = ["<en>\x0eHello world, how are you?\x0f<he> שלום עולם",  # Translation-style shift block
+                "plain text without a block",
+                "\x0ea\x0f\x0eb c\x0f two blocks",
+                "<ase>\x0eM518x529S14c20481x471S27106503x489\x0f<en> hello"]  # SignWriting
+
+
+def oracle_labels(words: list[str], seq_lengths: list[int]) -> list[str | None]:
+    """Each word's label, from the words alone: the next word of its sequence, "" after its last word, and None for
+    PAD words and for the words of a shift block before its ShiftIn (they see each other)."""
+    labels, start = [], 0
+    for length in seq_lengths:
+        sequence, inside = words[start:start + length], False
+        for i, word in enumerate(sequence):
+            inside = (inside or word == SO) and word != SI
+            labels.append(None if word == PAD or inside else (sequence + [""])[i + 1])
+        start += length
+    return labels
+
+
+def oracle_mask(words: list[str], seq_lengths: list[int]) -> torch.Tensor:
+    """(L, L) the words each word sees in the latent transformer, from the words alone: itself and the earlier words
+    of its sequence, and every word of its shift block (ShiftOut to ShiftIn)."""
+    allowed = torch.zeros(len(words), len(words), dtype=torch.bool)
+    start = 0
+    for length in seq_lengths:
+        shift_out = None
+        for i in range(start, start + length):
+            allowed[i, start:i + 1] = True
+            if words[i] == SO:
+                shift_out = i
+            elif words[i] == SI and shift_out is not None:
+                allowed[shift_out:i + 1, shift_out:i + 1] = True
+                shift_out = None
+        start += length
+    return allowed

@@ -6,9 +6,10 @@ import torch.nn.functional as F  # noqa: N812
 
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
-from tests.conftest import build_model  # noqa: E402
+from tests.conftest import ORACLE_TEXTS, PAD, build_model, oracle_mask  # noqa: E402
 from welt.model import PackedAttention  # noqa: E402
-from welt.processor import TextImageProcessor  # noqa: E402
+from welt.processor import TextImageProcessor, collate_fn  # noqa: E402
+from welt_training.data_utils import pack_words  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -103,27 +104,57 @@ def test_packed_attention_matches_padded_attention(megatron, causal, lengths, kv
     torch.testing.assert_close(packed, torch.cat(expected), atol=2e-2, rtol=2e-2)
 
 
-def test_masked_attention_matches_sdpa(megatron):
+def packed_batch(processor, seq_length: int):
+    """Two packed examples of the oracle texts (the second with PAD words), their words and sequence lengths."""
+    packed = list(pack_words(map(processor.pretokenize, ORACLE_TEXTS * 20), seq_length))[:2]
+    examples = [processor.process_single_example(words, seq_lengths) for words, seq_lengths in packed]
+    return collate_fn(examples), packed
+
+
+def test_latent_mask_matches_an_oracle_of_the_words(megatron, processor):
+    from torch.nn.attention.flex_attention import create_mask
+
+    from welt.model import latent_block_mask
+
+    batch, packed = packed_batch(processor, seq_length=40)
+    block_mask = latent_block_mask(batch["sequence_ids"].cuda(), batch["block_ids"].cuda())._welt_block_mask
+    dense = create_mask(block_mask.mask_mod, len(packed), None, 40, 40, device="cuda")[:, 0].cpu()
+    for i, (words, seq_lengths) in enumerate(packed):
+        torch.testing.assert_close(dense[i], oracle_mask(words, seq_lengths))
+
+
+def test_masked_attention_matches_sdpa(megatron, processor):
+    """FlexAttention with the latent mask (its sparse blocks too) against SDPA with the oracle's dense mask."""
     from welt.model import MaskedAttention, latent_block_mask
 
     torch.manual_seed(0)
-    # Words: BOS <en> SO hello world SI <he> | BOS x | (batch padding), the second example without the shift block
-    sequence_ids = torch.tensor([[1, 1, 1, 1, 1, 1, 1, 2, 2, 0], [1, 1, 1, 1, 1, 1, 1, 2, 2, 0]], device="cuda")
-    block_ids = torch.tensor([[0, 0, 1, 1, 1, 1, 0, 0, 0, 0], [0] * 10], device="cuda")
-    q_index, k_index = torch.arange(10, device="cuda")[:, None], torch.arange(10, device="cuda")[None]
-    same_sequence = (sequence_ids[:, :, None] == sequence_ids[:, None]) & (sequence_ids[:, :, None] > 0)
-    same_block = (block_ids[:, :, None] == block_ids[:, None]) & (block_ids[:, :, None] > 0)
-    allowed = (same_sequence & ((k_index <= q_index) | same_block))[:, None]  # (B, 1, S, S)
-    allowed[:, :, -1, -1] = True  # SDPA has no fully masked rows: let batch padding attend to itself
-
-    seq, batch, heads, dim = 10, 2, 4, 16
-    query, key, value = (torch.randn(seq, batch, heads, dim, device="cuda", dtype=torch.bfloat16) for _ in range(3))
-    mask = latent_block_mask(sequence_ids, block_ids)
+    seq, heads, dim = 200, 4, 16  # Over one 128-word block
+    batch, packed = packed_batch(processor, seq_length=seq)
+    batch = {k: v.cuda() for k, v in batch.items()}
+    allowed = torch.stack([oracle_mask(words, lengths) for words, lengths in packed]).cuda()[:, None]
+    query, key, value = (torch.randn(seq, len(packed), heads, dim, device="cuda", dtype=torch.bfloat16)
+                         for _ in range(3))
+    mask = latent_block_mask(batch["sequence_ids"], batch["block_ids"])
     out = MaskedAttention(ATTENTION_CONFIG)(query, key, value, attention_mask=mask)
 
     q, k, v = (t.permute(1, 2, 0, 3) for t in (query, key, value))
     expected = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed).permute(2, 0, 1, 3).flatten(2)
-    torch.testing.assert_close(out[:-1], expected[:-1], atol=2e-2, rtol=2e-2)  # Without the batch padding word
+    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
+
+
+def test_packing_is_invisible(model, processor):
+    """Each text's per-byte losses are the same alone as packed with the others and with PAD words: sequences,
+    shift blocks and labels stay within their text."""
+    words = [processor.pretokenize(text) for text in ORACLE_TEXTS]
+    packed = processor.process_single_example(sum(words, []) + [PAD] * 3, [len(w) for w in words] + [1] * 3)
+    with torch.no_grad():
+        losses, _, labels = model(**{k: v.cuda() for k, v in collate_fn([packed]).items()})
+        packed_losses = (losses * (labels != 0)).sum(dim=-1)
+        alone = []
+        for text in ORACLE_TEXTS:
+            losses, _, labels = model(**{k: v.cuda() for k, v in processor([text]).items()})
+            alone.append((losses * (labels != 0)).sum(dim=-1))
+    torch.testing.assert_close(packed_losses, torch.cat(alone), atol=2e-2, rtol=2e-2)
 
 
 def test_checkpoint_shards_every_transformer(megatron, tiny_config):
