@@ -2,7 +2,6 @@ import math
 
 import pytest
 import torch
-from datasets import Dataset
 
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
@@ -45,9 +44,7 @@ def test_baseline_scores_the_bytes_welt_scores():
 
     tokenizer = AutoTokenizer.from_pretrained("EleutherAI/pythia-70m")
     texts = ["<en>\x0eHello world\x0f<he> שלום עולם", "no shift block here", "<a>\x0eb\x0f c"]
-    chunks = baseline.chunk_tokens({"text": texts}, tokenizer, length=5)
-    dataset = baseline.TokensDataset(Dataset.from_dict(chunks), baseline.token_byte_lengths(tokenizer), length=0)
-    examples = [dataset[i] for i in range(len(chunks["input_ids"]))]
+    examples = list(baseline.token_examples(texts, tokenizer, baseline.token_byte_lengths(tokenizer), length=4))
     labels = [token for example in examples for token in example["labels"][example["loss_mask"].bool()].tolist()]
     # The labels: each document (after the first, after its EOS) without the text of its shift block
     assert tokenizer.decode(labels) == tokenizer.eos_token.join(baseline.SHIFT_BLOCK.sub("\x0e", t) for t in texts)

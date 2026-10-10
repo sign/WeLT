@@ -14,7 +14,8 @@ def config(tmp_path):
             tmp_path / f"{split}.jsonl")
     path = tmp_path / "welt.yaml"
     path.write_text(yaml.safe_dump({"data": {
-        "train_file": str(tmp_path / "train.jsonl"), "validation_file": str(tmp_path / "validation.jsonl"),
+        "dataset_name": "json",
+        "data_files": {"train": str(tmp_path / "train.jsonl"), "validation": str(tmp_path / "validation.jsonl")},
         "dataset_text_template": ["{a} ", "{b}"], "seq_length": 8}}))
     return path
 
@@ -37,13 +38,15 @@ def test_evaluate_generates_completions_of_validation_prefixes(config, monkeypat
     json.dumps(results)  # Serializable
 
 
-def test_streaming_evaluation_stays_within_the_training_holdout(config, monkeypatch):
-    data = yaml.safe_load(config.read_text())["data"] | {"streaming": True, "max_train_samples": 5,
-                                                           "max_eval_samples": 2}
+def test_evaluation_stays_within_the_training_holdout(config, monkeypatch):
+    """Without a validation split, the first max_eval_samples train examples are held out from training."""
+    data = yaml.safe_load(config.read_text())["data"]
+    data |= {"data_files": {"train": data["data_files"]["train"]}, "max_eval_samples": 2}
     config.write_text(yaml.safe_dump({"data": data}))
     monkeypatch.setattr(evaluate, "generate", lambda url, texts, max_generated_words: {
         "outputs": texts, "generated_words": len(texts)})
-    assert evaluate.evaluate(str(config), "http://welt", max_samples=10)["samples"] == 2
+    results = evaluate.evaluate(str(config), "http://welt", max_samples=10)
+    assert [example["prefix"] for example in results["examples"]] == ["a0 ", "a1 "]
 
 
 def test_evaluate_requires_prefix_and_completion(config):

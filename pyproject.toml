@@ -75,8 +75,6 @@ welt-export = "welt.export:main"
 welt-serve = "welt.server:main"
 welt-generate = "welt.server:generate_main"
 welt-evaluate = "welt_training.evaluate:main"
-welt-prepare-data = "welt_training.prepare_data:main"
-welt-verify-data = "welt_training.verify_data:main"
 
 [project.entry-points."vllm.general_plugins"]
 welt = "welt.vllm_plugin:register"

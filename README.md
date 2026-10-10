@@ -71,8 +71,8 @@ pytest
 torchrun --nproc_per_node=1 -m welt_training.train welt_training/experiments/easy-tasks/string-repetition.yaml
 ```
 
-See [welt_training/README.md](welt_training/README.md) for config overrides, the config reference, data sources
-and preparation, parallelism, optimizers and the run directory.
+See [welt_training/README.md](welt_training/README.md) for config overrides, the config reference, data streaming,
+parallelism, optimizers and the run directory.
 
 Training and validation log `lm loss` (per byte), `bits per byte`, `byte accuracy` and `word accuracy`.
 Bits per byte count every byte prediction, including the end of each word (like a space in a causal LM), per UTF-8

@@ -13,17 +13,18 @@ Like WeLT, it does not predict (or score) the text of shift blocks (`\x0E...\x0F
 """
 import math
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from functools import partial
 
 import torch
-from datasets import Dataset
 from megatron.bridge import AutoBridge
 from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
+from megatron.core import parallel_state
 from transformers import AutoTokenizer
 
 from welt.model import safetensors_checkpoint, transformer_provider
-from welt_training.data_utils import TextDataConfig, dataset_lengths, load_text_datasets
+from welt_training.data_utils import TextDataConfig, build_iterators
 from welt_training.train import build_config, main, report, to_cuda
 
 
@@ -50,57 +51,46 @@ def token_byte_lengths(tokenizer) -> torch.Tensor:
 SHIFT_BLOCK = re.compile("\x0e[^\x0f]*\x0f")
 
 
-def chunk_tokens(batch: dict[str, list], tokenizer, length: int) -> dict[str, list]:
-    """Tokenize documents, concatenate them (each after an EOS), and split into chunks of `length` tokens.
-    Chunks overlap by one token, so that every token is a label exactly once; the last one is padded with EOS.
-    loss_mask is 0 for the padding, and for the tokens within shift blocks (after \x0E, up to \x0F)."""
-    encoded = tokenizer(batch["text"], add_special_tokens=False, return_offsets_mapping=True)
+def token_chunks(texts: Iterable[str], tokenizer, length: int) -> Iterator[tuple[list[int], list[int]]]:
+    """Tokenize texts, concatenate them (each after an EOS), and split into chunks of `length` tokens: (ids, loss
+    mask). Chunks overlap by one token, so that every token is a label exactly once; the last one is padded with EOS.
+    The loss mask is 0 for the padding, and for the tokens within shift blocks (after \x0E, up to \x0F)."""
     ids, mask = [], []
-    for text, document, offsets in zip(batch["text"], encoded.input_ids, encoded.offset_mapping, strict=True):
+    for text in texts:
+        encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
         blocks = [(match.start(), match.end()) for match in SHIFT_BLOCK.finditer(text)]
-        ids += [tokenizer.eos_token_id, *document]
+        ids += [tokenizer.eos_token_id, *encoded.input_ids]
         mask += [1, *(int(not any(start + 1 < end <= block_end for start, block_end in blocks))
-                      for _, end in offsets)]
-    padding = -(len(ids) - 1) % (length - 1)
-    ids, mask = ids + [tokenizer.eos_token_id] * padding, mask + [0] * padding
-    starts = range(0, len(ids) - 1, length - 1)
-    return {"input_ids": [ids[i:i + length] for i in starts], "loss_mask": [mask[i:i + length] for i in starts]}
+                      for _, end in encoded.offset_mapping)]
+        while len(ids) >= length:
+            yield ids[:length], mask[:length]
+            ids, mask = ids[length - 1:], mask[length - 1:]
+    if len(ids) > 1:
+        padding = length - len(ids)
+        yield ids + [tokenizer.eos_token_id] * padding, mask + [0] * padding
 
 
-class TokensDataset(torch.utils.data.Dataset):
-    """Token chunks as inputs, labels, their loss mask, and the UTF-8 bytes of each (scored) label.
-    Repeats the examples up to length."""
-
-    def __init__(self, dataset: Dataset, byte_lengths: torch.Tensor, length: int):
-        self.dataset = dataset
-        self.byte_lengths = byte_lengths
-        self.length = length
-
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, index):
-        example = self.dataset[int(index) % len(self.dataset)]
-        ids, loss_mask = torch.tensor(example["input_ids"]), torch.tensor(example["loss_mask"][1:])
-        return {"input_ids": ids[:-1], "labels": ids[1:], "loss_mask": loss_mask,
-                "label_bytes": self.byte_lengths[ids[1:]] * loss_mask}
+def token_examples(texts: Iterable[str], tokenizer, byte_lengths: torch.Tensor, length: int) -> Iterator[dict]:
+    """Token chunks of length + 1 as inputs, labels, their loss mask, and the UTF-8 bytes of each (scored) label."""
+    for ids, loss_mask in token_chunks(texts, tokenizer, length + 1):
+        ids, loss_mask = torch.tensor(ids), torch.tensor(loss_mask[1:])
+        yield {"input_ids": ids[:-1], "labels": ids[1:], "loss_mask": loss_mask,
+               "label_bytes": byte_lengths[ids[1:]] * loss_mask}
 
 
 @dataclass(kw_only=True)
 class TokensDatasetProvider(TextDataConfig, DatasetProvider):
     tokenizer_name: str
+    dataloader_type: str = "external"  # Iterators of micro batches (build_iterators)
 
     def build_datasets(self, context: DatasetBuildContext):
         tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name, trust_remote_code=self.trust_remote_code)
-        byte_lengths = token_byte_lengths(tokenizer)
-        texts = load_text_datasets(self)
-        datasets = {split: texts[split].map(chunk_tokens, batched=True, remove_columns=["text"],
-                                            fn_kwargs={"tokenizer": tokenizer, "length": self.seq_length + 1},
-                                            num_proc=self.preprocessing_num_workers, desc=f"Tokenizing {split}")
-                    for split in texts}
-        lengths = dataset_lengths(datasets, context, self.samples_per_eval)
-        return (*(TokensDataset(datasets[split], byte_lengths, lengths[split]) if split in datasets else None
-                  for split in ("train", "validation")), None)
+        make_examples = partial(token_examples, tokenizer=tokenizer, byte_lengths=token_byte_lengths(tokenizer),
+                                length=self.seq_length)
+        train, validation = build_iterators(self, make_examples, torch.utils.data.default_collate,
+                                            rank=parallel_state.get_data_parallel_rank(),
+                                            world_size=parallel_state.get_data_parallel_world_size())
+        return train, validation, None
 
 
 def loss_func(losses: torch.Tensor, loss_mask: torch.Tensor, label_bytes: torch.Tensor):
