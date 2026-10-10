@@ -5,8 +5,7 @@ import torch
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
 from tests.conftest import build_model  # noqa: E402
-from welt.collator import collate_fn  # noqa: E402
-from welt.processor import TextImageProcessor  # noqa: E402
+from welt.processor import TextImageProcessor, collate_fn  # noqa: E402
 from welt_training.data_utils import pack_words  # noqa: E402
 
 TRAIN_TEXTS = ["a b", "b a", "a cat", "a dog"]

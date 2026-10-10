@@ -130,8 +130,7 @@ A training step is 9.7x faster than with the HuggingFace Trainer implementation,
 
 ## Contributing
 
-See [open issues](https://github.com/search?q=repo%3Asign%2FWeLT+%22%2Fissues%2F%22&type=code)
-and [TODOs](https://github.com/search?q=repo%3Asign%2FWeLT%20TODO&type=code) in the codebase.
+See [open issues](https://github.com/sign/WeLT/issues).
 
 - [`sign/words-segmentation`](https://github.com/sign/words-segmentation) as a universal word level pretokenizer.
 - [`sign/utf8-tokenizer`](https://github.com/sign/utf8-tokenizer) as a robust byte-level tokenizer.

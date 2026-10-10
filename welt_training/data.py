@@ -5,8 +5,7 @@ from dataclasses import dataclass
 from megatron.bridge.training.config import DatasetBuildContext, DatasetProvider
 from megatron.core import parallel_state
 
-from welt.collator import collate_fn
-from welt.processor import TextImageProcessor
+from welt.processor import TextImageProcessor, collate_fn
 from welt_training.data_utils import TextDataConfig, build_iterators, pack_words
 
 

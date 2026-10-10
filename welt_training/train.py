@@ -25,9 +25,9 @@ from megatron.bridge.training.config import (
     TrainingConfig,
     ValidationConfig,
 )
+from megatron.bridge.training.losses import masked_next_token_loss
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.core.rerun_state_machine import get_rerun_state_machine
 from utf8_tokenizer.tokenizer import UTF8Tokenizer
 
 from welt.model import WeLTModelProvider
@@ -114,18 +114,12 @@ def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor)
     eos = labels == TOKENIZER.eos_token_id
     document_end = torch.zeros_like(eos)
     document_end[:, 0] = eos[:, 0]  # A word whose first label byte is EOS is empty: the end of a document
-    losses = losses.float()
-
-    loss = (losses * loss_mask).sum()
-    num_tokens = loss_mask.sum().int()
-    get_rerun_state_machine().validate_result(result=loss, rejection_func=torch.isnan,
-                                              message="found NaN in local forward loss calculation",
-                                              tolerance=0.0, fatal=True)
+    losses = losses.float().contiguous()  # The model's per-byte losses are a slice, Megatron's loss views them
+    loss, num_tokens, metrics = masked_next_token_loss(loss_mask, losses)  # With NaN / Inf checks
 
     words = loss_mask.any(dim=-1)
     words_correct = (correct | ~loss_mask).all(dim=-1) & words
-    return loss, num_tokens, {
-        "lm loss": report(loss, num_tokens),
+    return loss, num_tokens, metrics | {
         "bits per byte": report((losses * (loss_mask & ~document_end)).sum() / math.log(2), (loss_mask & ~eos).sum()),
         "byte accuracy": report((correct & loss_mask).sum(), num_tokens),
         "word accuracy": report(words_correct.sum(), words.sum()),

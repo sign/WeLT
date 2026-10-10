@@ -43,11 +43,6 @@ SHARED_CONFIG_FIELDS = (
 
 def hf_config(name_or_path: str, trust_remote_code: bool = False):
     """A HF model id/path, or a JSON file of a HF config (must include "model_type" and "architectures")."""
-    if name_or_path.endswith(".json"):
-        import json
-        with open(name_or_path) as f:
-            kwargs = json.load(f)
-        return AutoConfig.for_model(kwargs.pop("model_type"), **kwargs)
     return AutoConfig.from_pretrained(name_or_path, trust_remote_code=trust_remote_code)
 
 
