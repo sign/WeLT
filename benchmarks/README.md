@@ -71,7 +71,7 @@ transformers, which GB10's bandwidth limits.
 ### Multiple GPUs
 
 [`parity.sh`](parity.sh) trains the machine translation config for 200 steps on the same global batches
-(64 examples, micro batch 32, modality dropout off), on 2 H100s (on Modal, 16 CPUs):
+(64 examples, micro batch 32), on 2 H100s (on Modal, 16 CPUs):
 
 | Parallelism | ms / step | Val. loss after 200 steps |
 |-------------|----------:|--------------------------:|
@@ -102,8 +102,8 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **letter-count**: count the letters of a word | 3000 | 64 | 3.2 min | 0.0001 | 100% | 100% | 100 | 1378 |
 | **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 189 | 31 min | 0.544 | 67.6% | 9.0% | 45.4 | 509 |
 | **machine-translation**, bytes encoder only | 10000 | 170 | 28 min | 0.537 | 68.0% | 9.0% | 46.5 | 616 |
-| **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 5940 (10 epochs) | 142 | 14 min | 0.953 | 67.8% | 0.0% | 5.1 | 471 |
-| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 5940 (10 epochs) | 262 | 26 min | 1.282 | 62.7% | 1.6% | 9.6 | 384 |
+| **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 10000 | 222 | 37 min | 1.303 | 63.7% | 2.0% | 9.2 | 306 |
+| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 10000 | 264 | 44 min | 1.304 | 63.8% | 2.3% | 11.9 | 454 |
 
 All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
 examples, with vLLM (batched over all examples). Reproduce a row with e.g.
@@ -114,17 +114,29 @@ Compared to the same tasks trained with Adam (before the review fixes), Muon imp
 80.5% to 88.3% exact match, machine translation from 0.626 to 0.542 bits per byte (chrF 41.0 to 46.2), at 10-30%
 more time per step (its orthogonalization).
 
-SignWriting to text is far from solved at this scale: both models generate fluent words of the target language,
-but rarely the right one (see the examples below; vLLM matches the trained Megatron models on these prompts).
-The image encoder (over SignWriting rendered by pixel-renderer, from scratch) did not help: its bits per byte are
-worse than with bytes only. Signs are whole words since words-segmentation 0.0.6; an earlier bytes-only run, on
-signs split into fragments, reached chrF 19.5, a hint that symbol-level inputs may suit a small model better.
+SignWriting to text is far from solved at this scale: the models generate fluent words of the target language,
+but rarely the right one (see the examples below; vLLM matches the trained Megatron models on these prompts). The
+dataset is small (57k packed examples): every configuration's validation loss is best at ~6000 steps (10 epochs) and
+then overfits. Dropout in the latent transformer (`hidden_dropout: 0.1`) slows this, and improves the best
+validation bits per byte from 1.228 to 1.204 with both encoders (from 1.272 to 1.253 with bytes only).
 
-Neither does it help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
-reaches 0.537 bits per byte and chrF 46.5 (vs. 0.544 and 45.4 with it), 10% faster per step. The image encoder
-packs each batch's patches (no padding to the largest image) and embeds patch rows and columns: before, padding
-signs (28 patches on average) to the batch's largest (~105) copied 425 MB per batch to the GPU and made a
-SignWriting step 404 ms; packed, 41 MB and 262 ms.
+The image encoder (over SignWriting rendered by pixel-renderer, from scratch) helps a little: at their best
+(step 6000) both encoders reach 1.204 bits per byte vs. 1.253 with bytes only, and the image encoder alone is about as
+good as bytes alone (1.285 vs. 1.272, without latent dropout). By the last step, both have overfitted to the same
+1.30. Generation, on 256 examples, is too noisy to rank these (chrF moves by up to 5 between checkpoints).
+Modality dropout (training with one encoder's embeddings dropped at random) was removed: with zeros and rescaling, or
+a learned embedding standing in for the dropped encoder, it was worse than none (1.25 vs. 1.23 bits per byte, and
+under half the exact matches).
+
+An earlier comparison (bytes only 0.953 bits per byte, better than with images) was wrong: configs without images read
+signs split into fragments by words-segmentation 0.0.5 from the datasets cache, which did not invalidate on the
+upgrade to 0.0.6 (its version is now part of the cache fingerprint).
+
+Images do not help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
+reaches 0.537 bits per byte and chrF 46.5 (vs. 0.544 and 45.4 with it, trained with modality dropout), 10% faster
+per step. The image encoder packs each batch's patches (no padding to the largest image) and embeds patch rows and
+columns: before, padding signs (28 patches on average) to the batch's largest (~105) copied 425 MB per batch to the
+GPU and made a SignWriting step 404 ms; packed, 41 MB and 262 ms.
 
 Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
 transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine
@@ -193,18 +205,18 @@ The first 5 validation examples of each task (`␎` and `␏` stand for the shif
 
 | Input | Expected | Generated |
 |---|---|---|
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `llegar de la cabeza` |
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `llegar de la cabeza` |
-| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Para frente para baixo - pare` |
-| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `cl` |
-| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `Para baixo do circular` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `conocer` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `conocer` |
+| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Aluna do curso de Letras Libras da Universidade Federal de Juiz de Fora` |
+| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `alma` |
+| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `-S2` |
 
 **signed-to-spoken, bytes + image**
 
 | Input | Expected | Generated |
 |---|---|---|
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `carretera` |
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `carretera` |
-| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `conseguir` |
-| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `contra` |
-| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `C` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `color` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `color` |
+| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Tatiane Felix de Almeida Santos` |
+| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `acertar` |
+| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `CM-5` |

@@ -45,23 +45,17 @@ def text_losses(model, processor, texts: list[str]) -> dict[str, float]:
     return results
 
 
-@pytest.fixture(scope="module", params=["packed", "unpacked"])
-def trained(request, megatron, tiny_config):
-    torch.manual_seed(1)  # The checks are margins of a tiny overfit model: seeds 1-3 pass, seed 0 is borderline
-    model = build_model(tiny_config).float()  # With the default modality dropout
-    processor = TextImageProcessor.create(max_word_length=16, render_images=True)
-    train(model, processor, packed=request.param == "packed")
-    return model, processor
-
-
-@pytest.fixture(params=["full_model", "no_bytes_encoder", "no_image_encoder"])
-def configured(request, trained, monkeypatch):
-    """Drops a modality like modality dropout does: its embeddings are replaced by its learned missing embedding."""
-    model, processor = trained
-    drop = {"full_model": None, "no_bytes_encoder": [False, True], "no_image_encoder": [True, False]}[request.param]
-    monkeypatch.setattr(model, "_modality_drop", lambda num, words, device: None if drop is None else
-                        torch.tensor(drop, device=device)[:, None, None].expand(num, words, 1))
-    return model, processor, request.param
+# (packing, encoders): both encoders, packed and not, and each encoder alone
+@pytest.fixture(scope="module", params=[("packed", "full_model"), ("unpacked", "full_model"),
+                                        ("packed", "no_bytes_encoder"), ("packed", "no_image_encoder")])
+def configured(request, megatron, tiny_config):
+    packing, name = request.param
+    torch.manual_seed(1)  # The checks are margins of a tiny overfit model
+    model = build_model(tiny_config, image_encoder=name != "no_image_encoder",
+                        bytes_encoder=name != "no_bytes_encoder").float()
+    processor = TextImageProcessor.create(max_word_length=16, render_images=name != "no_image_encoder")
+    train(model, processor, packed=packing == "packed")
+    return model, processor, name
 
 
 def test_character_level_conditioning(configured):
