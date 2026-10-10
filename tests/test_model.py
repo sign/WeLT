@@ -82,20 +82,6 @@ def test_backward_reaches_all_parameters(model, processor):
         model.eval()
 
 
-
-def test_modality_drop(model, monkeypatch):
-    """Training drops modalities per word, keeping at least one of each word's; evaluation drops none."""
-    monkeypatch.setattr(model.config, "modality_dropout", 0.5)
-    assert model._modality_drop(2, 1000, "cuda") is None  # Evaluation mode
-    model.train()
-    try:
-        drop = model._modality_drop(2, 1000, "cuda")
-    finally:
-        model.eval()
-    assert drop.shape == (2, 1000, 1)
-    assert not drop.all(dim=0).any()
-    assert 0.25 < drop.float().mean() < 0.45  # 0.5 per modality, less the words that keep one
-
 ATTENTION_CONFIG = SimpleNamespace(softmax_scale=None, attention_dropout=0.0)
 
 

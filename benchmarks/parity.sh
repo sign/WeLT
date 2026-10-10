@@ -5,7 +5,7 @@
 out=${1:-./output/parity}
 common="welt_training/experiments/machine-translation/machine-translation.yaml train.train_iters=200
   train.micro_batch_size=32 train.global_batch_size=64 validation.eval_interval=100 validation.eval_iters=2
-  checkpoint.save_interval=200 logger.wandb_project=null logger.log_interval=20 model.modality_dropout=0.0
+  checkpoint.save_interval=200 logger.wandb_project=null logger.log_interval=20
   data.max_train_samples=100000"
 mkdir -p "$out"
 CUDA_VISIBLE_DEVICES=0 torchrun --nproc_per_node=1 -m welt_training.train $common output_dir=$out/gpu1 > $out/gpu1.log 2>&1

@@ -117,7 +117,6 @@ class WeLTModelProvider(GPTModelProvider):
 
     num_tokens: int = 256
     pad_token_id: int = 0
-    modality_dropout: float = 0.15
 
     @classmethod
     def from_hf(cls, latent_transformer: str, bytes_decoder: str,
@@ -399,25 +398,12 @@ class WeLTModel(MegatronModule):
         encoders = [e for e in (self.image_encoder, self.bytes_encoder) if e is not None]
         encoder_dim = sum(e.hidden_size for e in encoders)
         self.encoder_mapping = nn.Linear(encoder_dim, config.hidden_size)
-        # Each modality's learned stand-in for its dropped embeddings, only when dropping (unused parameters break DDP)
-        dropping = len(encoders) > 1 and config.modality_dropout > 0
-        self.missing_embeddings = nn.ParameterList(nn.Parameter(torch.randn(e.hidden_size) * 0.02) for e in encoders
-                                                   if dropping)
         self.encoder_norm = nn.RMSNorm(config.hidden_size, eps=1e-6)
         self.decoder_mapping = nn.Linear(config.hidden_size, decoder_config.hidden_size)
         self.decoder_norm = nn.RMSNorm(decoder_config.hidden_size, eps=1e-6)
 
     def set_input_tensor(self, input_tensor):
         pass  # No pipeline parallelism
-
-    def _modality_drop(self, num_modalities: int, num_words: int, device) -> torch.Tensor | None:
-        """(modalities, words, 1) mask of the modalities dropped for each word during training, or None."""
-        if not (self.training and self.missing_embeddings):
-            return None
-        drop = torch.rand(num_modalities, num_words, 1, device=device) < self.config.modality_dropout
-        # Words that dropped all modalities keep one at random
-        keep = F.one_hot(torch.randint(num_modalities, (num_words,), device=device), num_modalities).T[..., None]
-        return drop & ~(drop.all(dim=0) & keep.bool())
 
     def encode_words(self,
                      input_ids: torch.Tensor,
@@ -453,11 +439,6 @@ class WeLTModel(MegatronModule):
         if self.bytes_encoder is not None:
             embeds.append(self.bytes_encoder(input_ids[rows], words_mask[rows]))
 
-        # Dropped modalities are replaced (not zeroed and rescaled, as they are concatenated) by learned embeddings
-        drop = self._modality_drop(len(embeds), len(rows), input_ids.device)
-        if drop is not None:
-            embeds = [torch.where(d, m.to(e.dtype), e) for e, d, m in zip(embeds, drop, self.missing_embeddings,
-                                                                          strict=True)]
         embeds = torch.cat(embeds, dim=-1)
         word_embeds = embeds.new_zeros(B * L, embeds.size(-1))
         word_embeds[valid] = embeds[inverse]
