@@ -360,12 +360,12 @@ class WeLTModel(MegatronModule):
                                rotary_pos_emb=model.rotary_pos_emb(word_embeds.size(1)))
         return self.decoder_norm(self.decoder_mapping(hidden.transpose(0, 1)))
 
-    def decode(self, latents: torch.Tensor, labels_input: torch.Tensor, labels_mask: torch.Tensor):
-        """Parallel causal decoding, each word's bytes conditioned on its latent vector.
-        (N, H) latents, (N, T) input bytes and mask -> (num_valid, vocab) logits and (N, 1 + T) valid mask,
-        where the logits at each latent position are a prediction of the first input byte (which is BOS)."""
-        embeds = torch.cat([latents[:, None], self.bytes_decoder_embedding(labels_input)], dim=1)
-        mask = F.pad(labels_mask.bool(), (1, 0), value=True)
+    def decode(self, latents: torch.Tensor, targets: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Parallel causal decoding of each word's bytes from its latent vector, which takes the place of BOS.
+        (N, H) latents, (N, T) targets (each word's bytes and EOS, right padded) -> (targets, vocab) logits, packed,
+        and the (N, T) mask of targets."""
+        mask = targets != PAD_TOKEN_ID
+        embeds = torch.cat([latents[:, None], self.bytes_decoder_embedding(targets[:, :-1])], dim=1)
         hidden = run_packed_transformer(self.bytes_decoder, embeds[mask], mask.sum(dim=-1), mask.size(1), causal=True)
         logits, _ = self.bytes_decoder.output_layer(hidden)
         return logits[:, 0], mask
@@ -387,26 +387,21 @@ class WeLTModel(MegatronModule):
             input_patches_shape: (B, L, 2) rows and columns of patches of each word
 
         Returns:
-            (N, T - 1) per-byte losses, per-byte correctness, and labels (the next words without BOS), for the N words
-            with labels
+            (N, T - 1) per-byte losses, per-byte correctness, and targets (the next words' bytes and EOS), for the N
+            words with labels
         """
         word_embeds = self.encode_words(input_ids, input_patches, input_patches_shape)
         latents = self.latent(word_embeds, sequence_ids, block_ids)
 
         # Only decode words that have a label
-        labels = next_word_labels(input_ids, sequence_ids, label_mask)[label_mask]
-        latents = latents[label_mask]
-        labels_input, labels_output = labels[:, :-1], labels[:, 1:]  # The decoder reads BOS..., predicts ...EOS
-
-        logits, mask = self.decode(latents, labels_input, labels_input != PAD_TOKEN_ID)
-        # Position t (input byte t-1, or the latent for t=0) predicts output byte t-1
-        targets = F.pad(labels_output, (1, 0), value=PAD_TOKEN_ID)
+        targets = next_word_labels(input_ids, sequence_ids, label_mask)[label_mask][:, 1:]  # Without BOS
+        logits, mask = self.decode(latents[label_mask], targets)
         packed_targets = targets[mask]
         # (S, B, V) logits and (B, S) labels
         packed_losses = self.bytes_decoder.compute_language_model_loss(packed_targets[None], logits[:, None])[0]
 
         losses = torch.zeros_like(targets, dtype=packed_losses.dtype)
         losses[mask] = packed_losses
-        correct = torch.zeros_like(targets, dtype=torch.bool)
+        correct = torch.zeros_like(mask)
         correct[mask] = logits.detach().argmax(dim=-1) == packed_targets
-        return losses[:, 1:], correct[:, 1:], labels_output
+        return losses, correct, targets
