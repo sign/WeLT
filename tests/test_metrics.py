@@ -5,11 +5,13 @@ import torch
 
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
+from utf8_tokenizer.tokenizer import EOS_TOKEN_ID, PAD_TOKEN_ID  # noqa: E402
+
 from welt_training import baseline, train  # noqa: E402
 
 
 def test_welt_loss_func_metrics():
-    pad, eos = train.TOKENIZER.pad_token_id, train.TOKENIZER.eos_token_id
+    pad, eos = PAD_TOKEN_ID, EOS_TOKEN_ID
     # Words "ab", "c", then the end of the document (an empty word)
     labels = torch.tensor([[97, 98, eos, pad], [99, eos, pad, pad], [eos, pad, pad, pad]])
     losses = torch.tensor([[1.0, 2.0, 3.0, 9.0], [4.0, 5.0, 9.0, 9.0], [6.0, 9.0, 9.0, 9.0]])
@@ -54,9 +56,9 @@ def test_baseline_scores_the_bytes_welt_scores():
     for text in texts:
         words = processor.pretokenize(text)
         example = processor.process_single_example(words, [len(words)])
-        labels = next_word_labels(*(example[k][None] for k in ("input_ids", "sequence_ids", "label_mask")),
-                                  bos=2, eos=3, pad=0)[:, :, 1:]  # Without BOS
-        welt_bytes += int(((labels != train.TOKENIZER.pad_token_id) & (labels != train.TOKENIZER.eos_token_id)).sum())
+        inputs = (example[k][None] for k in ("input_ids", "sequence_ids", "label_mask"))
+        labels = next_word_labels(*inputs)[:, :, 1:]  # Without BOS
+        welt_bytes += int(((labels != PAD_TOKEN_ID) & (labels != EOS_TOKEN_ID)).sum())
     assert baseline_bytes == welt_bytes == sum(len(baseline.SHIFT_BLOCK.sub("\x0e", t).encode()) for t in texts)
 
 

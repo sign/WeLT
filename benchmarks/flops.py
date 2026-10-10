@@ -10,8 +10,10 @@ Per transformer: 6 * matmul params * tokens (forward + backward), plus attention
 import argparse
 from itertools import islice
 
-from welt.model import hf_config
-from welt.processor import next_word_labels
+from transformers import AutoConfig
+from utf8_tokenizer.tokenizer import PAD_TOKEN_ID
+
+from welt.processor import collate_fn, next_word_labels
 from welt_training.data_utils import pack_words, train_texts
 from welt_training.extendable_yaml import load_yaml
 from welt_training.train import build_dataset_provider
@@ -44,23 +46,21 @@ def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
     train_config = config.get("train") or {}
     micro_batch = train_config.get("micro_batch_size", 32)
     global_batch = train_config.get("global_batch_size", micro_batch)
-    configs = {name: hf_config(model[name], model.get("trust_remote_code", False)) for name in
-               ["bytes_encoder", "image_encoder", "latent_transformer", "bytes_decoder"] if model.get(name)}
+    configs = {name: AutoConfig.from_pretrained(model[name], trust_remote_code=model.get("trust_remote_code", False))
+               for name in ["bytes_encoder", "image_encoder", "latent_transformer", "bytes_decoder"] if model.get(name)}
 
     totals = {"model": 0.0, "hardware": 0.0}
     for _ in range(batches):
-        batch = list(islice(examples, micro_batch))
-        words = [(tuple(ids[:n].tolist()), n, int(p)) for e in batch
-                 for ids, n, p in zip(e["input_ids"], (e["input_ids"] != 0).sum(-1).tolist(),
-                                      e["input_patches_shape"].prod(-1).tolist() if "input_patches_shape" in e
-                                      else (e["input_ids"] != 0).sum(-1).tolist(),
-                                      strict=True) if n > 0]
-        common = transformer_flops(configs["latent_transformer"], [len(e["input_ids"]) for e in batch])
+        batch = collate_fn(list(islice(examples, micro_batch)))
+        ids, label_mask = batch["input_ids"], batch["label_mask"]
+        valid = ids[..., 0] != PAD_TOKEN_ID  # Words have BOS, as in WeLTModel.encode_words
+        lengths = (ids != PAD_TOKEN_ID).sum(-1)[valid].tolist()
+        patches = batch["input_patches_shape"].prod(-1)[valid].tolist() if "input_patches_shape" in batch else lengths
+        words = list(zip(map(tuple, ids[valid].tolist()), lengths, patches, strict=True))
+        common = transformer_flops(configs["latent_transformer"], [ids.size(1)] * len(ids))
         # The bytes decoder runs on each label's latent and its bytes but the last (BOS, ..., without EOS)
-        labels = [next_word_labels(*(e[k][None] for k in ("input_ids", "sequence_ids", "label_mask")),
-                                   bos=2, eos=3, pad=0)[0][e["label_mask"]] for e in batch]
-        decoded = [1 + n for label in labels for n in (label[:, :-1] != 0).sum(-1).tolist()]
-        common += transformer_flops(configs["bytes_decoder"], decoded)
+        labels = next_word_labels(ids, batch["sequence_ids"], label_mask)[label_mask]
+        common += transformer_flops(configs["bytes_decoder"], (1 + (labels[:, :-1] != PAD_TOKEN_ID).sum(-1)).tolist())
         for kind, encoded in [("model", words), ("hardware", list(dict.fromkeys(words)))]:
             flops = common
             if "bytes_encoder" in configs:
