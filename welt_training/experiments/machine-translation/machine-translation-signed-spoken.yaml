@@ -5,7 +5,7 @@ model:
   bytes_encoder: sign/utf8-lm-tiny
   latent_transformer: welt_training/experiments/models/latent-70m.json
   bytes_decoder: sbintuitions/tiny-lm
-  hidden_dropout: 0.1  # In the latent transformer: the small dataset overfits after ~10 epochs
+  hidden_dropout: 0.2  # In the latent transformer: the small dataset overfits after ~10 epochs
 
 data:
   dataset_name: sign/signbank-plus
