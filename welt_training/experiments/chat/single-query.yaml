@@ -8,8 +8,6 @@ model:
 
 data:
   dataset_name: PleIAs/SYNTH
-  streaming: true  # dataset is large
-  max_train_samples: 1000000
   max_eval_samples: 64
   dataset_text_template:  # Following the chat format from the "Back to bytes" paper
     - "\x01user\x0E{query}\x0F\x17"

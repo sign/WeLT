@@ -74,8 +74,11 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
     model_provider.seq_length = dataset_provider.seq_length
     model_provider.calculate_per_token_loss = True
     model_provider.bf16 = optimizer.bf16
-    dataset_provider.samples_per_eval = validation.eval_iters * (validation.eval_global_batch_size
-                                                                 or train.global_batch_size)
+    # The data iterators make micro batches: per evaluation, each (data parallel) rank draws eval_iters global batches
+    data_parallel_size = int(os.environ.get("WORLD_SIZE", 1))
+    dataset_provider.micro_batch_size = train.micro_batch_size
+    dataset_provider.eval_micro_batches = validation.eval_iters * (
+        (validation.eval_global_batch_size or train.global_batch_size) // (train.micro_batch_size * data_parallel_size))
 
     return ConfigContainer(
         model=model_provider,

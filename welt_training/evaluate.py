@@ -11,21 +11,18 @@ import time
 from sacrebleu.metrics import CHRF
 
 from welt.server import generate
-from welt_training.data_utils import TextDataConfig, load_raw_datasets
+from welt_training.data_utils import TextDataConfig
 from welt_training.extendable_yaml import load_yaml
 
 
 def evaluate(config_path: str, url: str, max_samples: int = 256, max_generated_words: int = 64) -> dict:
     config = load_yaml(config_path)
-    data = {k: v for k, v in config["data"].items() if k in TextDataConfig.__dataclass_fields__}
-    if data.get("streaming"):  # Without a validation split, the first max_eval_samples are held out from training
-        max_samples = min(max_samples, data["max_eval_samples"])
-    data = TextDataConfig(**{**data, "max_eval_samples": max_samples, "max_train_samples": 1})
+    data = TextDataConfig(**{k: v for k, v in config["data"].items() if k in TextDataConfig.__dataclass_fields__})
     if not isinstance(data.dataset_text_template, list) or len(data.dataset_text_template) != 2:
         raise ValueError("Generation evaluation needs data.dataset_text_template as [prefix, completion]")
     prefix_template, completion_template = data.dataset_text_template
-    validation = load_raw_datasets(data)["validation"]
-    validation = validation.select(range(min(max_samples, len(validation))))
+    # Within the validation texts (without a validation split, held out from training)
+    validation = list(data.examples("validation").take(max_samples))
     prefixes = [prefix_template.format(**example) for example in validation]
     references = [completion_template.format(**example) for example in validation]
 

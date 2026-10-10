@@ -62,56 +62,28 @@ For the image encoder (described in the [README](../README.md#model-setup)), see
 ### Data
 
 The `data` section configures the `WeLTDatasetProvider` ([`data.py`](data.py), [`data_utils.py`](data_utils.py)).
-Texts come from one of:
-- a HF dataset: `dataset_name`, `dataset_config_name`. Large datasets can be `streaming: true`, which materializes
-  the first `max_train_samples` and `max_eval_samples` examples (both required).
-- local files: `train_file`, `validation_file` (`.txt`, `.json`, `.csv`, ...).
-- shards made by `welt-prepare-data`: `prepared_data_path` (see [Data Preparation](#data-preparation)).
-
-Without a validation split, `validation_split_percentage` (default 5) of train is held out (when streaming, the first
-`max_eval_samples` examples of train).
+Texts are streamed from a HF dataset (`dataset_name`, `dataset_config_name`), or from local files with
+`dataset_name: json` (or `text`, `csv`, ...) and `data_files` (a path, or `{train: ..., validation: ...}`).
+Validation is the first `max_eval_samples` (default 256) examples of the validation split, or, without one, held out
+from the start of the train split.
 
 `dataset_text_template` is a Python format string over the dataset's columns; without it, the `text` column is used
 (a missing `text` column raises). As `[prefix, completion]`, both parts are concatenated for training, and
-`welt-evaluate` generates the completion from the prefix. `max_train_samples` / `max_eval_samples` cap the number of
-texts per split.
+`welt-evaluate` generates the completion from the prefix.
 
-Texts are prefixed with BOS, split into words, and packed in order into examples of exactly `seq_length` words:
-longer texts are split into `seq_length`-word chunks, each its own sequence, and the rest is padded.
+Training streams endlessly (epochs reshuffle, with a `shuffle_buffer_size` buffer and `seed`), split across data
+parallel ranks, and in each rank across the dataloader workers (`num_workers`), which make the examples on the fly:
+texts are prefixed with BOS, split into words, and packed in order into examples of exactly `seq_length` words.
+Longer texts are split into `seq_length`-word chunks, each its own sequence, and the rest is padded.
 With the default pretokenizer, words longer than `max_word_length - 2` bytes are split.
 Within the model, the bytes of all words (and the patches of rendered words) are packed without padding, so the
-encoders and the bytes decoder only compute on real bytes.
-Dataloader options (`num_workers`, `pin_memory`, ...) and `preprocessing_num_workers` also go in `data`.
-
-#### Data Preparation
-
-For large-scale training, `welt-prepare-data` streams a HuggingFace dataset (shuffled), chunks documents into
-examples of words, and writes sharded `.jsonl.gz` files; several datasets can share one directory.
-Match the training config: `--max_seq_length` is `data.seq_length - 1` (training adds a BOS word), and
-`--max_bytes_per_word` is `data.max_word_length - 2`.
-
-```shell
-welt-prepare-data \
-    --dataset_name HuggingFaceFW/fineweb --dataset_config sample-10BT --language eng_Latn \
-    --train_split_units 3200000000 --validation_split_units 100000000 --num_units_per_file 100000000 \
-    --max_seq_length 511 --max_bytes_per_word 30 \
-    --output_path /scratch/data/pretrain
-welt-verify-data --data_path /scratch/data/pretrain
-torchrun --nproc_per_node=8 -m welt_training.train welt_training/experiments/pretrain/pile-pretrain-70m-no-image.yaml
-```
-
-This writes `{dataset}-{config}-{split}-{index}.jsonl.gz` shards and a `{dataset}-{config}-{split}-metadata.json`
-per split. Units are words (or `--unit_type chars`); validation is filled first, then train.
-`welt-verify-data` checks shard and example counts against the metadata, and warns when train and validation of the
-same source were prepared separately (risking overlap). See `welt-prepare-data --help` for all options
-(`--text_column`, `--text_template`, `--id_column`, `--drop_remainder`, `--seed`, ...).
+encoders and the bytes decoder only compute on real bytes. Resuming from a checkpoint restarts the stream.
 
 ### Validation
 
-Each evaluation draws `validation.eval_iters × train.global_batch_size` packed examples. When that is at least the
-number of packed validation examples, every evaluation covers the whole validation set (examples repeat to fill
-the batches); otherwise only part of it is, and a warning is logged. Use `max_eval_samples` to keep
-the validation set small, and raise `eval_iters` to cover it.
+Each evaluation draws `validation.eval_iters` global batches. The validation examples (split across ranks) are
+repeated to fill them, the same ones at every evaluation; if they do not fit, evaluations see only the first ones, and
+a warning is logged: raise `eval_iters` to cover them.
 
 ## Parallelism
 
@@ -143,6 +115,6 @@ Where things are:
 - [`welt/model.py`](../welt/model.py): the architecture.
 - [`welt/processor.py`](../welt/processor.py): words to bytes, patches and labels, including shift-block masking.
 - [`train.py`](train.py): config defaults, loss and metrics.
-- [`data_utils.py`](data_utils.py): loading and packing.
+- [`data_utils.py`](data_utils.py): streaming and packing.
 - [`welt/inference.py`](../welt/inference.py) and [`welt/server.py`](../welt/server.py): generation and serving.
 - [`benchmarks/run_task.sh`](../benchmarks/run_task.sh): train, export, serve and evaluate a config.
