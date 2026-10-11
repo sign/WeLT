@@ -114,7 +114,7 @@ under half the exact matches).
 
 An earlier comparison (bytes only 0.953 bits per byte, better than with images) was wrong: configs without images read
 signs split into fragments by words-segmentation 0.0.5 from the datasets cache, which did not invalidate on the
-upgrade to 0.0.6 (its version is now part of the cache fingerprint).
+upgrade to 0.0.6 (data is now streamed and split into words on the fly, without a cache).
 
 Images do not help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
 reaches 0.537 bits per byte and chrF 46.5 (vs. 0.547 and 45.4 with it), 14% faster
@@ -130,6 +130,21 @@ The causal LM [baseline](../welt_training/experiments/machine-translation/baseli
 transformer over Pythia BPE tokens, the same data, batch size, steps and Muon) scores the same bytes as WeLT (not the
 source sentences in shift blocks): **0.599** validation bits per byte at 633 ms / step, vs. **0.542** for WeLT at
 192 ms / step.
+
+Training is bit-reproducible (the same seed gives the same losses); between seeds, machine translation's last-step
+bits per byte vary by ~0.01 (0.540 and 0.531 with seeds 42 and 1234), so smaller differences are noise. Variants of
+the bytes decoder's prefix, machine translation (image + bytes encoders), two seeds each (last step / best step):
+
+| Bytes decoder prefix | Val. bits / byte | Best | ms / step |
+|---|--:|--:|--:|
+| latent, BOS (before) | 0.540, 0.531 | 0.533, 0.525 | 186 |
+| latent in place of BOS (main) | 0.529, 0.533 | 0.527, 0.528 | 175 |
+| K=4 vectors mapped from the latent | 0.524, 0.524 | 0.517, 0.517 | 202* |
+| latents of the 2 previous words, then the latent | 0.533, 0.522 | 0.526, 0.519 | 195* |
+| both | 0.523 | 0.516 | 243* |
+
+\* On another (identical) machine. Dropping BOS is 6% faster at the same quality; K=4 vectors gain ~0.01 bits per
+byte in both seeds, but not in generation (chrF 45.9 vs. 46.1).
 
 ### Examples
 
