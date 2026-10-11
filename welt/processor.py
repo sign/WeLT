@@ -10,7 +10,7 @@ from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
 from pixel_renderer import PixelRendererProcessor
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from utf8_tokenizer.control import ControlTokens
-from utf8_tokenizer.tokenizer import EOS_TOKEN_ID, PAD_TOKEN_ID, UTF8Tokenizer
+from utf8_tokenizer.tokenizer import EOS_TOKEN_ID, PAD_TOKEN, PAD_TOKEN_ID, UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.patches import PATCH_SIZE, patchify
@@ -136,7 +136,7 @@ class TextImageProcessor:
         nor do the words of a shift block before its ShiftIn: they are visible to each other (bidirectional)."""
         sequence_ids = torch.repeat_interleave(torch.arange(1, len(seq_lengths) + 1), torch.tensor(seq_lengths))
         block_ids = torch.zeros(len(words), dtype=torch.long)
-        label_mask = torch.tensor([word != self.tokenizer.pad_token for word in words])
+        label_mask = torch.tensor([word != PAD_TOKEN for word in words])
         offsets = itertools.accumulate(seq_lengths, initial=0)
         blocks = [(offset + start, offset + end) for offset, length in zip(offsets, seq_lengths, strict=False)
                   for start, end in get_shift_blocks(words[offset:offset + length])]

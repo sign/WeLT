@@ -7,7 +7,7 @@ import torch
 from utf8_tokenizer.control import ControlTokens
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
-from tests.conftest import ORACLE_TEXTS, SI, SO, oracle_labels
+from tests.conftest import ORACLE_TEXTS, PAD, SI, SO, oracle_labels
 from welt.processor import TextImageProcessor, collate_fn, get_shift_blocks, next_word_labels
 from welt_training.data_utils import pack_words
 
@@ -26,7 +26,7 @@ expected_tensor_keys = ["input_ids", "sequence_ids", "block_ids", "label_mask", 
 
 
 def labels_of(example: dict) -> torch.Tensor:
-    """Each word's label bytes (BOS, ..., EOS), PAD for words without a label."""
+    """Each word's label bytes (bytes, EOS), PAD for words without a label."""
     return next_word_labels(example["input_ids"][None], example["sequence_ids"][None], example["label_mask"][None])[0]
 
 
@@ -39,7 +39,7 @@ def test_packed_padding_does_not_add_eos_labels(processor):
     words = processor.pretokenize("a b")
     original = processor.process_single_example(words, [len(words)])
     padded = processor.process_single_example(
-        words + [processor.tokenizer.pad_token] * 5, [len(words)] + [1] * 5)
+        words + [PAD] * 5, [len(words)] + [1] * 5)
     assert torch.equal(labels_of(padded)[:len(words)], labels_of(original))
     assert not padded["label_mask"][len(words):].any()
     assert (labels_of(padded)[len(words):] == processor.tokenizer.pad_token_id).all()

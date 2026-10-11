@@ -40,7 +40,7 @@ register_allowed_target_prefix("welt")  # Checkpoints' run_config.yaml instantia
 SHARED_CONFIG_FIELDS = (
     "bf16", "fp16", "params_dtype", "pipeline_dtype",
     "autocast_dtype", "use_cpu_initialization", "perform_initialization", "gradient_accumulation_fusion",
-    "attention_backend", "recompute_granularity", "recompute_method", "recompute_num_layers", "recompute_modules",
+    "recompute_granularity", "recompute_method", "recompute_num_layers", "recompute_modules",
 )
 
 
@@ -106,11 +106,8 @@ class WeLTModelProvider(GPTModelProvider):
                                    latent_transformer_hf_path=pretrained(latent_transformer),
                                    bytes_decoder_hf_path=pretrained(bytes_decoder)) | kwargs)
 
-    def sub_providers(self):
-        return [p for p in (self.bytes_encoder, self.image_encoder, self.bytes_decoder) if p is not None]
-
     def finalize(self):
-        for sub in self.sub_providers():
+        for sub in (p for p in (self.bytes_encoder, self.image_encoder, self.bytes_decoder) if p is not None):
             for name in SHARED_CONFIG_FIELDS:
                 setattr(sub, name, getattr(self, name))
             sub.finalize()
@@ -318,7 +315,7 @@ class WeLTModel(MegatronModule):
         (B, L, 2) rows and columns per word] -> (B, L, H)"""
         B, L, T = input_ids.shape  # noqa: N806
         input_ids = input_ids.view(B * L, T)
-        words_mask = input_ids != PAD_TOKEN_ID  # Within words, bytes are never PAD
+        words_mask = input_ids != PAD_TOKEN_ID  # Texts have no NUL bytes (TextDataConfig.texts)
         valid = words_mask[:, 0]  # Words have BOS, batch padding words do not
 
         # Encode each distinct word once (about a third of the words in a batch), its embedding is shared
