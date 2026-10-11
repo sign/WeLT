@@ -21,6 +21,7 @@ import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402, N812
 from cachetools import LRUCache  # noqa: E402
 from safetensors.torch import load_file  # noqa: E402
+from utf8_tokenizer.tokenizer import EOS_TOKEN_ID  # noqa: E402
 from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
 from vllm.config import PoolerConfig  # noqa: E402
 from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
@@ -36,7 +37,6 @@ class WeLTGenerator:
         """kv_cache_gib: KV cache memory of each vLLM engine. A fixed size (rather than a fraction of the GPU) skips
         vLLM's memory profiling, which fails when other processes use the GPU."""
         self.processor = TextImageProcessor.from_pretrained(os.path.join(path, "processor"))
-        self.tokenizer = self.processor.tokenizer
         self.device = device
 
         self.weights = load_file(os.path.join(path, "welt.safetensors"), device=device)  # The layers around them
@@ -61,7 +61,7 @@ class WeLTGenerator:
                           enable_prompt_embeds=True, enable_prefix_caching=True, enable_chunked_prefill=False,
                           pooler_config=PoolerConfig(seq_pooling_type="LAST", use_activation=False), **engine)
         self.decoder = LLM(os.path.join(path, "bytes_decoder"), enable_prompt_embeds=True,
-                           max_model_len=self.processor.max_word_length + 1,
+                           max_model_len=self.processor.max_word_length - 1,  # Latent and bytes (no BOS)
                            logits_processors=[UTF8LogitsProcessor], **engine)
 
 
@@ -126,8 +126,7 @@ class WeLTGenerator:
             embeddings = self.weights["decoder_prompt_embeddings"][byte_ids]
             prompts.append({"prompt_embeds": torch.cat([latent[None], embeddings]).cpu()})
         outputs = self.decoder.generate(prompts, sampling, use_tqdm=False)
-        eos = self.tokenizer.eos_token_id
-        return [prefix + bytes(t for t in o.outputs[0].token_ids if t != eos)
+        return [prefix + bytes(t for t in o.outputs[0].token_ids if t != EOS_TOKEN_ID)
                 for o, prefix in zip(outputs, prefixes, strict=True)]
 
     def generate(self, texts: list[str], max_generated_words: int = 50, temperature: float = 0.0,
@@ -138,7 +137,7 @@ class WeLTGenerator:
         if any(len(words) + max_generated_words > max_length for words in sequences):
             raise ValueError(f"Prompt words + max_generated_words exceed the latent's context ({max_length} words)")
         # A prompt ending mid-word continues that word: its bytes become the decoder's prefix
-        max_prefix = self.processor.max_word_length - 3  # BOS and EOS, and at least one new byte
+        max_prefix = self.processor.max_word_length - 3  # Words have at most max_word_length - 2 bytes; one is new
         prefixes = [b""] * len(texts)
         for i, words in enumerate(sequences):
             if len(words) > 1 and not is_word_complete(words[-1]) and len(words[-1].encode()) <= max_prefix:
@@ -152,7 +151,7 @@ class WeLTGenerator:
             # Words have at most max_word_length - 2 bytes (without BOS and EOS), as in training
             sampling = [SamplingParams(temperature=temperature, seed=None if seed is None else seed + step,
                                        max_tokens=self.processor.max_word_length - 2 - len(prefixes[i]),
-                                       stop_token_ids=[self.tokenizer.eos_token_id], detokenize=False)
+                                       stop_token_ids=[EOS_TOKEN_ID], detokenize=False)
                         for i in active]
             latents = self._latents([sequences[i] for i in active])
             next_words = self._next_words(latents, [prefixes[i] for i in active], sampling)

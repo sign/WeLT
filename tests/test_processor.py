@@ -52,7 +52,7 @@ def test_processor_single_text_value(processor):
     assert inputs["block_ids"][0].tolist() == [0, 0, 0]
     # Each word predicts the next one; the last one, the end of the text (an empty word)
     assert torch.equal(labels_of({k: v[0] for k, v in inputs.items()}),
-                       torch.tensor([[2, 97, 32, 3], [2, 98, 3, 0], [2, 3, 0, 0]]))
+                       torch.tensor([[97, 32, 3], [98, 3, 0], [3, 0, 0]]))
 
 
 def test_patch_positions():
@@ -160,7 +160,14 @@ def test_multiple_shift_blocks():
     assert result["block_ids"].tolist() == [0, 1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 0]
     labels = labels_of(result)
     assert (labels[~result["label_mask"]] == 0).all()
-    assert (labels[result["label_mask"]][:, 0] == 2).all()  # Each label starts with BOS
+
+
+def test_shift_blocks_do_not_span_packed_sequences(processor):
+    words = ["a", SO, "b", SI, "c"]
+    with pytest.warns(UserWarning, match="ShiftOut without ShiftIn"):
+        result = processor.process_single_example(words, [3, 2])
+    assert result["block_ids"].tolist() == [0, 0, 0, 0, 0]
+    assert result["label_mask"].all()
 
 
 def test_bpe_pretokenizer_words_are_text_spans():
@@ -192,7 +199,7 @@ def test_labels_match_an_oracle_of_the_words(text_processor, seq_length):
         expected = oracle_labels(words, seq_lengths)
         assert example["label_mask"].tolist() == [label is not None for label in expected]
         labels = labels_of(example)[example["label_mask"]]
-        tokenized = text_processor.tokenize_words([label for label in expected if label is not None]).input_ids
+        tokenized = text_processor.tokenize_words([label for label in expected if label is not None]).input_ids[:, 1:]
         assert torch.equal(labels[:, :tokenized.size(1)], tokenized)
         assert (labels[:, tokenized.size(1):] == 0).all()
 

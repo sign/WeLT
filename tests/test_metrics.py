@@ -57,7 +57,7 @@ def test_baseline_scores_the_bytes_welt_scores():
         words = processor.pretokenize(text)
         example = processor.process_single_example(words, [len(words)])
         inputs = (example[k][None] for k in ("input_ids", "sequence_ids", "label_mask"))
-        labels = next_word_labels(*inputs)[:, :, 1:]  # Without BOS
+        labels = next_word_labels(*inputs)
         welt_bytes += int(((labels != PAD_TOKEN_ID) & (labels != EOS_TOKEN_ID)).sum())
     assert baseline_bytes == welt_bytes == sum(len(baseline.SHIFT_BLOCK.sub("\x0e", t).encode()) for t in texts)
 

@@ -29,6 +29,7 @@ TRANSFORMERS = {  # Config key in welt.yaml: the GPTModel in WeLTModel
     "latent_transformer": "latent_transformer",
     "bytes_decoder": "bytes_decoder",
 }
+FOLDED = ("bytes_encoder.embed.", "bytes_decoder_embedding.")  # In the transformers' token embeddings
 
 
 def load_model(checkpoint: str) -> WeLTModel:
@@ -100,9 +101,9 @@ def export(checkpoint: str, output: str):
     model = load_model(checkpoint)
 
     os.makedirs(output, exist_ok=True)
-    transformer_prefixes = tuple(path + "." for path in TRANSFORMERS.values())
+    skipped = (*(path + "." for path in TRANSFORMERS.values()), *FOLDED)
     others = {k: v for k, v in model.state_dict().items()
-              if not k.startswith(transformer_prefixes) and isinstance(v, torch.Tensor) and "_extra_state" not in k}
+              if not k.startswith(skipped) and isinstance(v, torch.Tensor) and "_extra_state" not in k}
     others["decoder_prompt_embeddings"] = model.bytes_decoder_embedding.folded_weight()  # Prompts are embeddings
     save_file({k: v.detach().to("cpu", torch.bfloat16).contiguous() for k, v in others.items()},
               os.path.join(output, "welt.safetensors"))
