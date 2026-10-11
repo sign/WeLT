@@ -36,6 +36,8 @@ harness, and the time per step of every optimization attempt, are in git history
    transformer's arbitrary (packed + bidirectional shift block) mask.
 4. **Encode unique words** (1.3x on MT): the word encoders' output only depends on the word, and only ~31% of the
    words in a batch are distinct, so each distinct word is encoded once and its embedding is shared (exact).
+5. **Packed patches** (SignWriting 404 -> 262 ms): the image encoder packs each batch's patches, with patch row and
+   column embeddings, instead of padding every sign (28 patches on average) to the batch's largest (~105).
 
 Not kept: padded SDPA / matmul attention for the short sequences (memory-bound on GB10), FP8 (MXFP8 is unsupported on
 SM12x; tensorwise FP8 needs token counts padded to multiples of 8, and matmuls are a minority of the step time here).
@@ -43,7 +45,8 @@ SM12x; tensorwise FP8 needs token counts padded to multiples of 8, and matmuls a
 ### Utilization
 
 [`flops.py`](flops.py) counts the FLOPs of each transformer on its real (packed) tokens: "model" FLOPs encode every word
-occurrence, "hardware" FLOPs encode each distinct word once.
+occurrence, "hardware" FLOPs encode each distinct word once
+(`python benchmarks/flops.py <config.yaml> --ms_per_step <ms>`).
 
 | Config | ms / step | Model TFLOPs / step | Model TFLOP/s | Hardware TFLOP/s |
 |--------|----------:|-------------------:|--------------:|-----------------:|
@@ -121,7 +124,8 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 10000 | 264 | 44 min | 1.270 | 63.7% | 4.3% | 14.2 | 304 |
 | **signed-to-spoken**, image encoder only | 10000 | 166 | 28 min | 1.303 | 62.9% | 0.8% | 10.5 | 267 |
 
-All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
+All tasks train with Muon (their configs). Steps are `train.train_iters` overrides of the configs' 10000
+(string-repetition: 1500; ocr, letter-count: 3000). Generation is greedy, on 256 validation
 examples, with vLLM (batched over all examples). Reproduce a row with e.g.
 `WANDB_MODE=disabled benchmarks/run_task.sh welt_training/experiments/easy-tasks/string-repetition.yaml
 output/string-repetition train.train_iters=1500`.
@@ -140,19 +144,12 @@ The image encoder (over SignWriting rendered by pixel-renderer, from scratch) he
 reach 1.212 bits per byte (step 7000) vs. 1.239 with bytes only and 1.263 with the image encoder only. By the last step
 all have overfitted (bytes only is lowest there, 1.253 vs. 1.270), while both encoders generate best (4.3% exact
 matches, chrF 14.2); but generation, on 256 examples, is too noisy to rank these (chrF moves by up to 5 between checkpoints).
-Modality dropout (training with one encoder's embeddings dropped at random) was removed: with zeros and rescaling, or
-a learned embedding standing in for the dropped encoder, it was worse than none (1.25 vs. 1.23 bits per byte, and
-under half the exact matches).
-
-An earlier comparison (bytes only 0.953 bits per byte, better than with images) was wrong: configs without images read
-signs split into fragments by words-segmentation 0.0.5 from the datasets cache, which did not invalidate on the
-upgrade to 0.0.6 (data is now streamed and split into words on the fly, without a cache).
+There is no modality dropout (one encoder's embeddings dropped at random): it was worse than none (1.25 vs. 1.23 bits
+per byte, and under half the exact matches).
 
 Images do not help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
 reaches 0.537 bits per byte and chrF 46.5 (vs. 0.547 and 45.4 with it), 14% faster
-per step. The image encoder packs each batch's patches (no padding to the largest image) and embeds patch rows and
-columns: before, padding signs (28 patches on average) to the batch's largest (~105) copied 425 MB per batch to the
-GPU and made a SignWriting step 404 ms; packed, 41 MB and 262 ms.
+per step.
 
 Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
 transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine

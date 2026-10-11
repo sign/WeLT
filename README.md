@@ -7,8 +7,9 @@
 
 We present a language model that replaces conventional subword tokenization with a dual representation of text as
 both bytes and rendered images of "words", allowing the model to directly process the visual and symbolic
-structure of language. It segments text into whitespace-delimited units, encodes each as images and byte sequences,
-and passes them through an encoder–decoder pipeline:
+structure of language. It segments text into words (with [`sign/words-segmentation`](https://github.com/sign/words-segmentation)
+by default, or any HuggingFace tokenizer), encodes each as a byte sequence and/or an image, and passes them through an
+encoder–decoder pipeline:
 a bytes encoder, an image encoder, a large latent transformer, and a bytes decoder.
 At inference, predicted bytes are rendered back into images (with an image encoder), closing the loop for the next prediction.
 This design could make learning and inference cheaper and faster for non-English languages,
@@ -25,9 +26,11 @@ has an embedding, and the latent transformer sees one vector per word.
 
 - **Bytes Encoder** - A transformer over the bytes of each word, used bidirectionally. Its first (BOS) output is the word embedding.
 - **Image Encoder** - A transformer over the 16x16 patches of each rendered word
-  ([NaViT](https://arxiv.org/abs/2307.06304)-style, variable width, used bidirectionally). Its CLS output is the word embedding.
+  ([NaViT](https://arxiv.org/abs/2307.06304)-style: native size, with learned row and column embeddings, packed
+  without padding; used bidirectionally). Its CLS output is the word embedding.
 - **Latent Transformer** - A causal transformer over the word embeddings (recommended: large).
-- **Bytes Decoder** - A causal transformer generating each next word's bytes from its latent vector (recommended: small).
+- **Bytes Decoder** - A causal transformer generating each next word's bytes from its latent vector, which takes the
+  place of BOS: its input is the latent, then the word's bytes, and it predicts the bytes and EOS (recommended: small).
 
 The bytes encoder, latent transformer, bytes decoder and patch image encoder are each a causal LM architecture
 [supported by Megatron-Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge#supported-models)
@@ -125,7 +128,8 @@ and reports exact match, chrF and generated words per second.
 ## Baseline
 
 `welt_training.baseline` trains a causal LM over a standard tokenizer on the same data, reporting comparable bits per
-byte; see [machine translation](welt_training/experiments/machine-translation).
+byte; see [machine translation](welt_training/experiments/machine-translation) and
+[language modeling](welt_training/experiments/language-modeling).
 
 ## Training Speed
 
