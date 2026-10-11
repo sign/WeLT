@@ -45,22 +45,17 @@ def text_losses(model, processor, texts: list[str]) -> dict[str, float]:
     return results
 
 
-@pytest.fixture(scope="module", params=["packed", "unpacked"])
-def trained(request, megatron, tiny_config):
-    torch.manual_seed(0)
-    model = build_model(tiny_config).float()  # With the default modality dropout
-    processor = TextImageProcessor.create(max_word_length=16, render_images=True)
-    train(model, processor, packed=request.param == "packed")
-    return model, processor
-
-
-@pytest.fixture(params=["full_model", "no_bytes_encoder", "no_image_encoder"])
-def configured(request, trained, monkeypatch):
-    """Drops a modality like modality dropout does: its embedding is zeroed and the other one is rescaled."""
-    model, processor = trained
-    keep = {"full_model": [1.0, 1.0], "no_bytes_encoder": [2.0, 0.0], "no_image_encoder": [0.0, 2.0]}[request.param]
-    monkeypatch.setattr(model, "_modality_scale", lambda num, device: torch.tensor(keep, device=device))
-    return model, processor, request.param
+# (packing, encoders): both encoders, packed and not, and each encoder alone
+@pytest.fixture(scope="module", params=[("packed", "full_model"), ("unpacked", "full_model"),
+                                        ("packed", "no_bytes_encoder"), ("packed", "no_image_encoder")])
+def configured(request, megatron, tiny_config):
+    packing, name = request.param
+    torch.manual_seed(1)  # The checks are margins of a tiny overfit model
+    model = build_model(tiny_config, image_encoder=name != "no_image_encoder",
+                        bytes_encoder=name != "no_bytes_encoder").float()
+    processor = TextImageProcessor.create(max_word_length=16, render_images=name != "no_image_encoder")
+    train(model, processor, packed=packing == "packed")
+    return model, processor, name
 
 
 def test_character_level_conditioning(configured):

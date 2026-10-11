@@ -71,7 +71,7 @@ transformers, which GB10's bandwidth limits.
 ### Multiple GPUs
 
 [`parity.sh`](parity.sh) trains the machine translation config for 200 steps on the same global batches
-(64 examples, micro batch 32, modality dropout off), on 2 H100s (on Modal, 16 CPUs):
+(64 examples, micro batch 32), on 2 H100s (on Modal, 16 CPUs):
 
 | Parallelism | ms / step | Val. loss after 200 steps |
 |-------------|----------:|--------------------------:|
@@ -100,9 +100,11 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 | **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 66 | 1.6 min | 0.014 | 99.3% | 93.8% | 98.7 | 856 |
 | **ocr**: write a sentence seen only as rendered word images | 3000 | 74 | 3.7 min | 0.014 | 99.1% | 88.3% | 97.1 | 1055 |
 | **letter-count**: count the letters of a word | 3000 | 64 | 3.2 min | 0.0001 | 100% | 100% | 100 | 1378 |
-| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 192 | 32 min | 0.542 | 67.5% | 8.6% | 46.2 | 571 |
-| **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 5940 (10 epochs) | 142 | 14 min | 0.953 | 67.8% | 0.0% | 5.1 | 471 |
-| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 5940 (10 epochs) | 404 | 40 min | 1.296 | 63.0% | 1.6% | 10.4 | 413 |
+| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 198 | 33 min | 0.547 | 67.7% | 8.2% | 45.4 | 536 |
+| **machine-translation**, bytes encoder only | 10000 | 170 | 28 min | 0.537 | 68.0% | 9.0% | 46.5 | 616 |
+| **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 10000 | 224 | 37 min | 1.253 | 63.1% | 2.3% | 11.1 | 378 |
+| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 10000 | 264 | 44 min | 1.270 | 63.7% | 4.3% | 14.2 | 304 |
+| **signed-to-spoken**, image encoder only | 10000 | 166 | 28 min | 1.303 | 62.9% | 0.8% | 10.5 | 267 |
 
 All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
 examples, with vLLM (batched over all examples). Reproduce a row with e.g.
@@ -113,11 +115,29 @@ Compared to the same tasks trained with Adam (before the review fixes), Muon imp
 80.5% to 88.3% exact match, machine translation from 0.626 to 0.542 bits per byte (chrF 41.0 to 46.2), at 10-30%
 more time per step (its orthogonalization).
 
-SignWriting to text is far from solved at this scale: both models generate fluent words of the target language,
-but rarely the right one (see the examples below; vLLM matches the trained Megatron models on these prompts).
-The image encoder (over SignWriting rendered by pixel-renderer, from scratch) did not help: its bits per byte are
-worse than with bytes only. Signs are whole words since words-segmentation 0.0.6; an earlier bytes-only run, on
-signs split into fragments, reached chrF 19.5, a hint that symbol-level inputs may suit a small model better.
+SignWriting to text is far from solved at this scale: the models generate fluent words of the target language,
+but rarely the right one (see the examples below; vLLM matches the trained Megatron models on these prompts). The
+dataset is small (57k packed examples): every configuration's validation loss is best at ~6000 steps (10 epochs) and
+then overfits. Dropout in the latent transformer slows this: `hidden_dropout: 0.2` (the config's) gives the best last
+step (1.270 bits per byte with both encoders, vs. 1.303 with 0.1 and 1.276 with 0.3; weight decay 0.1 did not help).
+
+The image encoder (over SignWriting rendered by pixel-renderer, from scratch) helps the best checkpoint: both encoders
+reach 1.212 bits per byte (step 7000) vs. 1.239 with bytes only and 1.263 with the image encoder only. By the last step
+all have overfitted (bytes only is lowest there, 1.253 vs. 1.270), while both encoders generate best (4.3% exact
+matches, chrF 14.2); but generation, on 256 examples, is too noisy to rank these (chrF moves by up to 5 between checkpoints).
+Modality dropout (training with one encoder's embeddings dropped at random) was removed: with zeros and rescaling, or
+a learned embedding standing in for the dropped encoder, it was worse than none (1.25 vs. 1.23 bits per byte, and
+under half the exact matches).
+
+An earlier comparison (bytes only 0.953 bits per byte, better than with images) was wrong: configs without images read
+signs split into fragments by words-segmentation 0.0.5 from the datasets cache, which did not invalidate on the
+upgrade to 0.0.6 (its version is now part of the cache fingerprint).
+
+Images do not help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
+reaches 0.537 bits per byte and chrF 46.5 (vs. 0.547 and 45.4 with it), 14% faster
+per step. The image encoder packs each batch's patches (no padding to the largest image) and embeds patch rows and
+columns: before, padding signs (28 patches on average) to the batch's largest (~105) copied 425 MB per batch to the
+GPU and made a SignWriting step 404 ms; packed, 41 MB and 262 ms.
 
 Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
 transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine
@@ -166,28 +186,38 @@ The first 5 validation examples of each task (`␎` and `␏` stand for the shif
 
 | Input | Expected | Generated |
 |---|---|---|
-| `<en>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<he> ` | `האם לא יהיה זה אכזרי יותר מצד החברה, לתת לאנשים למות... כאשר עם מאמץ מה ניתן להצילם?` | `לא יהיה אכזרי יותר לחברה לתת לאנשים למות... כשמאית שתוכל להציל אותם?` |
-| `<en>␎YOu dOn't know the half Of it.␏<he> ` | `אתה לא יודע חצי מזה.` | `אתה לא יודע חצי מזה.` |
-| `<en>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<he> ` | `ההפך הגמור של סופרמן מי שחי בעולם Bizarro אחורה.` | `הפוסימין הוא המופע היחיד שחי בעולם הביזרק האחורי.` |
-| `<en>␎- The apology, so- - We're keeping the robot.␏<he> ` | `-ההתנצלות, אז... אנחנו שומרים את הרובוט.` | `ההתנצלות, אז... אנחנו שומרים את הרובוט.` |
-| `<en>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<he> ` | `כמובן שתמיד היו החברים של אמא שלי, אבל כשלמדתי את שמותיהם, אמא הייתה מעיפה אותם, והייתה מברשת שיניים חדשה באמבטיה.` | `כמובן, היו תמיד החברים של אמא, אבל ברגע שאני אלמד את השמות שלהם, אמא תבעט בהם, ויהיו שיניים חדשות בשירותים.` |
+| `<en>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<he> ` | `האם לא יהיה זה אכזרי יותר מצד החברה, לתת לאנשים למות... כאשר עם מאמץ מה ניתן להצילם?` | `לא יהיה יותר אכזרי לחברה לתת לאנשים למות... מתי מאמץ שיכול להציל אותם?` |
+| `<en>␎YOu dOn't know the half Of it.␏<he> ` | `אתה לא יודע חצי מזה.` | `אתה לא יודע את החצי ממנו.` |
+| `<en>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<he> ` | `ההפך הגמור של סופרמן מי שחי בעולם Bizarro אחורה.` | `סופרמן הוא הדופן המדויק שגר בעולם האחורי של ביירזורק.` |
+| `<en>␎- The apology, so- - We're keeping the robot.␏<he> ` | `-ההתנצלות, אז... אנחנו שומרים את הרובוט.` | `ההתנצלות, אז... אנחנו שומרות את הרובוט.` |
+| `<en>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<he> ` | `כמובן שתמיד היו החברים של אמא שלי, אבל כשלמדתי את שמותיהם, אמא הייתה מעיפה אותם, והייתה מברשת שיניים חדשה באמבטיה.` | `כמובן, תמיד היו החברים של אמא, אבל ברגע שאלמד את שמם, אמא תעיף אותם החוצה, ותהיה שירה חדשה בשירותים.` |
+
+**machine-translation, bytes**
+
+| Input | Expected | Generated |
+|---|---|---|
+| `<en>␎Wouldn't it be more cruel for society to let people die... - ... when with some effort it could save them?␏<he> ` | `האם לא יהיה זה אכזרי יותר מצד החברה, לתת לאנשים למות... כאשר עם מאמץ מה ניתן להצילם?` | `זה לא יהיה יותר אכזרי לחברה לתת לאנשים למות... מתי שיש מאמץ זה יכול להציל אותם?` |
+| `<en>␎YOu dOn't know the half Of it.␏<he> ` | `אתה לא יודע חצי מזה.` | `אתה לא יודע מה החלק המוזר.` |
+| `<en>␎Superman's exact opposite who lives in the backwards Bizarro World.␏<he> ` | `ההפך הגמור של סופרמן מי שחי בעולם Bizarro אחורה.` | `הסופר המדויק ביותר שחי בעולם ביאזרו.` |
+| `<en>␎- The apology, so- - We're keeping the robot.␏<he> ` | `-ההתנצלות, אז... אנחנו שומרים את הרובוט.` | `-אנחנו שומרים את הרובוט.` |
+| `<en>␎Of course, there were always mama's boyfriends, but as soon as I'd learn their names, mama would kick them out, and there'd be a new toothbrush in the bathroom.␏<he> ` | `כמובן שתמיד היו החברים של אמא שלי, אבל כשלמדתי את שמותיהם, אמא הייתה מעיפה אותם, והייתה מברשת שיניים חדשה באמבטיה.` | `כמובן שהיו חברים של אמא, אבל ברגע שאלמד את שמותיהם, אמא הייתה מכסחת שיניים והיא הייתה מחסום שיניים חדשים בחדר האמבטיה.` |
 
 **signed-to-spoken, bytes**
 
 | Input | Expected | Generated |
 |---|---|---|
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `llegar de la cabeza` |
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `llegar de la cabeza` |
-| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Para frente para baixo - pare` |
-| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `cl` |
-| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `Para baixo do circular` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `comer` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `comer` |
+| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Marcos Barreto` |
+| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `caracol` |
+| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `n` |
 
 **signed-to-spoken, bytes + image**
 
 | Input | Expected | Generated |
 |---|---|---|
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `cara` |
-| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `cara` |
-| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Carlos Carla de Almeida` |
-| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `contradicción` |
-| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `CM14_MD_Dorso_VF` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `difficult` | `Andrés` |
+| `<ncs>␎𝠀񌀅񆊱񂌳𝠃𝤠𝥇񌀅𝣴𝣵񆊱𝣶𝤜񂌳𝤅𝤴␏<es> ` | `dificil` | `Andrés` |
+| `<bzs>␎𝠀񍝁񆇡񄼱񉸒𝠃𝥊𝤳񍝁𝣴𝣵񆇡𝤋𝤅񄼱𝤙𝣼񉸒𝤱𝤚␏<pt> ` | `Flavia` | `Fernando` |
+| `<ssp>␎𝠀񅯱񅯵񈪇񋾡𝠃𝤨𝥅񅯱𝤙𝤗񅯵𝤘𝤪񈪇𝣽𝤞񋾡𝣴𝣴␏<es> ` | `abril` | `altura` |
+| `<bzs>␎𝠀񆀡𝠃𝤎𝤏񆀡𝣿𝣽␏<pt> ` | `M` | `S` |

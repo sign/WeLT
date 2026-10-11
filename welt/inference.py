@@ -26,7 +26,7 @@ from vllm.config import PoolerConfig  # noqa: E402
 from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
 from welt.attention import get_shift_blocks  # noqa: E402
-from welt.processor import TextImageProcessor  # noqa: E402
+from welt.processor import TextImageProcessor, patch_positions  # noqa: E402
 from welt.utf8 import UTF8LogitsProcessor  # noqa: E402
 from welt.vllm_plugin import RANGES_KEY, restore_opentelemetry_context  # noqa: E402
 
@@ -86,13 +86,14 @@ class WeLTGenerator:
         params = PoolingParams(use_activation=False)
         embeds = []
         if self.image_encoder is not None:
-            patches, shapes = self.processor.render_texts(words)
-            patches = patches.to(self.device)
-            prompts = []
-            for word_patches, count in zip(patches, shapes.prod(dim=-1), strict=True):
-                projected = self._linear(word_patches[:count] / 127.5 - 1, "image_encoder.embed.proj")
-                cls = self.weights["image_encoder.embed.cls"]
-                prompts.append({"prompt_embeds": torch.cat([cls[None], projected]).cpu()})
+            patches, shapes = self.processor.render_texts(words)  # Packed, each word's patches in turn
+            rows, columns = patch_positions(shapes.to(self.device))
+            projected = (self._linear(patches.to(self.device) / 127.5 - 1, "image_encoder.embed.proj")
+                         + self.weights["image_encoder.embed.rows"][rows]
+                         + self.weights["image_encoder.embed.columns"][columns])  # As WeLTModel's PatchEmbedding
+            cls = self.weights["image_encoder.embed.cls"]
+            prompts = [{"prompt_embeds": torch.cat([cls[None], word]).cpu()}
+                       for word in projected.split(shapes.prod(dim=-1).tolist())]
             embeds.append(self._pooled(self.image_encoder, prompts, params))
         if self.bytes_encoder is not None:
             tokenized = self.processor.tokenize_words(words)

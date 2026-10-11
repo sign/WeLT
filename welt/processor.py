@@ -2,6 +2,7 @@ import json
 import os
 
 import torch
+import torch.nn.functional as F  # noqa: N812
 from cachetools import LRUCache
 from font_download import FontConfig
 from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
@@ -11,10 +12,23 @@ from utf8_tokenizer.tokenizer import UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.attention import get_attention_mask_for_packed_sequence, get_shift_blocks
-from welt.collator import collate_fn, stack_pad_tensors
+from welt.collator import collate_fn
 
 PROCESSOR_CONFIG_NAME = "processor_config.json"
 PATCH_SIZE = 16  # pixel_renderer renders lines of 16px height, widths rounded to 16px
+
+
+MAX_PATCH_POSITION = 256  # Rows and columns of patches beyond it share its position embedding
+
+
+def patch_positions(shapes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(N, 2) rows and columns of patches of N images -> the row and column of each of their row-major patches,
+    packed: two (total patches,) tensors, capped at MAX_PATCH_POSITION - 1."""
+    counts = shapes.prod(dim=-1)
+    within = torch.arange(int(counts.sum()), device=shapes.device) - torch.repeat_interleave(
+        F.pad(counts.cumsum(0), (1, 0))[:-1], counts)
+    columns = torch.repeat_interleave(shapes[:, 1], counts)
+    return (within // columns).clamp(max=MAX_PATCH_POSITION - 1), (within % columns).clamp(max=MAX_PATCH_POSITION - 1)
 
 
 def patchify(image, patch_size: int = PATCH_SIZE) -> torch.Tensor:
@@ -66,7 +80,8 @@ class TextImageProcessor:
                    max_word_length=config["max_word_length"])
 
     def render_texts(self, texts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Render words into (num_words, max_patches, 768) uint8 patches, and each word's (rows, columns) of patches."""
+        """Render words into their 16x16 patches, packed: (total patches, 768) uint8, each word's row-major patches in
+        turn (without padding), and each word's (rows, columns) of patches."""
         patches, shapes = [], []
         for text in texts:
             rendered = self.patches_cache.get(text)
@@ -76,7 +91,7 @@ class TextImageProcessor:
                 self.patches_cache[text] = rendered
             patches.append(rendered[0])
             shapes.append(rendered[1])
-        return stack_pad_tensors(patches), torch.tensor(shapes, dtype=torch.long)
+        return torch.cat(patches), torch.tensor(shapes, dtype=torch.long)
 
     def pretokenize(self, text: str) -> list[str]:
         """Split a text (prefixed with BOS) into words."""
