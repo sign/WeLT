@@ -1,0 +1,12 @@
+# WeLT over Pythia tokens instead of words: the baseline's segmentation (climbmix-baseline.yaml), with WeLT's bytes
+# encoder and decoder instead of its embedding matrix and LM head
+$extends: climbmix-welt.yaml
+
+output_dir: ./output/lm-climbmix-welt-pythia
+
+model:
+  pretokenizer: EleutherAI/pythia-70m
+
+data:
+  seq_length: 340  # Tokens, as climbmix-baseline.yaml
+  max_word_length: 32  # Pythia tokens (with BOS and EOS)

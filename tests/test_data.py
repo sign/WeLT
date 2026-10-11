@@ -35,6 +35,14 @@ def test_texts_from_a_template(tmp_path):
     assert [e["text"] for e in config.texts("validation")] == ["<s0> t0"]
 
 
+def test_texts_from_token_ids(tmp_path):
+    from transformers import AutoTokenizer
+
+    tokens = AutoTokenizer.from_pretrained("gpt2")("Hello world, שלום").input_ids
+    config = json_config(tmp_path, {"tokens": [tokens, tokens]}, dataset_tokenizer="gpt2", max_eval_samples=1)
+    assert [e["text"] for e in config.texts("validation")] == ["Hello world, שלום"]
+
+
 def test_texts_require_a_text_column(tmp_path):
     config = json_config(tmp_path, {"src": ["a", "b"]}, max_eval_samples=1)
     with pytest.raises(ValueError, match="No 'text' column"):

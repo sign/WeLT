@@ -9,6 +9,7 @@ from itertools import count, cycle, islice
 import torch
 from datasets import IterableDataset, get_dataset_split_names, load_dataset
 from datasets.distributed import split_dataset_by_node
+from transformers import AutoTokenizer
 from utf8_tokenizer.tokenizer import PAD_TOKEN
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,8 @@ class TextDataConfig:
     data_files: str | list[str] | dict[str, str | list[str]] | None = None
     # A python format string over dataset columns, or [prefix, completion] which are concatenated for training
     dataset_text_template: str | list[str] | None = None
+    # Datasets of token ids (a "tokens" column, e.g. nvidia/Nemotron-ClimbMix) are decoded to texts by this tokenizer
+    dataset_tokenizer: str | None = None
     # Validation texts: the first of the validation split, or held out from the start of the train split
     max_eval_samples: int = 256
     shuffle_buffer_size: int = 10_000
@@ -48,8 +51,11 @@ class TextDataConfig:
         """The formatted (non-empty) texts of a split, streamed, as {"text": ...} examples."""
         template = self.dataset_text_template
         template = "".join(template) if isinstance(template, list) else template
+        tokenizer = AutoTokenizer.from_pretrained(self.dataset_tokenizer) if self.dataset_tokenizer else None
 
         def format_text(example):
+            if tokenizer is not None:
+                example = {"text": tokenizer.decode(example["tokens"])}
             if template is None and "text" not in example:
                 raise ValueError(f"No 'text' column (columns: {list(example)}), set data.dataset_text_template")
             text = example["text"] if template is None else template.format(**example)

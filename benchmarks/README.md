@@ -164,16 +164,19 @@ source sentences in shift blocks): **0.599** validation bits per byte at 633 ms 
 192 ms / step.
 
 Training is bit-reproducible (the same seed gives the same losses); between seeds, machine translation's last-step
-bits per byte vary by ~0.01 (0.540 and 0.531 with seeds 42 and 1234), so smaller differences are noise.
-The bytes decoder's input starts with the latent in place of BOS (machine translation, image + bytes encoders, two
-seeds, last step / best step):
+bits per byte vary by ~0.01 (0.540 and 0.531 with seeds 42 and 1234), so smaller differences are noise. Variants of
+the bytes decoder's prefix, machine translation (image + bytes encoders), two seeds each (last step / best step):
 
-| Bytes decoder input | Val. bits / byte | Best | ms / step |
+| Bytes decoder prefix | Val. bits / byte | Best | ms / step |
 |---|--:|--:|--:|
-| latent, BOS, bytes (before) | 0.540, 0.531 | 0.533, 0.525 | 186 |
-| latent in place of BOS, bytes (main) | 0.529, 0.533 | 0.527, 0.528 | 175 |
+| latent, BOS (before) | 0.540, 0.531 | 0.533, 0.525 | 186 |
+| latent in place of BOS (main) | 0.529, 0.533 | 0.527, 0.528 | 175 |
+| K=4 vectors mapped from the latent | 0.524, 0.524 | 0.517, 0.517 | 202* |
+| latents of the 2 previous words, then the latent | 0.533, 0.522 | 0.526, 0.519 | 195* |
+| both | 0.523 | 0.516 | 243* |
 
-Dropping BOS is 6% faster at the same quality.
+\* On another (identical) machine. Dropping BOS is 6% faster at the same quality; K=4 vectors gain ~0.01 bits per
+byte in both seeds, but not in generation (chrF 45.9 vs. 46.1).
 
 ### Examples
 

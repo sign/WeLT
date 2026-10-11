@@ -15,6 +15,29 @@ torchrun --nproc_per_node=1 -m welt_training.baseline welt_training/experiments/
 
 Both log validation `bits per byte` (see the [README](../../../README.md#train)), which compare directly.
 
+## Scaling: WeLT vs. the baseline on ClimbMix
+
+[nvidia/Nemotron-ClimbMix](https://huggingface.co/datasets/nvidia/Nemotron-ClimbMix) is web text stored as GPT-2 token
+ids: `data.dataset_tokenizer: gpt2` decodes each streamed document back to text, which each model then segments its own
+way. Three models, at four latent transformer sizes with the dimensions of Pythia's 14M, 31M, 70M and 160M
+([`models/latent-*.json`](../models)), all without an image encoder:
+
+| Model | Config | Example |
+|-------|--------|---------|
+| Baseline: Pythia tokens, embedding matrix and LM head | [`climbmix-baseline.yaml`](climbmix-baseline.yaml) | 340 tokens |
+| WeLT over Pythia tokens (the same segmentation, bytes encoder and decoder) | [`climbmix-welt-pythia.yaml`](climbmix-welt-pythia.yaml) | 340 tokens |
+| WeLT over words | [`climbmix-welt.yaml`](climbmix-welt.yaml) | 256 words |
+
+Examples hold the same text (1.33 Pythia tokens per word). The first 32 documents are held out for validation: few
+enough that each model's validation examples are a single micro batch, so all models score exactly the same bytes.
+
+```shell
+torchrun --nproc_per_node=1 -m welt_training.train welt_training/experiments/language-modeling/climbmix-welt.yaml \
+  model.latent_transformer=welt_training/experiments/models/latent-160m.json
+torchrun --nproc_per_node=1 -m welt_training.baseline welt_training/experiments/language-modeling/climbmix-baseline.yaml \
+  model.transformer=welt_training/experiments/models/latent-160m.json
+```
+
 ## Results
 
 10000 steps each, on one GB10, with the BOS bytes decoder (before the latent took its place), validation bits per byte at the last step (and the best step):
