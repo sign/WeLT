@@ -28,13 +28,11 @@ from megatron.bridge.training.config import (
 from megatron.bridge.training.losses import masked_next_token_loss
 from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from utf8_tokenizer.tokenizer import UTF8Tokenizer
+from utf8_tokenizer.tokenizer import EOS_TOKEN_ID, PAD_TOKEN_ID
 
-from welt.model import WeLTModelProvider
+from welt.model import VOCAB_SIZE, WeLTModelProvider
 from welt_training.data import WeLTDatasetProvider
 from welt_training.extendable_yaml import CONFIG_FILE_NAME, load_yaml
-
-TOKENIZER = UTF8Tokenizer()
 
 
 def build_dataset_provider(model: dict, data: dict) -> WeLTDatasetProvider:
@@ -110,8 +108,8 @@ def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor)
     """Per-byte cross entropy, plus bits per byte and byte/word accuracy for logging.
     labels: (words, bytes). Bits per byte count every prediction (including the EOS ending each word) except the
     EOS ending a document (a word with an empty label), per UTF-8 byte of text, like the causal LM baseline."""
-    loss_mask = labels != TOKENIZER.pad_token_id
-    eos = labels == TOKENIZER.eos_token_id
+    loss_mask = labels != PAD_TOKEN_ID
+    eos = labels == EOS_TOKEN_ID
     document_end = torch.zeros_like(eos)
     document_end[:, 0] = eos[:, 0]  # A word whose first label byte is EOS is empty: the end of a document
     losses = losses.float().contiguous()  # The model's per-byte losses are a slice, Megatron's loss views them
@@ -156,7 +154,7 @@ def build(config: dict):
     # Model options other than the transformers (and the pretokenizer, a data option) are provider fields
     model = WeLTModelProvider.from_hf(**{key: value for key, value in config["model"].items() if key != "pretokenizer"})
     dataset = build_dataset_provider(config["model"], config["data"])
-    cfg = build_config(config, model, dataset, vocab_size=model.num_tokens)
+    cfg = build_config(config, model, dataset, vocab_size=VOCAB_SIZE)
     return cfg, lambda output_dir: dataset.processor().save_pretrained(os.path.join(output_dir, "processor"))
 
 

@@ -18,8 +18,10 @@ import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.training.model_load_save import load_megatron_model, temporary_distributed_context
 from safetensors.torch import save_file
+from transformers import AutoConfig
+from utf8_tokenizer.tokenizer import BOS_TOKEN_ID, EOS_TOKEN_ID, PAD_TOKEN_ID
 
-from welt.model import WeLTModel, hf_config
+from welt.model import VOCAB_SIZE, WeLTModel
 
 TRANSFORMERS = {  # Config key in welt.yaml: the GPTModel in WeLTModel
     "bytes_encoder": "bytes_encoder.transformer",
@@ -38,24 +40,25 @@ def load_model(checkpoint: str) -> WeLTModel:
     return model.eval()
 
 
-def _save_placeholder_tokenizer(path: str, num_tokens: int):
+def _save_placeholder_tokenizer(path: str):
     """vLLM requires a tokenizer, even though WeLT passes token ids or embeddings and never detokenizes."""
     from tokenizers import Tokenizer, models
     from transformers import PreTrainedTokenizerFast
 
-    vocab = {f"<0x{i:02X}>": i for i in range(num_tokens)}
-    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="<0x00>"))
-    PreTrainedTokenizerFast(tokenizer_object=tokenizer, bos_token="<0x02>", eos_token="<0x03>",
-                            pad_token="<0x00>").save_pretrained(path)
+    def token(i):
+        return f"<0x{i:02X}>"
+
+    tokenizer = Tokenizer(models.WordLevel(vocab={token(i): i for i in range(VOCAB_SIZE)}, unk_token=token(0)))
+    PreTrainedTokenizerFast(tokenizer_object=tokenizer, bos_token=token(BOS_TOKEN_ID), eos_token=token(EOS_TOKEN_ID),
+                            pad_token=token(PAD_TOKEN_ID)).save_pretrained(path)
 
 
 def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str, trust_remote_code=False):
     gpt = model.get_submodule(TRANSFORMERS[name])
-    config = hf_config(model_config[name], trust_remote_code)
+    config = AutoConfig.from_pretrained(model_config[name], trust_remote_code=trust_remote_code)
     weights = dict(AutoBridge.from_hf_config(config).export_hf_weights([gpt], cpu=True, show_progress=False))
     hidden_size = config.hidden_size
-    num_tokens = model.config.num_tokens
-    config.vocab_size = num_tokens
+    config.vocab_size = VOCAB_SIZE
     config.tie_word_embeddings = False
     config.dtype = "bfloat16"
 
@@ -69,7 +72,7 @@ def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str
         if name == "bytes_encoder":
             embeddings = model.bytes_encoder.embed.folded_weight().detach() * embedding_scale
         else:  # Inputs are given as embeddings
-            embeddings = torch.zeros(num_tokens, hidden_size)
+            embeddings = torch.zeros(VOCAB_SIZE, hidden_size)
         weights["model.embed_tokens.weight"] = embeddings
         if name == "latent_transformer":
             config.is_mm_prefix_lm = True  # Bidirectional attention ranges, for shift blocks
@@ -78,10 +81,10 @@ def _save_transformer(model: WeLTModel, name: str, model_config: dict, path: str
 
     weights = {k: v.to("cpu", torch.bfloat16).contiguous() for k, v in weights.items()}
     os.makedirs(path, exist_ok=True)
-    config.bos_token_id, config.eos_token_id, config.pad_token_id = 2, 3, 0  # UTF8Tokenizer special tokens
+    config.bos_token_id, config.eos_token_id, config.pad_token_id = BOS_TOKEN_ID, EOS_TOKEN_ID, PAD_TOKEN_ID
     config.save_pretrained(path)
     save_file(weights, os.path.join(path, "model.safetensors"))
-    _save_placeholder_tokenizer(path, num_tokens)
+    _save_placeholder_tokenizer(path)
 
 
 def export(checkpoint: str, output: str):
