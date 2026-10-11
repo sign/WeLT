@@ -27,8 +27,8 @@ class WeLTDatasetProvider(TextDataConfig, DatasetProvider):
         processor = self.processor()
 
         def make_examples(texts: Iterable[str]):
-            for words, seq_lengths in pack_words(map(processor.pretokenize, texts), self.seq_length):
-                yield processor.process_single_example(words=words, seq_lengths=seq_lengths)
+            for packed in pack_words(map(processor.pretokenize, texts), self.seq_length):
+                yield processor.process_single_example(*packed)
 
         train, validation = build_iterators(self, make_examples, collate_fn,
                                             rank=parallel_state.get_data_parallel_rank(),

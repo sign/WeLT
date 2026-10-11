@@ -125,20 +125,30 @@ def build_iterators(config, make_examples: Callable[[Iterable[str]], Iterator[di
     return train, cycle(validation)
 
 
-def pack_words(sequences: Iterable[list[str]], seq_length: int) -> Iterator[tuple[list[str], list[int]]]:
-    """Greedily pack word sequences, in order, into blocks of exactly seq_length words: (words, sequence lengths).
-    Longer sequences are split into seq_length chunks, each its own sequence. Each block is right-padded with PAD
-    words, each its own sequence, for constant shapes."""
-    # ponytail: a chunk's last word is trained as a document end; carry the next chunk's first word as its label
-    # (a label without an input word) if long documents matter
-    words, lengths = [], []
+def pack_words(sequences: Iterable[list[str]], seq_length: int) -> Iterator[tuple[list[str], list[int], list[bool]]]:
+    """Greedily pack word sequences, in order, into blocks of exactly seq_length words: (words, sequence lengths,
+    whether each sequence continues in a later block). Longer sequences are split into seq_length chunks, each its own
+    sequence, overlapping by one word: a chunk's last word has no label, and starts the next chunk, where it predicts
+    the next word (so every word is a label exactly once, as in the baseline's token chunks). Each block is
+    right-padded with PAD words, each its own sequence, for constant shapes."""
+    words, lengths, continues = [], [], []
+
+    def padded():
+        padding = seq_length - len(words)
+        return words + [PAD_TOKEN] * padding, lengths + [1] * padding, continues + [False] * padding
+
     for document in sequences:
-        for start in range(0, len(document), seq_length):
+        start = 0
+        while True:
             sequence = document[start:start + seq_length]
             if len(words) + len(sequence) > seq_length:
-                yield words + [PAD_TOKEN] * (seq_length - len(words)), lengths + [1] * (seq_length - len(words))
-                words, lengths = [], []
+                yield padded()
+                words, lengths, continues = [], [], []
             words += sequence
             lengths.append(len(sequence))
+            continues.append(start + seq_length < len(document))
+            if not continues[-1]:
+                break
+            start += seq_length - 1
     if words:
-        yield words + [PAD_TOKEN] * (seq_length - len(words)), lengths + [1] * (seq_length - len(words))
+        yield padded()

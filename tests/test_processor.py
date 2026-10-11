@@ -109,8 +109,8 @@ def test_packed_dataset_labels_independent(processor):
         "a b",
         "c d",
     ]
-    words, seq_lengths = next(pack_words(map(processor.pretokenize, texts), seq_length=8))
-    example = processor.process_single_example(words, seq_lengths)
+    words, seq_lengths, continues = next(pack_words(map(processor.pretokenize, texts), seq_length=8))
+    example = processor.process_single_example(words, seq_lengths, continues)
     labels = [bytes(label[label > 3].tolist()).decode() if mask else None
               for label, mask in zip(labels_of(example), example["label_mask"], strict=True)]
 
@@ -194,14 +194,20 @@ def test_collate_fn_pads_every_dimension_and_keeps_dtypes():
 @pytest.mark.parametrize("seq_length", [16, 40, 128])
 def test_labels_match_an_oracle_of_the_words(text_processor, seq_length):
     """The labels the model derives (next_word_labels) on packed examples, against labels from the words alone."""
-    for words, seq_lengths in pack_words(map(text_processor.pretokenize, ORACLE_TEXTS * 2), seq_length):
-        example = text_processor.process_single_example(words, seq_lengths)
-        expected = oracle_labels(words, seq_lengths)
+    documents = [text_processor.pretokenize(text) for text in ORACLE_TEXTS * 2]
+    all_labels = []
+    for words, seq_lengths, continues in pack_words(documents, seq_length):
+        example = text_processor.process_single_example(words, seq_lengths, continues)
+        expected = oracle_labels(words, seq_lengths, continues)
+        all_labels += [label for label in expected if label is not None]
         assert example["label_mask"].tolist() == [label is not None for label in expected]
         labels = labels_of(example)[example["label_mask"]]
         tokenized = text_processor.tokenize_words([label for label in expected if label is not None]).input_ids[:, 1:]
         assert torch.equal(labels[:, :tokenized.size(1)], tokenized)
         assert (labels[:, tokenized.size(1):] == 0).all()
+    # Documents split across examples: every word's label appears exactly once, as in the unsplit documents
+    assert all_labels == [label for document in documents for label in oracle_labels(document, [len(document)])
+                          if label is not None]
 
 
 @pytest.mark.parametrize(("words", "warning", "blocks"), [

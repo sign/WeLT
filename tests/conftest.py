@@ -72,15 +72,17 @@ ORACLE_TEXTS = ["<en>\x0eHello world, how are you?\x0f<he> שלום עולם",  
                 "<ase>\x0eM518x529S14c20481x471S27106503x489\x0f<en> hello"]  # SignWriting
 
 
-def oracle_labels(words: list[str], seq_lengths: list[int]) -> list[str | None]:
-    """Each word's label, from the words alone: the next word of its sequence, "" after its last word, and None for
-    PAD words and for the words of a shift block before its ShiftIn (they see each other)."""
+def oracle_labels(words: list[str], seq_lengths: list[int], continues: list[bool] | None = None) -> list[str | None]:
+    """Each word's label, from the words alone: the next word of its sequence, "" after its last word (None if the
+    sequence continues in another example), and None for PAD words and for the words of a shift block before its
+    ShiftIn (they see each other)."""
     labels, start = [], 0
-    for length in seq_lengths:
+    for length, continued in zip(seq_lengths, continues or [False] * len(seq_lengths), strict=True):
         sequence, inside = words[start:start + length], False
         for i, word in enumerate(sequence):
             inside = (inside or word == SO) and word != SI
-            labels.append(None if word == PAD or inside else (sequence + [""])[i + 1])
+            last_of_continued = continued and i == length - 1
+            labels.append(None if word == PAD or inside or last_of_continued else (sequence + [""])[i + 1])
         start += length
     return labels
 
