@@ -261,7 +261,7 @@ class WordEncoder(MegatronModule):  # Its sharded_state_dict recurses into the t
 
     def forward(self, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """inputs: (N, T) bytes, mask: (N, T) True = valid, right padded -> (N, H)"""
-        return self.encode(self.embed(inputs)[mask], mask.sum(dim=-1), mask.size(1))
+        return self.encode(self.embed(inputs[mask]), mask.sum(dim=-1), mask.size(1))  # Embeds only the valid bytes
 
 
 class PatchImageEncoder(WordEncoder):
@@ -360,8 +360,11 @@ class WeLTModel(MegatronModule):
         (N, H) latents, (N, T) targets (each word's bytes and EOS, right padded) -> (targets, vocab) logits, packed,
         and the (N, T) mask of targets."""
         mask = targets != PAD_TOKEN_ID
-        embeds = torch.cat([latents[:, None], self.bytes_decoder_embedding(targets[:, :-1])], dim=1)
-        hidden = run_packed_transformer(self.bytes_decoder, embeds[mask], mask.sum(dim=-1), mask.size(1), causal=True)
+        lengths = mask.sum(dim=-1)
+        # Packed: each word's latent, then the embeddings of its bytes but the last (only the valid ones are embedded)
+        embeds = self.bytes_decoder_embedding(F.pad(targets[:, :-1], (1, 0))[mask])  # Position 0 is replaced
+        embeds = embeds.index_copy(0, F.pad(lengths.cumsum(0), (1, 0))[:-1], latents.to(embeds.dtype))
+        hidden = run_packed_transformer(self.bytes_decoder, embeds, lengths, mask.size(1), causal=True)
         logits, _ = self.bytes_decoder.output_layer(hidden)
         return logits[:, 0], mask
 

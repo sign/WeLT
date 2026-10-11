@@ -53,6 +53,38 @@ occurrence, "hardware" FLOPs encode each distinct word once.
 The remaining time is dominated by memory-bound kernels (SwiGLU, RoPE, norms) of the narrow (128-512 wide)
 transformers, which GB10's bandwidth limits.
 
+### Profile: SignWriting, image + bytes encoders
+
+Measured on GB10: 95 TFLOP/s bf16 matmul (8192³), but ~35 TFLOP/s for the 256-wide layers' matmuls (memory bound),
+223 GB/s device memory, 57 GB/s host to device. A step of
+[`machine-translation-signed-spoken.yaml`](../welt_training/experiments/machine-translation/machine-translation-signed-spoken.yaml)
+(96 examples of 64 words: 6144 words, 1935 distinct) takes 246 ms (279 before the changes below):
+
+| Part | ms | Notes |
+|------|---:|-------|
+| Bytes encoder, forward + backward | 114 | 86k packed bytes (44.7 per sign): memory bound (matmuls, SwiGLU, RoPE, norms at bandwidth) |
+| Image encoder | 23 | 28.7k patches (with CLS) |
+| Latent transformer | 29 | |
+| Bytes decoder (with LM head) | 27 | |
+| Optimizer (Muon) | 33 | 21.6 ms of kernels, the rest launching ~3900 kernels |
+| GPU idle | ~18 | the CPU launching kernels (~5700 per step) after host synchronizations |
+
+- **Data**: 4 workers render a batch in ~75-100 ms, well within a step. A batch is 51 MB (44.5 MB of uint8 patches,
+  padded to the example with the most) and its copy takes 0.9 ms, but copied from the workers' shared memory it page
+  faults (~10 ms), and each new batch shape allocates (~4 ms): batches are now pinned in the data loader's thread,
+  off the step (-12 ms). Fewer bytes (unique words' patches only, uint8 ids) would not shorten the step any more.
+- **Embeddings of valid bytes only** (-21 ms): the encoder and decoder embedded every padded byte position, then
+  gathered the valid ones with a boolean mask, whose backward sorts indices. They now gather the bytes, then embed.
+- **Attention**: FlexAttention over the packed words (6.8 ms per layer forward + backward for the bytes encoder) is
+  faster than FlashAttention 2 varlen (7.9) and PyTorch's varlen attention (9.2); cuDNN's THD backward is
+  unsupported on SM12x.
+- Left: the unique-words sort and boolean masks synchronize the host each step (~8 ms of sorting); the optimizer's
+  launches. Beyond that, the bytes encoder is bound by memory bandwidth over its packed bytes: fewer bytes per sign
+  (SignWriting's 4-byte characters) is a design change, not an optimization.
+
+Profile any config with `profiling.use_pytorch_profiler=true profiling.profile_step_start=60
+profiling.profile_step_end=64` (a trace in `<output_dir>/torch_profile`) and `logger.timing_log_level=2`.
+
 ### Multiple GPUs
 
 [`parity.sh`](parity.sh) trains the machine translation config for 200 steps on the same global batches
@@ -132,19 +164,16 @@ source sentences in shift blocks): **0.599** validation bits per byte at 633 ms 
 192 ms / step.
 
 Training is bit-reproducible (the same seed gives the same losses); between seeds, machine translation's last-step
-bits per byte vary by ~0.01 (0.540 and 0.531 with seeds 42 and 1234), so smaller differences are noise. Variants of
-the bytes decoder's prefix, machine translation (image + bytes encoders), two seeds each (last step / best step):
+bits per byte vary by ~0.01 (0.540 and 0.531 with seeds 42 and 1234), so smaller differences are noise.
+The bytes decoder's input starts with the latent in place of BOS (machine translation, image + bytes encoders, two
+seeds, last step / best step):
 
-| Bytes decoder prefix | Val. bits / byte | Best | ms / step |
+| Bytes decoder input | Val. bits / byte | Best | ms / step |
 |---|--:|--:|--:|
-| latent, BOS (before) | 0.540, 0.531 | 0.533, 0.525 | 186 |
-| latent in place of BOS (main) | 0.529, 0.533 | 0.527, 0.528 | 175 |
-| K=4 vectors mapped from the latent | 0.524, 0.524 | 0.517, 0.517 | 202* |
-| latents of the 2 previous words, then the latent | 0.533, 0.522 | 0.526, 0.519 | 195* |
-| both | 0.523 | 0.516 | 243* |
+| latent, BOS, bytes (before) | 0.540, 0.531 | 0.533, 0.525 | 186 |
+| latent in place of BOS, bytes (main) | 0.529, 0.533 | 0.527, 0.528 | 175 |
 
-\* On another (identical) machine. Dropping BOS is 6% faster at the same quality; K=4 vectors gain ~0.01 bits per
-byte in both seeds, but not in generation (chrF 45.9 vs. 46.1).
+Dropping BOS is 6% faster at the same quality.
 
 ### Examples
 
