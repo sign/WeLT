@@ -137,8 +137,8 @@ the bytes decoder's prefix, machine translation (image + bytes encoders), two se
 
 | Bytes decoder prefix | Val. bits / byte | Best | ms / step |
 |---|--:|--:|--:|
-| latent, BOS (main) | 0.540, 0.531 | 0.533, 0.525 | 186 |
-| latent in place of BOS | 0.529, 0.533 | 0.527, 0.528 | 175 |
+| latent, BOS (before) | 0.540, 0.531 | 0.533, 0.525 | 186 |
+| latent in place of BOS (main) | 0.529, 0.533 | 0.527, 0.528 | 175 |
 | K=4 vectors mapped from the latent | 0.524, 0.524 | 0.517, 0.517 | 202* |
 | latents of the 2 previous words, then the latent | 0.533, 0.522 | 0.526, 0.519 | 195* |
 | both | 0.523 | 0.516 | 243* |
