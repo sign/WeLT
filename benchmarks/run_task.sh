@@ -4,7 +4,8 @@
 set -euo pipefail
 config=$1; output=$2; shift 2
 mkdir -p "$output"
-torchrun --nproc_per_node=1 -m welt_training.train "$config" output_dir="$output" "$@" 2>&1 | tee "$output/train.log"
+# Not piped (to tee): a leftover child process holding the pipe would hang the script after a failure
+torchrun --nproc_per_node=1 -m welt_training.train "$config" output_dir="$output" "$@" > "$output/train.log" 2>&1
 welt-export "$output/checkpoints" --output "$output/export"
 port=${PORT:-8199}
 if curl -s localhost:$port > /dev/null; then echo "Port $port is in use, set PORT" >&2; exit 1; fi

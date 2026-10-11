@@ -131,7 +131,9 @@ train alike, on 2 GPUs.
 Megatron's optimizers, selected by `optimizer.optimizer`: `adam` (default), `sgd`, and the
 [Emerging-Optimizers](https://github.com/NVIDIA-NeMo/Emerging-Optimizers) `muon`, `adaptive_muon`, `soap`, `scion`,
 `lion`, `polargrad`, ... Muon (2D weights orthogonalized, the rest with Adam) is used by
-[`letter-count.yaml`](experiments/easy-tasks/letter-count.yaml) and [`single-query.yaml`](experiments/chat/single-query.yaml).
+the task configs (e.g. [`string-repetition.yaml`](experiments/easy-tasks/string-repetition.yaml),
+[`machine-translation.yaml`](experiments/machine-translation/machine-translation.yaml)); it improved every benchmarked
+task over Adam (see [benchmarks](../benchmarks/README.md#tasks)).
 Their hyperparameters are `OptimizerConfig` fields (e.g. `optimizer.muon_momentum`).
 
 Only UTF-8 bytes are supported; the previous HuggingFace Trainer implementation is at the `huggingface-transformers`
