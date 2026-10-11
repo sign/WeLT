@@ -131,6 +131,21 @@ transformer over Pythia BPE tokens, the same data, batch size, steps and Muon) s
 source sentences in shift blocks): **0.599** validation bits per byte at 633 ms / step, vs. **0.542** for WeLT at
 192 ms / step.
 
+Training is bit-reproducible (the same seed gives the same losses); between seeds, machine translation's last-step
+bits per byte vary by ~0.01 (0.540 and 0.531 with seeds 42 and 1234), so smaller differences are noise. Variants of
+the bytes decoder's prefix, machine translation (image + bytes encoders), two seeds each (last step / best step):
+
+| Bytes decoder prefix | Val. bits / byte | Best | ms / step |
+|---|--:|--:|--:|
+| latent, BOS (main) | 0.540, 0.531 | 0.533, 0.525 | 186 |
+| latent in place of BOS | 0.529, 0.533 | 0.527, 0.528 | 175 |
+| K=4 vectors mapped from the latent | 0.524, 0.524 | 0.517, 0.517 | 202* |
+| latents of the 2 previous words, then the latent | 0.533, 0.522 | 0.526, 0.519 | 195* |
+| both | 0.523 | 0.516 | 243* |
+
+\* On another (identical) machine. Dropping BOS is 6% faster at the same quality; K=4 vectors gain ~0.01 bits per
+byte in both seeds, but not in generation (chrF 45.9 vs. 46.1).
+
 ### Examples
 
 The first 5 validation examples of each task (`␎` and `␏` stand for the shift block controls `\x0E` and `\x0F`).
