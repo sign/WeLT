@@ -120,11 +120,9 @@ def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     words = generator.processor.pretokenize(text)
     batch = {k: v.cuda() for k, v in generator.processor([text]).items()}
     with torch.no_grad():
-        word_embeds = model.encode_words(batch["input_ids"], batch["input_attention_mask"],
-                                         batch["input_patches"], batch["input_patches_shape"])
-        latents = model.latent(word_embeds, batch["attention_mask"])[0]
-        causal = torch.ones_like(batch["attention_mask"]).tril()  # Without the bidirectional shift block
-        causal_latents = model.latent(word_embeds, causal)[0]
+        word_embeds = model.encode_words(batch["input_ids"], batch["input_patches"], batch["input_patches_shape"])
+        latents = model.latent(word_embeds, batch["sequence_ids"], batch["block_ids"])[0]
+        causal_latents = model.latent(word_embeds, batch["sequence_ids"], torch.zeros_like(batch["block_ids"]))[0]
         first_byte_logits, _ = model.decode(latents[-1:], batch["input_ids"][0, :1, :1], torch.ones(1, 1).cuda())
 
     def error(a, b):

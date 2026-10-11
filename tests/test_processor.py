@@ -6,7 +6,7 @@ import torch
 from utf8_tokenizer.control import ControlTokens
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
-from welt.processor import TextImageProcessor, collate_fn
+from welt.processor import TextImageProcessor, collate_fn, next_word_labels
 from welt_training.data_utils import pack_words
 
 
@@ -20,9 +20,13 @@ def text_processor():
     return TextImageProcessor.create(max_word_length=32, render_images=False)
 
 
-expected_tensor_keys = ["input_ids", "input_attention_mask", "attention_mask",
-                        "labels_input", "labels_attention_mask", "labels_output",
-                        "input_patches", "input_patches_shape"]
+expected_tensor_keys = ["input_ids", "sequence_ids", "block_ids", "label_mask", "input_patches", "input_patches_shape"]
+
+
+def labels_of(example: dict) -> torch.Tensor:
+    """Each word's label bytes (BOS, ..., EOS), PAD for words without a label."""
+    return next_word_labels(example["input_ids"][None], example["sequence_ids"][None], example["label_mask"][None],
+                            bos=2, eos=3, pad=0)[0]
 
 
 def test_processor_multiprocessing_pickle(processor):
@@ -35,19 +39,19 @@ def test_packed_padding_does_not_add_eos_labels(processor):
     original = processor.process_single_example(words, [len(words)])
     padded = processor.process_single_example(
         words + [processor.tokenizer.pad_token] * 5, [len(words)] + [1] * 5)
-    assert torch.equal(padded["labels_output"][:len(words)], original["labels_output"])
-    assert (padded["labels_output"][len(words):] == processor.tokenizer.pad_token_id).all()
-    assert (padded["labels_attention_mask"][len(words):] == 0).all()
+    assert torch.equal(labels_of(padded)[:len(words)], labels_of(original))
+    assert not padded["label_mask"][len(words):].any()
+    assert (labels_of(padded)[len(words):] == processor.tokenizer.pad_token_id).all()
 
 
 def test_processor_single_text_value(processor):
     inputs = processor(["a b"])
     assert torch.equal(inputs["input_ids"][0], torch.tensor([[2, 2, 3, 0], [2, 97, 32, 3], [2, 98, 3, 0]]))
-    assert inputs["input_attention_mask"][0].shape == (3, 4)
-    assert inputs["attention_mask"][0].shape == (1, 3, 3)
-    # Unpacked mode: labels are shorter (only next token, not all remaining)
-    assert torch.equal(inputs["labels_input"][0], torch.tensor([[2, 97, 32], [2, 98, 3], [2, 3, 0]]))
-    assert torch.equal(inputs["labels_output"][0], torch.tensor([[97, 32, 3], [98, 3, 0], [3, 0, 0]]))
+    assert inputs["sequence_ids"][0].tolist() == [1, 1, 1]
+    assert inputs["block_ids"][0].tolist() == [0, 0, 0]
+    # Each word predicts the next one; the last one, the end of the text (an empty word)
+    assert torch.equal(labels_of({k: v[0] for k, v in inputs.items()}),
+                       torch.tensor([[2, 97, 32, 3], [2, 98, 3, 0], [2, 3, 0, 0]]))
 
 
 def test_patch_positions():
@@ -94,12 +98,9 @@ def test_get_words_and_labels_respect_max_word_length(processor):
         pretokenizer=WordsSegmentationTokenizer(max_bytes=3), renderer=None)
 
     words = new_processor.pretokenize(text)
-    labels = new_processor.get_sequence_labels(words, [len(words)])
 
     # max_bytes=3 truncates words during pretokenization
     assert words == [ControlTokens.StartOfText, 'thi', 's ', 'is ', 'a ', 'lon', 'g-t', 'est']
-    # Unpacked mode: each token predicts the next token
-    assert labels == ['thi', 's ', 'is ', 'a ', 'lon', 'g-t', 'est', '']
 
 
 def test_packed_dataset_labels_independent(processor):
@@ -108,15 +109,18 @@ def test_packed_dataset_labels_independent(processor):
         "c d",
     ]
     words, seq_lengths = next(pack_words(map(processor.pretokenize, texts), seq_length=8))
-    labels = processor.get_sequence_labels(words, seq_lengths)
+    example = processor.process_single_example(words, seq_lengths)
+    labels = [bytes(label[label > 3].tolist()).decode() if mask else None
+              for label, mask in zip(labels_of(example), example["label_mask"], strict=True)]
 
-    # Unpacked mode: each token predicts only the next token, respecting sequence boundaries
-    # Packing pads with PAD words, each an isolated sequence with an empty label
+    # Each word predicts only the next word of its sequence (the last one, an empty word);
+    # packing pads with PAD words, each an isolated sequence without a label
     assert labels == [
         'a ', 'b', '',
         'c ', 'd', '',
-        '', '',
+        None, None,
     ]
+    assert example["sequence_ids"].tolist() == [1, 1, 1, 2, 2, 2, 3, 4]
 
 
 def test_processor_save_and_load_works(processor):
@@ -150,19 +154,12 @@ def test_multiple_shift_blocks():
 
     result = processor.process_single_example(words, [len(words)])
 
-    # ShiftOut and content inside blocks should have zeroed labels
-    # First block: indices 1, 2, 3 (ShiftOut, "first", "block")
-    # Second block: indices 7, 8, 9 (ShiftOut, "second", "block")
-    masked_indices = [1, 2, 3, 7, 8, 9]
-    for idx in masked_indices:
-        assert result["labels_input"][idx].sum() == 0, f"labels_input at {idx} should be all zeros"
-        assert result["labels_attention_mask"][idx].sum() == 0, f"labels_attention_mask at {idx} should be all zeros"
-
-    # Non-masked positions should have non-zero labels (except last position which has empty label)
-    non_masked_indices = [0, 4, 5, 6, 10]
-    for idx in non_masked_indices:
-        assert result["labels_input"][idx].sum() != 0
-        assert result["labels_attention_mask"][idx].sum() != 0
+    # ShiftOut and the words inside blocks have no label (the blocks attend bidirectionally, ShiftIn included)
+    assert result["label_mask"].int().tolist() == [1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1]
+    assert result["block_ids"].tolist() == [0, 1, 1, 1, 1, 0, 0, 2, 2, 2, 2, 0]
+    labels = labels_of(result)
+    assert (labels[~result["label_mask"]] == 0).all()
+    assert (labels[result["label_mask"]][:, 0] == 2).all()  # Each label starts with BOS
 
 
 def test_bpe_pretokenizer_words_are_text_spans():

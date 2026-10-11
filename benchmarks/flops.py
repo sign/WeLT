@@ -11,6 +11,7 @@ import argparse
 from itertools import islice
 
 from welt.model import hf_config
+from welt.processor import next_word_labels
 from welt_training.data_utils import pack_words, train_texts
 from welt_training.extendable_yaml import load_yaml
 from welt_training.train import build_dataset_provider
@@ -50,12 +51,15 @@ def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
     for _ in range(batches):
         batch = list(islice(examples, micro_batch))
         words = [(tuple(ids[:n].tolist()), n, int(p)) for e in batch
-                 for ids, n, p in zip(e["input_ids"], e["input_attention_mask"].sum(-1).tolist(),
+                 for ids, n, p in zip(e["input_ids"], (e["input_ids"] != 0).sum(-1).tolist(),
                                       e["input_patches_shape"].prod(-1).tolist() if "input_patches_shape" in e
-                                      else e["input_attention_mask"].sum(-1).tolist(),
+                                      else (e["input_ids"] != 0).sum(-1).tolist(),
                                       strict=True) if n > 0]
         common = transformer_flops(configs["latent_transformer"], [len(e["input_ids"]) for e in batch])
-        decoded = [n + 1 for e in batch for n in e["labels_attention_mask"].sum(-1).tolist() if n > 0]
+        # The bytes decoder runs on each label's latent and its bytes but the last (BOS, ..., without EOS)
+        labels = [next_word_labels(*(e[k][None] for k in ("input_ids", "sequence_ids", "label_mask")),
+                                   bos=2, eos=3, pad=0)[0][e["label_mask"]] for e in batch]
+        decoded = [1 + n for label in labels for n in (label[:, :-1] != 0).sum(-1).tolist()]
         common += transformer_flops(configs["bytes_decoder"], decoded)
         for kind, encoded in [("model", words), ("hardware", list(dict.fromkeys(words)))]:
             flops = common

@@ -28,7 +28,7 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex
 from transformers import AutoConfig
 from utf8_tokenizer.byte_embeddings import BitEmbedding
 
-from welt.processor import MAX_PATCH_POSITION, patch_positions
+from welt.processor import MAX_PATCH_POSITION, next_word_labels, patch_positions
 
 PATCH_DIM = 16 * 16 * 3
 
@@ -87,7 +87,9 @@ class WeLTModelProvider(GPTModelProvider):
     bytes_decoder_hf_path: str | None = None
 
     num_tokens: int = 256
-    pad_token_id: int = 0
+    pad_token_id: int = 0  # UTF8Tokenizer's
+    bos_token_id: int = 2
+    eos_token_id: int = 3
 
     @classmethod
     def from_hf(cls, latent_transformer: str, bytes_decoder: str,
@@ -202,8 +204,8 @@ class PackedAttention(nn.Module):
 
 
 class MaskedAttention(nn.Module):
-    """Core attention with an arbitrary (B, 1, S, S) mask (True = masked) in FlexAttention, e.g. the latent
-    transformer's packed sequences with bidirectional shift blocks."""
+    """Core attention in FlexAttention with the block mask carried by attention_mask (see latent_block_mask), e.g. the
+    latent transformer's packed sequences with bidirectional shift blocks."""
 
     def __init__(self, config):
         super().__init__()
@@ -212,17 +214,27 @@ class MaskedAttention(nn.Module):
 
     def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None, **kwargs):
         """(S, B, heads, dim) query, key, value -> (S, B, heads * dim)"""
-        # The mask is shared by all layers of the transformer, cached on it
-        block_mask = getattr(attention_mask, "_welt_block_mask", None)
-        if block_mask is None:
-            allowed = ~attention_mask[:, 0]
-            block_mask = create_block_mask(lambda b, h, q, kv: allowed[b, q, kv], allowed.size(0), None,
-                                           allowed.size(1), allowed.size(2), device=allowed.device, _compile=True)
-            attention_mask._welt_block_mask = block_mask
+        block_mask = attention_mask._welt_block_mask  # Built once for all layers
         query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
         key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
         out = masked_flex_attention(query, key, value, block_mask, self.softmax_scale)
         return out.permute(2, 0, 1, 3).flatten(2)
+
+
+def latent_block_mask(sequence_ids: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+    """The latent transformer's mask, as a FlexAttention block mask carried by a tensor (Megatron passes the attention
+    mask through its layers as is). (B, L) ids of each word's sequence (from 1, 0 for batch padding) and shift block
+    (from 1, 0 for none): words attend causally within their sequence, and bidirectionally within their shift block."""
+    def mask_mod(b, h, q, kv):
+        same_sequence = (sequence_ids[b, q] == sequence_ids[b, kv]) & (sequence_ids[b, q] > 0)
+        same_block = (block_ids[b, q] == block_ids[b, kv]) & (block_ids[b, q] > 0)
+        return same_sequence & ((kv <= q) | same_block)
+
+    batch, length = sequence_ids.shape
+    carrier = sequence_ids.new_empty(0)
+    carrier._welt_block_mask = create_block_mask(mask_mod, batch, None, length, length, device=sequence_ids.device,
+                                                 _compile=True)
+    return carrier
 
 
 def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention: str,
@@ -360,14 +372,13 @@ class WeLTModel(MegatronModule):
 
     def encode_words(self,
                      input_ids: torch.Tensor,
-                     input_attention_mask: torch.Tensor,
                      input_patches: torch.Tensor | None = None,
                      input_patches_shape: torch.Tensor | None = None) -> torch.Tensor:
         """Word embeddings in the latent space: (B, L, T) bytes [+ (B, P, 768) patches, packed per example, and their
         (B, L, 2) rows and columns per word] -> (B, L, H)"""
         B, L, T = input_ids.shape  # noqa: N806
         input_ids = input_ids.view(B * L, T)
-        words_mask = input_attention_mask.view(B * L, T).bool()
+        words_mask = input_ids != self.config.pad_token_id  # Within words, bytes are never PAD
         valid = words_mask[:, 0]  # Words have BOS, batch padding words do not
 
         # Encode each distinct word once (about a third of the words in a batch), its embedding is shared
@@ -397,11 +408,11 @@ class WeLTModel(MegatronModule):
         word_embeds[valid] = embeds[inverse]
         return self.encoder_norm(self.encoder_mapping(word_embeds)).view(B, L, -1)
 
-    def latent(self, word_embeds: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        """(B, L, H) word embeddings, (B, 1, L, L) True = attend -> (B, L, H_decoder) latent vectors"""
+    def latent(self, word_embeds: torch.Tensor, sequence_ids: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
+        """(B, L, H) word embeddings, (B, L) sequence and shift block ids -> (B, L, H_decoder) latent vectors"""
         model = self.latent_transformer
         hidden = model.decoder(hidden_states=word_embeds.transpose(0, 1).contiguous(),  # (S, B, H)
-                               attention_mask=~attention_mask,  # True = masked
+                               attention_mask=latent_block_mask(sequence_ids, block_ids),
                                rotary_pos_emb=model.rotary_pos_emb(word_embeds.size(1)))
         return self.decoder_norm(self.decoder_mapping(hidden.transpose(0, 1)))
 
@@ -417,37 +428,35 @@ class WeLTModel(MegatronModule):
 
     def forward(self,
                 input_ids: torch.Tensor,
-                input_attention_mask: torch.Tensor,
-                attention_mask: torch.Tensor,
-                labels_input: torch.Tensor,
-                labels_attention_mask: torch.Tensor,
-                labels_output: torch.Tensor,
+                sequence_ids: torch.Tensor,
+                block_ids: torch.Tensor,
+                label_mask: torch.Tensor,
                 input_patches: torch.Tensor | None = None,
                 input_patches_shape: torch.Tensor | None = None):
         """
         Args:
-            input_ids: (B, L, T) bytes of each word
-            input_attention_mask: (B, L, T) attention within each word
-            attention_mask: (B, 1, L, L) attention across words, True = attend
-            labels_input: (B, L, T') bytes decoder inputs (next word, without EOS)
-            labels_attention_mask: (B, L, T')
-            labels_output: (B, L, T') bytes decoder targets (next word, without BOS)
+            input_ids: (B, L, T) bytes of each word (BOS, bytes, EOS, right padded)
+            sequence_ids: (B, L) the packed sequence of each word (from 1, 0 for batch padding)
+            block_ids: (B, L) the shift block of each word (from 1, 0 for none)
+            label_mask: (B, L) words that predict the next one (not PAD words, nor within shift blocks)
             input_patches: (B, P, 768) uint8 patches of the rendered words, each word's in turn (without padding)
             input_patches_shape: (B, L, 2) rows and columns of patches of each word
 
         Returns:
-            (N, T') per-byte losses and (N, T') per-byte correctness, for the N words with labels
+            (N, T - 1) per-byte losses, per-byte correctness, and labels (the next words without BOS), for the N words
+            with labels
         """
-        word_embeds = self.encode_words(input_ids, input_attention_mask, input_patches, input_patches_shape)
-        latents = self.latent(word_embeds, attention_mask)
+        word_embeds = self.encode_words(input_ids, input_patches, input_patches_shape)
+        latents = self.latent(word_embeds, sequence_ids, block_ids)
 
         # Only decode words that have a label
-        has_label = labels_attention_mask.flatten(0, 1).any(dim=-1)
-        latents = latents.flatten(0, 1)[has_label]
-        labels_input = labels_input.flatten(0, 1)[has_label]
-        labels_output = labels_output.flatten(0, 1)[has_label]
+        config = self.config
+        labels = next_word_labels(input_ids, sequence_ids, label_mask, config.bos_token_id, config.eos_token_id,
+                                  config.pad_token_id)[label_mask]
+        latents = latents[label_mask]
+        labels_input, labels_output = labels[:, :-1], labels[:, 1:]  # The decoder reads BOS..., predicts ...EOS
 
-        logits, mask = self.decode(latents, labels_input, labels_attention_mask.flatten(0, 1)[has_label])
+        logits, mask = self.decode(latents, labels_input, labels_input != config.pad_token_id)
         # Position t (input byte t-1, or the latent for t=0) predicts output byte t-1
         targets = F.pad(labels_output, (1, 0), value=self.config.pad_token_id)
         packed_targets = targets[mask]

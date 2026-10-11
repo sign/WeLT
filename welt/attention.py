@@ -1,6 +1,5 @@
 import warnings
 
-import torch
 from utf8_tokenizer.control import ControlTokens
 
 
@@ -42,13 +41,3 @@ def get_shift_blocks(words: list[str]):
             "Unclosed Shift Out (SO) block detected at end of sequence. "
             "Missing corresponding Shift In (SI).",
             stacklevel=2)
-
-
-def get_attention_mask_for_packed_sequence(seq_lengths: list[int], words: list[str]) -> torch.Tensor:
-    """(1, words, words) mask of a packed sequence: causal within each sequence, bidirectional within shift blocks
-    (PrefixLM, surrounded by <ShiftOut> and <ShiftIn>: `\x0E` ... `\x0F`)."""
-    sequence = torch.repeat_interleave(torch.arange(len(seq_lengths)), torch.tensor(seq_lengths))
-    mask = (sequence[:, None] == sequence[None]).tril()
-    for start, end in get_shift_blocks(words):
-        mask[start:end + 1, start:end + 1] = True
-    return mask[None]
