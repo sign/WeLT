@@ -214,6 +214,7 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None,
     FlexAttention.
     Returns the model, and its (vocab, hidden) input embeddings table, removed from it."""
     provider.share_embeddings_and_output_weights = False  # embeddings and output layers are replaced
+    provider.vocab_size = VOCAB_SIZE  # Not to build the HF vocabulary's embeddings and output layer
     assert provider.position_embedding_type == "rope", "Only RoPE transformers are supported"
     assert provider.window_size is None, "Sliding window attention is not supported"
     assert not getattr(provider, "attn_logit_softcapping", None), "Attention logit softcapping is not supported"
@@ -285,18 +286,15 @@ class WeLTModel(MegatronModule):
 
         self.bytes_encoder = None
         if config.bytes_encoder is not None:
-            config.bytes_encoder.vocab_size = VOCAB_SIZE
             self.bytes_encoder = WordEncoder(config.bytes_encoder, config.bytes_encoder_hf_path, BitEmbedding)
 
         self.image_encoder = None
         if config.image_encoder is not None:
             self.image_encoder = PatchImageEncoder(config.image_encoder, config.image_encoder_hf_path)
 
-        config.vocab_size = VOCAB_SIZE  # Not to build the HF vocabulary's embeddings and output layer, deleted
         self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path)
 
         decoder_config = config.bytes_decoder
-        decoder_config.vocab_size = VOCAB_SIZE
         self.bytes_decoder, embeddings = build_transformer(decoder_config, config.bytes_decoder_hf_path,
                                                            keep_output_layer=True)
         self.bytes_decoder_embedding = BitEmbedding(embeddings)
@@ -394,7 +392,7 @@ class WeLTModel(MegatronModule):
         latents = self.latent(word_embeds, sequence_ids, block_ids)
 
         # Only decode words that have a label
-        targets = next_word_labels(input_ids, sequence_ids, label_mask)[label_mask][:, 1:]  # Without BOS
+        targets = next_word_labels(input_ids, sequence_ids, label_mask)[label_mask]
         logits, mask = self.decode(latents[label_mask], targets)
         packed_targets = targets[mask]
         # (S, B, V) logits and (B, S) labels

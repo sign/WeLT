@@ -1,3 +1,4 @@
+import itertools
 import json
 import os
 import warnings
@@ -9,7 +10,7 @@ from font_download.example_fonts.noto_sans import FONTS_NOTO_SANS
 from pixel_renderer import PixelRendererProcessor
 from transformers import AutoTokenizer, PreTrainedTokenizer
 from utf8_tokenizer.control import ControlTokens
-from utf8_tokenizer.tokenizer import BOS_TOKEN_ID, EOS_TOKEN_ID, PAD_TOKEN_ID, UTF8Tokenizer
+from utf8_tokenizer.tokenizer import EOS_TOKEN_ID, PAD_TOKEN_ID, UTF8Tokenizer
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.patches import PATCH_SIZE, patchify
@@ -23,13 +24,14 @@ def collate_fn(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
 
 
 def next_word_labels(input_ids: torch.Tensor, sequence_ids: torch.Tensor, label_mask: torch.Tensor) -> torch.Tensor:
-    """(B, L, T) bytes of each word -> the bytes each word predicts: the next word of its sequence, an empty word
-    (BOS, EOS) after the last word of a sequence, and nothing (PAD) for words without a label (label_mask)."""
-    labels = input_ids.roll(-1, dims=1)
+    """(B, L, T) bytes of each word (with BOS) -> (B, L, T - 1) the bytes each word predicts: the next word of its
+    sequence (without BOS), an empty word (EOS) after the last word of a sequence, and nothing (PAD) for words without
+    a label (label_mask)."""
+    labels = input_ids[..., 1:].roll(-1, dims=1)
     last = sequence_ids != sequence_ids.roll(-1, dims=1)
     last[:, -1] = True
-    empty = torch.full_like(input_ids[0, 0], PAD_TOKEN_ID)
-    empty[:2] = torch.tensor([BOS_TOKEN_ID, EOS_TOKEN_ID])
+    empty = torch.full_like(labels[0, 0], PAD_TOKEN_ID)
+    empty[0] = EOS_TOKEN_ID
     labels = torch.where(last[..., None], empty, labels)
     return labels.masked_fill(~label_mask[..., None], PAD_TOKEN_ID)
 
@@ -135,7 +137,10 @@ class TextImageProcessor:
         sequence_ids = torch.repeat_interleave(torch.arange(1, len(seq_lengths) + 1), torch.tensor(seq_lengths))
         block_ids = torch.zeros(len(words), dtype=torch.long)
         label_mask = torch.tensor([word != self.tokenizer.pad_token for word in words])
-        for block, (start, end) in enumerate(get_shift_blocks(words), start=1):
+        offsets = itertools.accumulate(seq_lengths, initial=0)
+        blocks = [(offset + start, offset + end) for offset, length in zip(offsets, seq_lengths, strict=False)
+                  for start, end in get_shift_blocks(words[offset:offset + length])]
+        for block, (start, end) in enumerate(blocks, start=1):
             block_ids[start:end + 1] = block
             label_mask[start:end] = False
         example = {"input_ids": self.tokenize_words(words).input_ids, "sequence_ids": sequence_ids,

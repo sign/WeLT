@@ -7,6 +7,7 @@ import pytest
 import torch
 import yaml
 from datasets import Dataset
+from utf8_tokenizer.tokenizer import EOS_TOKEN_ID
 
 from tests.conftest import free_port
 
@@ -97,8 +98,8 @@ def test_generate_with_vllm(trained):
     from vllm import SamplingParams
 
     latents = torch.randn(64, generator.weights["decoder_norm.weight"].size(0), device="cuda").bfloat16()
-    sampling = SamplingParams(temperature=2.0, seed=0, max_tokens=generator.processor.max_word_length - 1,
-                              stop_token_ids=[generator.tokenizer.eos_token_id], detokenize=False)
+    sampling = SamplingParams(temperature=2.0, seed=0, max_tokens=generator.processor.max_word_length - 2,
+                              stop_token_ids=[EOS_TOKEN_ID], detokenize=False)
     words = generator._next_words(latents, [b""] * len(latents), sampling)
     assert any(max(word, default=0) >= 0x80 for word in words)  # Multi-byte characters were sampled
     for word in words:
@@ -151,4 +152,4 @@ def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     greedy = SamplingParams(temperature=0, max_tokens=1, detokenize=False)
     next_word = generator._next_words(latent[None], [b""], greedy)[0]
     first_byte = first_byte_logits[0].argmax().item()
-    assert next_word[:1] == (b"" if first_byte == generator.tokenizer.eos_token_id else bytes([first_byte]))
+    assert next_word[:1] == (b"" if first_byte == EOS_TOKEN_ID else bytes([first_byte]))
