@@ -32,7 +32,6 @@ dependencies = [
 dev = [
     "ruff",
     "pytest",
-    "matplotlib", # For benchmarks/plot.py
 ]
 
 [tool.setuptools]
