@@ -17,7 +17,7 @@ Both log validation `bits per byte` (see the [README](../../../README.md#train))
 
 ## Results
 
-10000 steps each, on one GB10, validation bits per byte at the last step (and the best step):
+10000 steps each, on one GB10, with the BOS bytes decoder (before the latent took its place), validation bits per byte at the last step (and the best step):
 
 | Data | WeLT | Baseline | ms / step (WeLT, baseline) |
 |------|-----:|---------:|---------------------------:|
