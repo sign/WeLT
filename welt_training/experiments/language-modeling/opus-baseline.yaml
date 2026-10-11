@@ -1,0 +1,11 @@
+# Subword causal LM baseline for opus-welt.yaml: the same text, transformer and training
+$extends: ../machine-translation/baseline.yaml
+
+output_dir: ./output/lm-opus-baseline
+
+data:
+  dataset_text_template: "{translation[en]}\n{translation[he]}"
+  seq_length: 352  # Tokens: as much text as opus-welt.yaml's 128 words (2.71 Pythia tokens per word)
+
+logger:
+  wandb_project: welt-language-modeling

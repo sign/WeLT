@@ -1,0 +1,18 @@
+# Language modeling: English Wikipedia (wikitext-103), WeLT with the machine translation models, against
+# wikitext-baseline.yaml
+$extends: ../machine-translation/machine-translation.yaml
+
+output_dir: ./output/lm-wikitext-welt
+
+data:
+  dataset_name: Salesforce/wikitext
+  dataset_config_name: wikitext-103-raw-v1
+  dataset_text_template: null  # The text column
+  seq_length: 256
+
+train:
+  micro_batch_size: 32
+  global_batch_size: 32
+
+logger:
+  wandb_project: welt-language-modeling

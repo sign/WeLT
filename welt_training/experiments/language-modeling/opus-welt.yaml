@@ -1,0 +1,11 @@
+# Language modeling: opus-100 en-he sentence pairs as plain text (no shift block, every byte scored), WeLT with the
+# machine translation models, against opus-baseline.yaml
+$extends: ../machine-translation/machine-translation.yaml
+
+output_dir: ./output/lm-opus-welt
+
+data:
+  dataset_text_template: "{translation[en]}\n{translation[he]}"
+
+logger:
+  wandb_project: welt-language-modeling
