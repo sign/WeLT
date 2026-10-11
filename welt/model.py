@@ -178,70 +178,47 @@ def packed_block_mask(cu_seqlens: torch.Tensor, causal: bool) -> BlockMask:
                                     mask_mod=mask_mod, seq_lengths=(total, total))
 
 
-class PackedAttention(nn.Module):
-    """Core attention over packed (THD) short sequences, e.g. the bytes of each word, with FlexAttention.
+class FlexCoreAttention(nn.Module):
+    """Megatron's core attention in FlexAttention, with a block mask built once for all layers by the transformer's
+    caller: on packed_seq_params for packed (THD) short sequences, e.g. the bytes of each word (packed_block_mask),
+    otherwise on attention_mask, e.g. the latent transformer's words (latent_block_mask).
     Varlen flash attention is ~2x slower on thousands of few-token sequences (its backward pads per sequence)."""
-
-    def __init__(self, config, causal: bool):
-        super().__init__()
-        assert not config.attention_dropout, "Attention dropout is not supported"
-        self.causal = causal
-        self.softmax_scale = config.softmax_scale
-
-    def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None,
-                packed_seq_params: PackedSeqParams = None, **kwargs):
-        """(T, heads, dim) packed query, key, value -> (T, heads, dim)"""
-        # The mask is shared by all layers of the transformer, cached on its packed_seq_params
-        cache_key = f"_welt_block_mask_{self.causal}"
-        block_mask = getattr(packed_seq_params, cache_key, None)
-        if block_mask is None:
-            block_mask = packed_block_mask(packed_seq_params.cu_seqlens_q, self.causal)
-            setattr(packed_seq_params, cache_key, block_mask)
-        query, key, value = (t.transpose(0, 1).unsqueeze(0) for t in (query, key, value))
-        key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
-        out = packed_flex_attention(query, key, value, block_mask, self.softmax_scale)
-        return out.squeeze(0).transpose(0, 1)
-
-
-class MaskedAttention(nn.Module):
-    """Core attention in FlexAttention with the block mask carried by attention_mask (see latent_block_mask), e.g. the
-    latent transformer's packed sequences with bidirectional shift blocks."""
 
     def __init__(self, config):
         super().__init__()
         assert not config.attention_dropout, "Attention dropout is not supported"
         self.softmax_scale = config.softmax_scale
 
-    def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None, **kwargs):
-        """(S, B, heads, dim) query, key, value -> (S, B, heads * dim)"""
-        block_mask = attention_mask._welt_block_mask  # Built once for all layers
-        query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
+    def forward(self, query, key, value, attention_mask=None, attn_mask_type=None, attention_bias=None,
+                packed_seq_params: PackedSeqParams | None = None, **kwargs):
+        """(T, heads, dim) packed query, key, value -> (T, heads, dim), or (S, B, heads, dim) -> (S, B, heads * dim)"""
+        if packed_seq_params is not None:
+            query, key, value = (t.transpose(0, 1)[None] for t in (query, key, value))
+            attention, block_mask = packed_flex_attention, packed_seq_params.block_mask
+        else:
+            query, key, value = (t.permute(1, 2, 0, 3) for t in (query, key, value))
+            attention, block_mask = masked_flex_attention, attention_mask.block_mask
         key, value = repeat_kv(key, query.size(1)), repeat_kv(value, query.size(1))
-        out = masked_flex_attention(query, key, value, block_mask, self.softmax_scale)
-        return out.permute(2, 0, 1, 3).flatten(2)
+        out = attention(query, key, value, block_mask, self.softmax_scale)
+        return out[0].transpose(0, 1) if packed_seq_params is not None else out.permute(2, 0, 1, 3).flatten(2)
 
 
-def latent_block_mask(sequence_ids: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
-    """The latent transformer's mask, as a FlexAttention block mask carried by a tensor (Megatron passes the attention
-    mask through its layers as is). (B, L) ids of each word's sequence (from 1, 0 for batch padding) and shift block
-    (from 1, 0 for none): words attend causally within their sequence, and bidirectionally within their shift block."""
+def latent_block_mask(sequence_ids: torch.Tensor, block_ids: torch.Tensor) -> BlockMask:
+    """The latent transformer's mask from (B, L) ids of each word's sequence (from 1, 0 for batch padding) and shift
+    block (from 1, 0 for none): words attend causally within their sequence, and bidirectionally within their block."""
     def mask_mod(b, h, q, kv):
         same_sequence = (sequence_ids[b, q] == sequence_ids[b, kv]) & (sequence_ids[b, q] > 0)
         same_block = (block_ids[b, q] == block_ids[b, kv]) & (block_ids[b, q] > 0)
         return same_sequence & ((kv <= q) | same_block)
 
     batch, length = sequence_ids.shape
-    carrier = sequence_ids.new_empty(0)
-    carrier._welt_block_mask = create_block_mask(mask_mod, batch, None, length, length, device=sequence_ids.device,
-                                                 _compile=True)
-    return carrier
+    return create_block_mask(mask_mod, batch, None, length, length, device=sequence_ids.device, _compile=True)
 
 
-def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention: str,
+def build_transformer(provider: GPTModelProvider, hf_path: str | None,
                       keep_output_layer=False) -> tuple[GPTModel, torch.Tensor]:
-    """Build a Megatron GPTModel, load HF weights, then drop the parts WeLT replaces.
-    attention: "arbitrary" (an attention_mask, BSHD) or "causal"/"bidirectional" (packed short sequences, THD).
-    Attention is replaced by FlexAttention.
+    """Build a Megatron GPTModel, load HF weights, then drop the parts WeLT replaces. Attention is replaced by
+    FlexAttention.
     Returns the model, and its (vocab, hidden) input embeddings table, removed from it."""
     provider.share_embeddings_and_output_weights = False  # embeddings and output layers are replaced
     assert provider.position_embedding_type == "rope", "Only RoPE transformers are supported"
@@ -255,10 +232,7 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
             [model], allowed_mismatched_params=["embedding.word_embeddings.weight", "output_layer.weight"])
 
     for layer in model.decoder.layers:
-        if attention == "arbitrary":
-            layer.self_attention.core_attention = MaskedAttention(provider)
-        else:
-            layer.self_attention.core_attention = PackedAttention(provider, causal=attention == "causal")
+        layer.self_attention.core_attention = FlexCoreAttention(provider)
 
     embeddings = model.embedding.word_embeddings.weight.detach()
     del model.embedding
@@ -268,13 +242,14 @@ def build_transformer(provider: GPTModelProvider, hf_path: str | None, attention
     return model, embeddings
 
 
-def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, lengths: torch.Tensor, max_length: int
-                           ) -> torch.Tensor:
+def run_packed_transformer(model: GPTModel, hidden: torch.Tensor, lengths: torch.Tensor, max_length: int,
+                           causal: bool) -> torch.Tensor:
     """Runs (T, H) packed sequences (THD format) of the given lengths (at most max_length) -> (T, 1, H) outputs,
     including the final layer norm."""
     cu_seqlens = F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0))
     params = PackedSeqParams(qkv_format="thd", cu_seqlens_q=cu_seqlens, cu_seqlens_kv=cu_seqlens,
                              max_seqlen_q=max_length, max_seqlen_kv=max_length)
+    params.block_mask = packed_block_mask(cu_seqlens, causal)  # For FlexCoreAttention
     return model.decoder(hidden_states=hidden.unsqueeze(1), attention_mask=None,
                          rotary_pos_emb=model.rotary_pos_emb(max_length, packed_seq=True), packed_seq_params=params)
 
@@ -284,13 +259,13 @@ class WordEncoder(MegatronModule):  # Its sharded_state_dict recurses into the t
 
     def __init__(self, provider: GPTModelProvider, hf_path: str | None, embed: type[nn.Module]):
         super().__init__(config=provider)
-        self.transformer, embeddings = build_transformer(provider, hf_path, "bidirectional")
+        self.transformer, embeddings = build_transformer(provider, hf_path)
         self.embed = embed(embeddings)  # Initialized from the (possibly pretrained) input embeddings
         self.hidden_size = provider.hidden_size
 
     def encode(self, hidden: torch.Tensor, lengths: torch.Tensor, max_length: int) -> torch.Tensor:
         """(T, H) packed sequences of the given lengths -> (N, H) outputs of their first positions"""
-        hidden = run_packed_transformer(self.transformer, hidden, lengths, max_length)
+        hidden = run_packed_transformer(self.transformer, hidden, lengths, max_length, causal=False)
         return hidden[F.pad(lengths.cumsum(0), (1, 0))[:-1], 0]
 
     def forward(self, inputs: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -351,11 +326,11 @@ class WeLTModel(MegatronModule):
             self.image_encoder = PatchImageEncoder(config.image_encoder, config.image_encoder_hf_path)
 
         config.vocab_size = config.num_tokens  # Not to build the HF vocabulary's embeddings and output layer, deleted
-        self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path, "arbitrary")
+        self.latent_transformer, _ = build_transformer(config, config.latent_transformer_hf_path)
 
         decoder_config = config.bytes_decoder
         decoder_config.vocab_size = config.num_tokens
-        self.bytes_decoder, embeddings = build_transformer(decoder_config, config.bytes_decoder_hf_path, "causal",
+        self.bytes_decoder, embeddings = build_transformer(decoder_config, config.bytes_decoder_hf_path,
                                                            keep_output_layer=True)
         self.bytes_decoder_embedding = BitEmbedding(embeddings)
 
@@ -411,8 +386,10 @@ class WeLTModel(MegatronModule):
     def latent(self, word_embeds: torch.Tensor, sequence_ids: torch.Tensor, block_ids: torch.Tensor) -> torch.Tensor:
         """(B, L, H) word embeddings, (B, L) sequence and shift block ids -> (B, L, H_decoder) latent vectors"""
         model = self.latent_transformer
+        mask = sequence_ids.new_empty(0)  # Megatron passes the attention mask through its layers as is
+        mask.block_mask = latent_block_mask(sequence_ids, block_ids)  # For FlexCoreAttention
         hidden = model.decoder(hidden_states=word_embeds.transpose(0, 1).contiguous(),  # (S, B, H)
-                               attention_mask=latent_block_mask(sequence_ids, block_ids),
+                               attention_mask=mask,
                                rotary_pos_emb=model.rotary_pos_emb(word_embeds.size(1)))
         return self.decoder_norm(self.decoder_mapping(hidden.transpose(0, 1)))
 
@@ -422,7 +399,7 @@ class WeLTModel(MegatronModule):
         where the logits at each latent position are a prediction of the first input byte (which is BOS)."""
         embeds = torch.cat([latents[:, None], self.bytes_decoder_embedding(labels_input)], dim=1)
         mask = F.pad(labels_mask.bool(), (1, 0), value=True)
-        hidden = run_packed_transformer(self.bytes_decoder, embeds[mask], mask.sum(dim=-1), mask.size(1))
+        hidden = run_packed_transformer(self.bytes_decoder, embeds[mask], mask.sum(dim=-1), mask.size(1), causal=True)
         logits, _ = self.bytes_decoder.output_layer(hidden)
         return logits[:, 0], mask
 

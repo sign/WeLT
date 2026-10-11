@@ -25,8 +25,7 @@ from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
 from vllm.config import PoolerConfig  # noqa: E402
 from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
-from welt.attention import get_shift_blocks  # noqa: E402
-from welt.processor import TextImageProcessor, patch_positions  # noqa: E402
+from welt.processor import TextImageProcessor, get_shift_blocks, patch_positions  # noqa: E402
 from welt.utf8 import UTF8LogitsProcessor  # noqa: E402
 from welt.vllm_plugin import RANGES_KEY  # noqa: E402
 
