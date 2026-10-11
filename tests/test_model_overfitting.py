@@ -14,9 +14,8 @@ TRAIN_TEXTS = ["a b", "b a", "a cat", "a dog"]
 
 def train(model, processor, packed: bool, steps: int = 600):
     if packed:
-        examples = pack_words({"words": [processor.pretokenize(text) for text in TRAIN_TEXTS]}, seq_length=7)
-        batch = collate_fn([processor.process_single_example(w, lengths)
-                            for w, lengths in zip(examples["words"], examples["seq_lengths"], strict=True)])
+        batch = collate_fn([processor.process_single_example(words, lengths)
+                            for words, lengths in pack_words(map(processor.pretokenize, TRAIN_TEXTS), seq_length=7)])
     else:
         batch = processor(TRAIN_TEXTS)
     batch = {k: v.cuda() for k, v in batch.items()}

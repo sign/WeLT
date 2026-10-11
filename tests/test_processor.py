@@ -3,12 +3,11 @@ import tempfile
 
 import pytest
 import torch
-from datasets import Dataset
 from utf8_tokenizer.control import ControlTokens
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
 from welt.processor import TextImageProcessor
-from welt_training.data_utils import pack_dataset
+from welt_training.data_utils import pack_words
 
 
 @pytest.fixture(scope="module")
@@ -110,26 +109,14 @@ def test_packed_dataset(processor):
         "yes.",
         "a b c"
     ]
-    dataset = Dataset.from_dict({"text": texts})
-    packed_dataset = pack_dataset(processor, dataset, seq_length=7)
+    packed = list(pack_words(map(processor.pretokenize, texts), seq_length=7))
 
     pad = "\x00"
-    assert packed_dataset[:] == {
-        'seq_lengths': [
-            [2, 3, 2],
-            [4, 1, 1, 1],
-        ],
-        'words': [
-            [
-                ControlTokens.StartOfText, 'hi!',
-                ControlTokens.StartOfText, 'hello ', 'world',
-                ControlTokens.StartOfText, 'yes.',
-            ],
-            [
-                ControlTokens.StartOfText, 'a ', 'b ', 'c', pad, pad, pad,
-            ],
-        ],
-    }
+    assert packed == [
+        ([ControlTokens.StartOfText, 'hi!', ControlTokens.StartOfText, 'hello ', 'world',
+          ControlTokens.StartOfText, 'yes.'], [2, 3, 2]),
+        ([ControlTokens.StartOfText, 'a ', 'b ', 'c', pad, pad, pad], [4, 1, 1, 1]),
+    ]
 
 
 def test_packed_dataset_labels_independent(processor):
@@ -137,11 +124,8 @@ def test_packed_dataset_labels_independent(processor):
         "a b",
         "c d",
     ]
-    dataset = Dataset.from_dict({"text": texts})
-    packed_dataset = pack_dataset(processor, dataset, seq_length=8)
-
-    datum = next(iter(packed_dataset))
-    labels = processor.get_sequence_labels(datum["words"], datum["seq_lengths"])
+    words, seq_lengths = next(pack_words(map(processor.pretokenize, texts), seq_length=8))
+    labels = processor.get_sequence_labels(words, seq_lengths)
 
     # Unpacked mode: each token predicts only the next token, respecting sequence boundaries
     # Packing pads with PAD words, each an isolated sequence with an empty label

@@ -1,4 +1,4 @@
-# Pretraining on prepared data shards (see `welt-prepare-data` in welt_training/README.md)
+# Pretraining on the Pile, streamed
 output_dir: ./output/welt-pile-pretrain
 
 model:
@@ -7,7 +7,7 @@ model:
   bytes_decoder: sbintuitions/tiny-lm
 
 data:
-  prepared_data_path: /scratch/data/pretrain
+  dataset_name: monology/pile-uncopyrighted
   seq_length: 512
   max_word_length: 32
   max_eval_samples: 512
