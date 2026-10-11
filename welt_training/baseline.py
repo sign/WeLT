@@ -28,55 +28,43 @@ from welt.model import safetensors_checkpoint, transformer_provider
 from welt_training.data_utils import TextDataConfig, build_iterators
 from welt_training.train import build_config, main, report, to_cuda
 
-
-def token_byte_lengths(tokenizer) -> torch.Tensor:
-    """UTF-8 bytes of the text of each token id, 0 for special tokens. Exact for byte-level BPE vocabularies
-    (GPT-2, Pythia, Llama 3, Qwen) and SentencePiece ones ("▁" for spaces, <0xNN> byte fallback; their dummy
-    prefix space counts as a byte)."""
-    vocab = tokenizer.convert_ids_to_tokens(list(range(len(tokenizer))))
-    byte_level = tokenizer.is_fast and '"ByteLevel"' in tokenizer.backend_tokenizer.to_str()
-    special = set(tokenizer.all_special_ids)
-    lengths = []
-    for token_id, token in enumerate(vocab):
-        if token_id in special or token is None:
-            lengths.append(0)
-        elif byte_level:
-            lengths.append(len(token))  # ByteLevel maps each byte to one character
-        elif re.fullmatch(r"<0x[0-9A-Fa-f]{2}>", token):
-            lengths.append(1)
-        else:
-            lengths.append(len(token.replace("▁", " ").encode("utf-8")))
-    return torch.tensor(lengths, dtype=torch.long)
-
-
 SHIFT_BLOCK = re.compile("\x0e[^\x0f]*\x0f")
 
 
-def token_chunks(texts: Iterable[str], tokenizer, length: int) -> Iterator[tuple[list[int], list[int]]]:
+def token_chunks(texts: Iterable[str], tokenizer, length: int) -> Iterator[tuple[list[int], list[int], list[int]]]:
     """Tokenize texts, concatenate them (each after an EOS), and split into chunks of `length` tokens: (ids, loss
-    mask). Chunks overlap by one token, so that every token is a label exactly once; the last one is padded with EOS.
-    The loss mask is 0 for the padding, and for the tokens within shift blocks (after \x0E, up to \x0F)."""
-    ids, mask = [], []
+    mask, UTF-8 bytes of each token's text). Chunks overlap by one token, so that every token is a label exactly once;
+    the last one is padded with EOS. The loss mask is 0 for the padding, and for the tokens within shift blocks
+    (after \x0E, up to \x0F). A token's bytes are the text since the previous token's end (0 for EOS, and for the
+    second part of a character split across tokens)."""
+    ids, mask, nbytes = [], [], []
     for text in texts:
         encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
         blocks = [(match.start(), match.end()) for match in SHIFT_BLOCK.finditer(text)]
         ids += [tokenizer.eos_token_id, *encoded.input_ids]
         mask += [1, *(int(not any(start + 1 < end <= block_end for start, block_end in blocks))
                       for _, end in encoded.offset_mapping)]
+        nbytes.append(0)
+        previous = 0
+        for _, end in encoded.offset_mapping:
+            nbytes.append(len(text[previous:max(end, previous)].encode()))
+            previous = max(end, previous)
         while len(ids) >= length:
-            yield ids[:length], mask[:length]
-            ids, mask = ids[length - 1:], mask[length - 1:]
+            yield ids[:length], mask[:length], nbytes[:length]
+            ids, mask, nbytes = ids[length - 1:], mask[length - 1:], nbytes[length - 1:]
     if len(ids) > 1:
         padding = length - len(ids)
-        yield ids + [tokenizer.eos_token_id] * padding, mask + [0] * padding
+        yield ids + [tokenizer.eos_token_id] * padding, mask + [0] * padding, nbytes + [0] * padding
 
 
-def token_examples(texts: Iterable[str], tokenizer, byte_lengths: torch.Tensor, length: int) -> Iterator[dict]:
-    """Token chunks of length + 1 as inputs, labels, their loss mask, and the UTF-8 bytes of each (scored) label."""
-    for ids, loss_mask in token_chunks(texts, tokenizer, length + 1):
+def token_examples(texts: Iterable[str], tokenizer, length: int) -> Iterator[dict]:
+    """Token chunks of length + 1 as inputs, labels, their loss mask, the UTF-8 bytes of each scored label, and which
+    labels are scored text (not EOS)."""
+    for ids, loss_mask, nbytes in token_chunks(texts, tokenizer, length + 1):
         ids, loss_mask = torch.tensor(ids), torch.tensor(loss_mask[1:])
         yield {"input_ids": ids[:-1], "labels": ids[1:], "loss_mask": loss_mask,
-               "label_bytes": byte_lengths[ids[1:]] * loss_mask}
+               "label_bytes": torch.tensor(nbytes[1:]) * loss_mask,
+               "text_mask": loss_mask * (ids[1:] != tokenizer.eos_token_id)}
 
 
 @dataclass(kw_only=True)
@@ -86,20 +74,19 @@ class TokensDatasetProvider(TextDataConfig, DatasetProvider):
 
     def build_datasets(self, context: DatasetBuildContext):
         tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name, trust_remote_code=self.trust_remote_code)
-        make_examples = partial(token_examples, tokenizer=tokenizer, byte_lengths=token_byte_lengths(tokenizer),
-                                length=self.seq_length)
+        make_examples = partial(token_examples, tokenizer=tokenizer, length=self.seq_length)
         train, validation = build_iterators(self, make_examples, torch.utils.data.default_collate,
                                             rank=parallel_state.get_data_parallel_rank(),
                                             world_size=parallel_state.get_data_parallel_world_size())
         return train, validation, None
 
 
-def loss_func(losses: torch.Tensor, loss_mask: torch.Tensor, label_bytes: torch.Tensor):
+def loss_func(losses: torch.Tensor, loss_mask: torch.Tensor, label_bytes: torch.Tensor, text_mask: torch.Tensor):
     """Per-token cross entropy, plus bits per byte over the scored text tokens (not EOS)."""
     losses = losses.float()
     loss, num_tokens, metrics = masked_next_token_loss(loss_mask, losses)  # With NaN / Inf checks
     return loss, num_tokens, metrics | {
-        "bits per byte": report((losses * (label_bytes > 0)).sum() / math.log(2), label_bytes.sum()),
+        "bits per byte": report((losses * text_mask).sum() / math.log(2), label_bytes.sum()),
     }
 
 
@@ -108,7 +95,8 @@ def forward_step(state, data_iterator, model, return_schedule_plan: bool = False
     input_ids = batch["input_ids"]
     position_ids = torch.arange(input_ids.size(1), device=input_ids.device).expand_as(input_ids)
     losses = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None, labels=batch["labels"])
-    return losses, partial(loss_func, loss_mask=batch["loss_mask"], label_bytes=batch["label_bytes"])
+    return losses, partial(loss_func, loss_mask=batch["loss_mask"], label_bytes=batch["label_bytes"],
+                           text_mask=batch["text_mask"])
 
 
 def build(config: dict):
