@@ -14,3 +14,16 @@ torchrun --nproc_per_node=1 -m welt_training.baseline welt_training/experiments/
 ```
 
 Both log validation `bits per byte` (see the [README](../../../README.md#train)), which compare directly.
+
+## Results
+
+10000 steps each, on one GB10, validation bits per byte at the last step (and the best step):
+
+| Data | WeLT | Baseline | ms / step (WeLT, baseline) |
+|------|-----:|---------:|---------------------------:|
+| opus-100 en-he | **1.077** (1.061) | 1.093 (1.073) | **244**, 517 |
+| wikitext-103 | 1.199 | **1.165** | **197**, 226 |
+
+The baseline's sequence lengths match WeLT's text per example: Pythia's tokenizer splits opus-100 (half Hebrew) into
+2.7 tokens per word, but wikitext into 1.1. WeLT wins where subword tokens are short (2.1x faster per step, and
+better), and the baseline where they are nearly whole words.
