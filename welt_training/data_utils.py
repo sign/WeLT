@@ -13,9 +13,6 @@ from utf8_tokenizer.tokenizer import PAD_TOKEN
 
 logger = logging.getLogger(__name__)
 
-PAD_WORD = PAD_TOKEN  # Each its own sequence, without a label (see TextImageProcessor)
-
-
 @dataclass(kw_only=True)
 class TextDataConfig:
     """Where the texts come from, and how they are formatted."""
@@ -30,7 +27,7 @@ class TextDataConfig:
     max_eval_samples: int = 256
     shuffle_buffer_size: int = 10_000
     seed: int = 42
-    trust_remote_code: bool = False
+    trust_remote_code: bool = False  # For the pretokenizer (datasets 4 runs no dataset scripts)
 
     # Set by the training config: micro batches drawn per evaluation, per data parallel rank, and their size
     eval_micro_batches: int = 1
@@ -55,7 +52,8 @@ class TextDataConfig:
         def format_text(example):
             if template is None and "text" not in example:
                 raise ValueError(f"No 'text' column (columns: {list(example)}), set data.dataset_text_template")
-            return {"text": example["text"] if template is None else template.format(**example)}
+            text = example["text"] if template is None else template.format(**example)
+            return {"text": text.replace("\x00", "")}  # NUL is the PAD byte
 
         dataset = self.examples(split)
         return dataset.map(format_text, remove_columns=dataset.column_names).filter(lambda e: len(e["text"]) > 0)
@@ -132,9 +130,9 @@ def pack_words(sequences: Iterable[list[str]], seq_length: int) -> Iterator[tupl
         for start in range(0, len(document), seq_length):
             sequence = document[start:start + seq_length]
             if len(words) + len(sequence) > seq_length:
-                yield words + [PAD_WORD] * (seq_length - len(words)), lengths + [1] * (seq_length - len(words))
+                yield words + [PAD_TOKEN] * (seq_length - len(words)), lengths + [1] * (seq_length - len(words))
                 words, lengths = [], []
             words += sequence
             lengths.append(len(sequence))
     if words:
-        yield words + [PAD_WORD] * (seq_length - len(words)), lengths + [1] * (seq_length - len(words))
+        yield words + [PAD_TOKEN] * (seq_length - len(words)), lengths + [1] * (seq_length - len(words))

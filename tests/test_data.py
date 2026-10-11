@@ -2,18 +2,19 @@ from itertools import islice
 
 import pytest
 from datasets import Dataset
+from utf8_tokenizer.tokenizer import PAD_TOKEN
 
-from welt_training.data_utils import PAD_WORD, TextDataConfig, build_iterators, pack_words, train_texts
+from welt_training.data_utils import TextDataConfig, build_iterators, pack_words, train_texts
 
 
 def test_pack_words_fills_blocks_and_pads():
     packed = list(pack_words([["a", "b"], ["c", "d", "e"], ["f", "g", "h", "i"]], seq_length=5))
-    assert packed == [(["a", "b", "c", "d", "e"], [2, 3]), (["f", "g", "h", "i", PAD_WORD], [4, 1])]
+    assert packed == [(["a", "b", "c", "d", "e"], [2, 3]), (["f", "g", "h", "i", PAD_TOKEN], [4, 1])]
 
 
 def test_pack_words_splits_long_sequences():
     packed = list(pack_words([list("abcdefg")], seq_length=4))
-    assert packed == [(list("abcd"), [4]), ([*"efg", PAD_WORD], [3, 1])]
+    assert packed == [(list("abcd"), [4]), ([*"efg", PAD_TOKEN], [3, 1])]
 
 
 def json_config(tmp_path, columns: dict, **kwargs) -> TextDataConfig:
