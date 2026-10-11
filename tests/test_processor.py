@@ -6,6 +6,7 @@ import torch
 from utf8_tokenizer.control import ControlTokens
 from words_segmentation.tokenizer import WordsSegmentationTokenizer
 
+from tests.conftest import ORACLE_TEXTS, oracle_labels
 from welt.processor import TextImageProcessor, collate_fn, next_word_labels
 from welt_training.data_utils import pack_words
 
@@ -181,3 +182,16 @@ def test_collate_fn_pads_every_dimension_and_keeps_dtypes():
     assert torch.equal(collated["mask"], torch.tensor([[[True, False], [False, False]],
                                                        [[True, False], [True, False]]]))
     assert torch.equal(collated["ids"], torch.tensor([[1, 0], [2, 3]]))
+
+
+@pytest.mark.parametrize("seq_length", [16, 40, 128])
+def test_labels_match_an_oracle_of_the_words(text_processor, seq_length):
+    """The labels the model derives (next_word_labels) on packed examples, against labels from the words alone."""
+    for words, seq_lengths in pack_words(map(text_processor.pretokenize, ORACLE_TEXTS * 2), seq_length):
+        example = text_processor.process_single_example(words, seq_lengths)
+        expected = oracle_labels(words, seq_lengths)
+        assert example["label_mask"].tolist() == [label is not None for label in expected]
+        labels = labels_of(example)[example["label_mask"]]
+        tokenized = text_processor.tokenize_words([label for label in expected if label is not None]).input_ids
+        assert torch.equal(labels[:, :tokenized.size(1)], tokenized)
+        assert (labels[:, tokenized.size(1):] == 0).all()
