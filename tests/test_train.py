@@ -123,7 +123,7 @@ def test_vllm_matches_megatron(trained, megatron, monkeypatch):
         word_embeds = model.encode_words(batch["input_ids"], batch["input_patches"], batch["input_patches_shape"])
         latents = model.latent(word_embeds, batch["sequence_ids"], batch["block_ids"])[0]
         causal_latents = model.latent(word_embeds, batch["sequence_ids"], torch.zeros_like(batch["block_ids"]))[0]
-        first_byte_logits, _ = model.decode(latents[-1:], batch["input_ids"][0, :1, :1], torch.ones(1, 1).cuda())
+        first_byte_logits, _ = model.decode(latents[-1:], torch.ones(1, 1, dtype=torch.long).cuda())
 
     def error(a, b):
         return ((a.float().cuda() - b.float().cuda()).norm() / b.float().cuda().norm()).item()
@@ -147,8 +147,8 @@ def test_vllm_matches_megatron(trained, megatron, monkeypatch):
     assert error(latent, latents[-1]) < error(latent, causal_latents[-1])
     assert error(vllm_causal, causal_latents[-1]) < error(vllm_causal, latents[-1])
 
-    # The decoder predicts the same first byte (index 1, after BOS)
+    # The decoder predicts the same first byte
     greedy = SamplingParams(temperature=0, max_tokens=1, detokenize=False)
     next_word = generator._next_words(latent[None], [b""], greedy)[0]
-    first_byte = first_byte_logits[1].argmax().item()
+    first_byte = first_byte_logits[0].argmax().item()
     assert next_word[:1] == (b"" if first_byte == generator.tokenizer.eos_token_id else bytes([first_byte]))

@@ -121,7 +121,8 @@ class WeLTGenerator:
                     sampling: SamplingParams | list[SamplingParams]) -> list[bytes]:
         prompts = []
         for latent, prefix in zip(latents, prefixes, strict=True):
-            byte_ids = torch.tensor([self.tokenizer.bos_token_id, *prefix], device=self.device)
+            # The latent takes the place of BOS
+            byte_ids = torch.tensor(list(prefix), dtype=torch.long, device=self.device)
             embeddings = self.weights["decoder_prompt_embeddings"][byte_ids]
             prompts.append({"prompt_embeds": torch.cat([latent[None], embeddings]).cpu()})
         outputs = self.decoder.generate(prompts, sampling, use_tqdm=False)

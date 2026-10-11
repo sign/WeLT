@@ -58,9 +58,9 @@ def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
         patches = batch["input_patches_shape"].prod(-1)[valid].tolist() if "input_patches_shape" in batch else lengths
         words = list(zip(map(tuple, ids[valid].tolist()), lengths, patches, strict=True))
         common = transformer_flops(configs["latent_transformer"], [ids.size(1)] * len(ids))
-        # The bytes decoder runs on each label's latent and its bytes but the last (BOS, ..., without EOS)
+        # The bytes decoder runs on each label's latent and its bytes (latent, bytes: predicting bytes, EOS)
         labels = next_word_labels(ids, batch["sequence_ids"], label_mask)[label_mask]
-        common += transformer_flops(configs["bytes_decoder"], (1 + (labels[:, :-1] != PAD_TOKEN_ID).sum(-1)).tolist())
+        common += transformer_flops(configs["bytes_decoder"], (labels[:, 1:] != PAD_TOKEN_ID).sum(-1).tolist())
         for kind, encoded in [("model", words), ("hardware", list(dict.fromkeys(words)))]:
             flops = common
             if "bytes_encoder" in configs:
