@@ -56,20 +56,21 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
     def section(cls, name: str, **defaults):
         return cls(**defaults | (config.get(name) or {}))  # Unknown keys raise a TypeError
 
+    # Defaults where WeLT's differ from Megatron-Bridge's (the rest are Megatron-Bridge's)
     train = section(TrainingConfig, "train", train_iters=1000, micro_batch_size=32, global_batch_size=32)
-    optimizer = section(OptimizerConfig, "optimizer", optimizer="adam", lr=3e-4, min_lr=3e-5, weight_decay=0.01,
-                        bf16=True, adam_beta1=0.9, adam_beta2=0.95, clip_grad=1.0, use_distributed_optimizer=True)
-    scheduler = section(SchedulerConfig, "scheduler", lr_decay_style="cosine", lr_warmup_iters=0,
-                        lr_decay_iters=train.train_iters, start_weight_decay=optimizer.weight_decay,
-                        end_weight_decay=optimizer.weight_decay, weight_decay_incr_style="constant")
+    # Muon (2D weights orthogonalized, the rest with Adam) improved every task over Adam
+    optimizer = section(OptimizerConfig, "optimizer", optimizer="muon", lr=3e-4, min_lr=3e-5, adam_beta2=0.95,
+                        bf16=True, use_distributed_optimizer=True)
+    # The scheduler's weight decay is the one applied: the optimizer's, unless the scheduler sets its own
+    scheduler = section(SchedulerConfig, "scheduler", lr_decay_style="cosine",
+                        start_weight_decay=optimizer.weight_decay, end_weight_decay=optimizer.weight_decay)
     validation = section(ValidationConfig, "validation", eval_interval=500, eval_iters=10)
     checkpoint = section(CheckpointConfig, "checkpoint", save=os.path.join(output_dir, "checkpoints"),
-                         load=os.path.join(output_dir, "checkpoints"), save_interval=1000, ckpt_format="torch_dist")
+                         load=os.path.join(output_dir, "checkpoints"), save_interval=1000)
     logger = section(LoggerConfig, "logger", log_interval=10, tensorboard_dir=os.path.join(output_dir, "tensorboard"))
     ddp = section(DistributedDataParallelConfig, "ddp", use_distributed_optimizer=optimizer.use_distributed_optimizer,
-                  grad_reduce_in_fp32=True, average_in_collective=False, overlap_grad_reduce=True,
-                  overlap_param_gather=True)
-    rng = section(RNGConfig, "rng", seed=42)
+                  grad_reduce_in_fp32=True, overlap_grad_reduce=True, overlap_param_gather=True)
+    rng = section(RNGConfig, "rng")
 
     model_provider.seq_length = dataset_provider.seq_length
     model_provider.calculate_per_token_loss = True

@@ -20,6 +20,7 @@ train:
   global_batch_size: 32
 
 optimizer:
+  optimizer: adam  # As the step times measured before Muon became the default
   lr: 3.0e-4
 
 validation:

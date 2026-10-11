@@ -21,7 +21,6 @@ train:
   train_iters: 10000
 
 optimizer:
-  optimizer: muon  # Megatron's Muon: 2D weights orthogonalized, the rest with Adam
   lr: 6.0e-4
   min_lr: 6.0e-5
   weight_decay: 0.001
