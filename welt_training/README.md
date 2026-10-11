@@ -39,6 +39,7 @@ checkpoint:               # CheckpointConfig
 logger:                   # LoggerConfig, wandb_project: null disables W&B, wandb_exp_name names the run
 ddp:                      # DistributedDataParallelConfig
 rng:                      # RNGConfig
+profiling:                # ProfilingConfig, e.g. use_pytorch_profiler: true (see benchmarks/README.md)
 ```
 
 Defaults are Megatron-Bridge's, except ([`train.py`](train.py) `build_config`): 1000 iterations of batch 32,

@@ -15,9 +15,8 @@ class WeLTDatasetProvider(TextDataConfig, DatasetProvider):
     render_images: bool = False  # For an image encoder
     pretokenizer_name: str | None = None  # A HF tokenizer splitting texts into words, defaults to words-segmentation
     dataloader_type: str = "external"  # Iterators of micro batches (build_iterators)
-    # Batches vary in shape (bytes per word, patches per image): PyTorch caches a pinned buffer for every size, without
-    # freeing them, so pinning grows memory throughout training
-    pin_memory: bool = False
+    # Pinned in the loader's thread: the copy from the workers' shared memory (page faults) is off the training step
+    pin_memory: bool = True
 
     def processor(self) -> TextImageProcessor:
         return TextImageProcessor.create(max_word_length=self.max_word_length,

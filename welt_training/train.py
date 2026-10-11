@@ -5,7 +5,7 @@ Train WeLT with Megatron-Bridge.
 
 The YAML has a `model` and a `data` section (see `welt_training/experiments`), and optionally any of the
 Megatron-Bridge config sections (`train`, `optimizer`, `scheduler`, `validation`, `checkpoint`, `logger`, `ddp`,
-`rng`), whose keys are set as-is on the corresponding Megatron-Bridge config.
+`rng`, `profiling`), whose keys are set as-is on the corresponding Megatron-Bridge config.
 """
 import math
 import os
@@ -20,6 +20,7 @@ from megatron.bridge.training.config import (
     DistributedDataParallelConfig,
     LoggerConfig,
     OptimizerConfig,
+    ProfilingConfig,
     RNGConfig,
     SchedulerConfig,
     TrainingConfig,
@@ -41,7 +42,7 @@ def build_dataset_provider(model: dict, data: dict) -> WeLTDatasetProvider:
                                **{"trust_remote_code": model.get("trust_remote_code", False)} | data)
 
 
-SECTIONS = ("train", "optimizer", "scheduler", "validation", "checkpoint", "logger", "ddp", "rng")
+SECTIONS = ("train", "optimizer", "scheduler", "validation", "checkpoint", "logger", "ddp", "rng", "profiling")
 
 
 def build_config(config: dict, model_provider, dataset_provider, vocab_size: int) -> ConfigContainer:
@@ -69,6 +70,7 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
     ddp = section(DistributedDataParallelConfig, "ddp", use_distributed_optimizer=optimizer.use_distributed_optimizer,
                   grad_reduce_in_fp32=True, overlap_grad_reduce=True, overlap_param_gather=True)
     rng = section(RNGConfig, "rng")
+    profiling = section(ProfilingConfig, "profiling") if "profiling" in config else None
 
     model_provider.seq_length = dataset_provider.seq_length
     model_provider.calculate_per_token_loss = True
@@ -90,6 +92,7 @@ def build_config(config: dict, model_provider, dataset_provider, vocab_size: int
         logger=logger,
         ddp=ddp,
         rng=rng,
+        profiling=profiling,
         # Datasets tokenize on their own, Megatron only needs the vocabulary size
         tokenizer=TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=vocab_size),
     )
