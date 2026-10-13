@@ -41,8 +41,8 @@ def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
     processor = provider.processor()
     # The training examples (of a single data parallel rank), as the dataloader makes them
     texts = train_texts(provider, rank=0, world_size=1)
-    examples = (processor.process_single_example(words, seq_lengths)
-                for words, seq_lengths in pack_words(map(processor.pretokenize, texts), provider.seq_length))
+    examples = (processor.process_single_example(*packed)
+                for packed in pack_words(map(processor.pretokenize, texts), provider.seq_length))
     train_config = config.get("train") or {}
     micro_batch = train_config.get("micro_batch_size", 32)
     global_batch = train_config.get("global_batch_size", micro_batch)

@@ -9,12 +9,16 @@ from welt_training.data_utils import TextDataConfig, build_iterators, pack_words
 
 def test_pack_words_fills_blocks_and_pads():
     packed = list(pack_words([["a", "b"], ["c", "d", "e"], ["f", "g", "h", "i"]], seq_length=5))
-    assert packed == [(["a", "b", "c", "d", "e"], [2, 3]), (["f", "g", "h", "i", PAD_TOKEN], [4, 1])]
+    assert packed == [(["a", "b", "c", "d", "e"], [2, 3], [False, False]),
+                      (["f", "g", "h", "i", PAD_TOKEN], [4, 1], [False, False])]
 
 
 def test_pack_words_splits_long_sequences():
+    # Chunks overlap by one word: "d" ends the first (without a label) and starts the second
     packed = list(pack_words([list("abcdefg")], seq_length=4))
-    assert packed == [(list("abcd"), [4]), ([*"efg", PAD_TOKEN], [3, 1])]
+    assert packed == [(list("abcd"), [4], [True]), (list("defg"), [4], [False])]
+    packed = list(pack_words([list("abcde"), ["f"]], seq_length=4))
+    assert packed == [(list("abcd"), [4], [True]), ([*"de", "f", PAD_TOKEN], [2, 1, 1], [False, False, False])]
 
 
 def json_config(tmp_path, columns: dict, **kwargs) -> TextDataConfig:
@@ -33,6 +37,14 @@ def test_texts_from_a_template(tmp_path):
     config = json_config(tmp_path, {"src": ["s0", "s1"], "tgt": ["t0", "t1"]},
                          dataset_text_template=["<{src}> ", "{tgt}"], max_eval_samples=1)
     assert [e["text"] for e in config.texts("validation")] == ["<s0> t0"]
+
+
+def test_texts_from_token_ids(tmp_path):
+    from transformers import AutoTokenizer
+
+    tokens = AutoTokenizer.from_pretrained("gpt2")("Hello world, שלום").input_ids
+    config = json_config(tmp_path, {"tokens": [tokens, tokens]}, dataset_tokenizer="gpt2", max_eval_samples=1)
+    assert [e["text"] for e in config.texts("validation")] == ["Hello world, שלום"]
 
 
 def test_texts_require_a_text_column(tmp_path):

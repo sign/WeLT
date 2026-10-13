@@ -51,11 +51,14 @@ def test_baseline_scores_the_bytes_welt_scores():
     assert tokenizer.decode(labels) == tokenizer.eos_token.join(baseline.SHIFT_BLOCK.sub("\x0e", t) for t in texts)
     baseline_bytes = sum(int(example["label_bytes"].sum()) for example in examples)
 
+    from welt_training.data_utils import pack_words
+
     processor = TextImageProcessor.create(max_word_length=32, render_images=False)
     welt_bytes = 0
-    for text in texts:
-        words = processor.pretokenize(text)
-        example = processor.process_single_example(words, [len(words)])
+    # Packed in examples of 6 words: documents are split across examples (not within a shift block), as long
+    # documents are in training
+    for packed in pack_words(map(processor.pretokenize, texts), seq_length=6):
+        example = processor.process_single_example(*packed)
         inputs = (example[k][None] for k in ("input_ids", "sequence_ids", "label_mask"))
         labels = next_word_labels(*inputs)
         welt_bytes += int(((labels != PAD_TOKEN_ID) & (labels != EOS_TOKEN_ID)).sum())

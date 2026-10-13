@@ -130,10 +130,11 @@ class TextImageProcessor:
             truncation=True,
         )
 
-    def process_single_example(self, words: list[str], seq_lengths: list[int]):
+    def process_single_example(self, words: list[str], seq_lengths: list[int], continues: list[bool] | None = None):
         """A packed example's words (with BOS and EOS), and per word: its sequence and shift block (ids from 1, 0 for
         none), and whether it predicts the next word. PAD words (padding packed examples, each its own sequence) do not,
-        nor do the words of a shift block before its ShiftIn: they are visible to each other (bidirectional)."""
+        nor do the words of a shift block before its ShiftIn: they are visible to each other (bidirectional), nor the
+        last word of a sequence that continues in another example (see pack_words)."""
         sequence_ids = torch.repeat_interleave(torch.arange(1, len(seq_lengths) + 1), torch.tensor(seq_lengths))
         block_ids = torch.zeros(len(words), dtype=torch.long)
         label_mask = torch.tensor([word != PAD_TOKEN for word in words])
@@ -143,6 +144,8 @@ class TextImageProcessor:
         for block, (start, end) in enumerate(blocks, start=1):
             block_ids[start:end + 1] = block
             label_mask[start:end] = False
+        ends = torch.tensor(seq_lengths).cumsum(0) - 1
+        label_mask[ends[torch.tensor(continues or [False] * len(seq_lengths), dtype=torch.bool)]] = False
         example = {"input_ids": self.tokenize_words(words).input_ids, "sequence_ids": sequence_ids,
                    "block_ids": block_ids, "label_mask": label_mask}
         if self.renderer is not None:

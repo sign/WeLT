@@ -108,7 +108,7 @@ def test_packed_attention_matches_padded_attention(megatron, causal, lengths, kv
 def packed_batch(processor, seq_length: int):
     """Two packed examples of the oracle texts (the second with PAD words), their words and sequence lengths."""
     packed = list(pack_words(map(processor.pretokenize, ORACLE_TEXTS * 20), seq_length))[:2]
-    examples = [processor.process_single_example(words, seq_lengths) for words, seq_lengths in packed]
+    examples = [processor.process_single_example(*example) for example in packed]
     return collate_fn(examples), packed
 
 
@@ -118,7 +118,7 @@ def test_latent_mask_matches_an_oracle_of_the_words(megatron, processor):
     batch, packed = packed_batch(processor, seq_length=40)
     block_mask = latent_block_mask(batch["sequence_ids"].cuda(), batch["block_ids"].cuda())
     dense = create_mask(block_mask.mask_mod, len(packed), None, 40, 40, device="cuda")[:, 0].cpu()
-    for i, (words, seq_lengths) in enumerate(packed):
+    for i, (words, seq_lengths, _) in enumerate(packed):
         torch.testing.assert_close(dense[i], oracle_mask(words, seq_lengths))
 
 
@@ -128,7 +128,7 @@ def test_masked_attention_matches_sdpa(megatron, processor):
     seq, heads, dim = 200, 4, 16  # Over one 128-word block
     batch, packed = packed_batch(processor, seq_length=seq)
     batch = {k: v.cuda() for k, v in batch.items()}
-    allowed = torch.stack([oracle_mask(words, lengths) for words, lengths in packed]).cuda()[:, None]
+    allowed = torch.stack([oracle_mask(words, lengths) for words, lengths, _ in packed]).cuda()[:, None]
     query, key, value = (torch.randn(seq, len(packed), heads, dim, device="cuda", dtype=torch.bfloat16)
                          for _ in range(3))
     mask = torch.empty(0)

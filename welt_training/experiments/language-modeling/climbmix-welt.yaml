@@ -1,0 +1,25 @@
+# Language modeling on nvidia/Nemotron-ClimbMix (web text, GPT-2 token ids decoded back to text, streamed), WeLT
+# without an image encoder, against climbmix-baseline.yaml
+$extends: ../machine-translation/machine-translation.yaml
+
+output_dir: ./output/lm-climbmix-welt
+
+model:
+  image_encoder: null
+
+data:
+  dataset_name: nvidia/Nemotron-ClimbMix
+  dataset_config_name: null
+  dataset_tokenizer: gpt2
+  dataset_text_template: null
+  seq_length: 256
+  # The first documents are held out for validation: few enough that every model's validation examples are one
+  # micro batch, so all models score exactly the same bytes
+  max_eval_samples: 32
+
+validation:
+  eval_interval: 250
+  eval_iters: 1
+
+logger:
+  wandb_project: welt-language-modeling
