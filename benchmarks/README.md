@@ -36,6 +36,8 @@ harness, and the time per step of every optimization attempt, are in git history
    transformer's arbitrary (packed + bidirectional shift block) mask.
 4. **Encode unique words** (1.3x on MT): the word encoders' output only depends on the word, and only ~31% of the
    words in a batch are distinct, so each distinct word is encoded once and its embedding is shared (exact).
+5. **Packed patches** (SignWriting 404 -> 262 ms): the image encoder packs each batch's patches, with patch row and
+   column embeddings, instead of padding every sign (28 patches on average) to the batch's largest (~105).
 
 Not kept: padded SDPA / matmul attention for the short sequences (memory-bound on GB10), FP8 (MXFP8 is unsupported on
 SM12x; tensorwise FP8 needs token counts padded to multiples of 8, and matmuls are a minority of the step time here).
@@ -43,7 +45,8 @@ SM12x; tensorwise FP8 needs token counts padded to multiples of 8, and matmuls a
 ### Utilization
 
 [`flops.py`](flops.py) counts the FLOPs of each transformer on its real (packed) tokens: "model" FLOPs encode every word
-occurrence, "hardware" FLOPs encode each distinct word once.
+occurrence, "hardware" FLOPs encode each distinct word once
+(`python benchmarks/flops.py <config.yaml> --ms_per_step <ms>`).
 
 | Config | ms / step | Model TFLOPs / step | Model TFLOP/s | Hardware TFLOP/s |
 |--------|----------:|-------------------:|--------------:|-----------------:|
@@ -112,17 +115,18 @@ validation prefixes), recording a row of [`tasks.csv`](tasks.csv).
 
 | Task | Steps | ms / step | Train time | Val. bits / byte | Val. word acc. | Gen. exact match | Gen. chrF | Gen. words / s |
 |------|------:|----------:|-----------:|-----------------:|---------------:|-----------------:|----------:|---------------:|
-| **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 66 | 1.6 min | 0.014 | 99.3% | 93.8% | 98.7 | 856 |
-| **ocr**: write a sentence seen only as rendered word images | 3000 | 74 | 3.7 min | 0.014 | 99.1% | 88.3% | 97.1 | 1055 |
-| **letter-count**: count the letters of a word | 3000 | 64 | 3.2 min | 0.0001 | 100% | 100% | 100 | 1378 |
-| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 198 | 33 min | 0.547 | 67.7% | 8.2% | 45.4 | 536 |
-| **machine-translation**, bytes encoder only | 10000 | 170 | 28 min | 0.537 | 68.0% | 9.0% | 46.5 | 616 |
-| **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 10000 | 224 | 37 min | 1.253 | 63.1% | 2.3% | 11.1 | 378 |
-| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 10000 | 264 | 44 min | 1.270 | 63.7% | 4.3% | 14.2 | 304 |
-| **signed-to-spoken**, image encoder only | 10000 | 166 | 28 min | 1.303 | 62.9% | 0.8% | 10.5 | 267 |
+| **string-repetition**: repeat an English sentence, pretrained tiny LMs | 1500 | 59 | 1.5 min | 0.008 | 99.3% | 93.8% | 99.2 | 548 |
+| **ocr**: write a sentence seen only as rendered word images | 3000 | 62 | 3.1 min | 0.009 | 98.8% | 87.5% | 97.8 | 449 |
+| **letter-count**: count the letters of a word | 3000 | 65 | 3.2 min | 0.0001 | 100.0% | 100.0% | 100.0 | 1373 |
+| **machine-translation**: English to Hebrew, from scratch, image + bytes encoders | 10000 | 182 | 30.3 min | 0.531 | 68.5% | 9.8% | 47.6 | 910 |
+| **machine-translation**, bytes encoder only | 10000 | 160 | 26.8 min | 0.528 | 68.0% | 6.2% | 46.2 | 867 |
+| **signed-to-spoken**: SignWriting to text ([signbank-plus](https://huggingface.co/datasets/sign/signbank-plus)), from scratch, bytes encoder | 10000 | 209 | 34.9 min | 1.244 | 63.1% | 2.7% | 10.4 | 560 |
+| **signed-to-spoken**, bytes + image encoders (rendered SignWriting) | 10000 | 248 | 41.4 min | 1.246 | 63.4% | 2.3% | 12.2 | 638 |
+| **signed-to-spoken**, image encoder only | 10000 | 150 | 24.9 min | 1.277 | 63.1% | 2.3% | 10.8 | 790 |
 
-All tasks train with Muon (their configs), on main after the migration. Generation is greedy, on 256 validation
-examples, with vLLM (batched over all examples). Reproduce a row with e.g.
+All tasks train with Muon (their configs). Steps are `train.train_iters` overrides of the configs' 10000
+(string-repetition: 1500; ocr, letter-count: 3000). Generation is greedy, on 256 validation
+examples (the easy tasks' configs hold out 32), with vLLM (batched over all examples). Reproduce a row with e.g.
 `WANDB_MODE=disabled benchmarks/run_task.sh welt_training/experiments/easy-tasks/string-repetition.yaml
 output/string-repetition train.train_iters=1500`.
 
@@ -136,23 +140,17 @@ dataset is small (57k packed examples): every configuration's validation loss is
 then overfits. Dropout in the latent transformer slows this: `hidden_dropout: 0.2` (the config's) gives the best last
 step (1.270 bits per byte with both encoders, vs. 1.303 with 0.1 and 1.276 with 0.3; weight decay 0.1 did not help).
 
-The image encoder (over SignWriting rendered by pixel-renderer, from scratch) helps the best checkpoint: both encoders
-reach 1.212 bits per byte (step 7000) vs. 1.239 with bytes only and 1.263 with the image encoder only. By the last step
-all have overfitted (bytes only is lowest there, 1.253 vs. 1.270), while both encoders generate best (4.3% exact
-matches, chrF 14.2); but generation, on 256 examples, is too noisy to rank these (chrF moves by up to 5 between checkpoints).
-Modality dropout (training with one encoder's embeddings dropped at random) was removed: with zeros and rescaling, or
-a learned embedding standing in for the dropped encoder, it was worse than none (1.25 vs. 1.23 bits per byte, and
-under half the exact matches).
-
-An earlier comparison (bytes only 0.953 bits per byte, better than with images) was wrong: configs without images read
-signs split into fragments by words-segmentation 0.0.5 from the datasets cache, which did not invalidate on the
-upgrade to 0.0.6 (data is now streamed and split into words on the fly, without a cache).
+The image encoder (over SignWriting rendered by pixel-renderer, from scratch) barely helps: at their best checkpoints,
+both encoders reach 1.174 bits per byte (step 7000) vs. 1.178 with bytes only (step 6000) and 1.258 with the image
+encoder only. By the last step all have overfitted (bytes only is lowest there, 1.244 vs. 1.246); both encoders
+generate with the best chrF (12.2), bytes only with the most exact matches (2.7%), but generation, on 256 examples, is
+too noisy to rank these (chrF moves by up to 5 between checkpoints).
+There is no modality dropout (one encoder's embeddings dropped at random): it was worse than none (1.25 vs. 1.23 bits
+per byte, and under half the exact matches).
 
 Images do not help machine translation: without the image encoder (`model.image_encoder=null`), English to Hebrew
-reaches 0.537 bits per byte and chrF 46.5 (vs. 0.547 and 45.4 with it), 14% faster
-per step. The image encoder packs each batch's patches (no padding to the largest image) and embeds patch rows and
-columns: before, padding signs (28 patches on average) to the batch's largest (~105) copied 425 MB per batch to the
-GPU and made a SignWriting step 404 ms; packed, 41 MB and 262 ms.
+reaches 0.528 bits per byte and chrF 46.2 (vs. 0.531 and 47.6 with it, within the noise of generation), 12% faster
+per step.
 
 Each task trains its own models and data (see its config): string-repetition, ocr and letter-count use tiny
 transformers and short sequences, so their steps are faster than the bench config's 127 ms, while machine

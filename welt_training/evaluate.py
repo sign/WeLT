@@ -26,7 +26,8 @@ def evaluate(config_path: str, url: str, max_samples: int = 256, max_generated_w
     prefixes = [prefix_template.format(**example) for example in validation]
     references = [completion_template.format(**example) for example in validation]
 
-    generate(url, prefixes, max_generated_words=2)  # Warmup, with the batch size of the measurement
+    # Warmup, as the measurement: shorter generations leave decode kernels (e.g. Triton's) to compile while measured
+    generate(url, prefixes, max_generated_words=max_generated_words)
     start = time.perf_counter()
     result = generate(url, prefixes, max_generated_words=max_generated_words)
     elapsed = time.perf_counter() - start

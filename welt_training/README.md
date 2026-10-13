@@ -72,13 +72,16 @@ from the start of the train split.
 
 `dataset_text_template` is a Python format string over the dataset's columns; without it, the `text` column is used
 (a missing `text` column raises). As `[prefix, completion]`, both parts are concatenated for training, and
-`welt-evaluate` generates the completion from the prefix.
+`welt-evaluate` generates the completion from the prefix. Datasets of token ids (a `tokens` column, e.g.
+`nvidia/Nemotron-ClimbMix`) are decoded back to text with `dataset_tokenizer` (e.g. `gpt2`).
 
 Training streams endlessly (epochs reshuffle, with a `shuffle_buffer_size` buffer and `seed`), split across data
 parallel ranks, and in each rank across the dataloader workers (`num_workers`), which make the examples on the fly:
 texts are prefixed with BOS, split into words, and packed in order into examples of exactly `seq_length` words.
-Longer texts are split into `seq_length`-word chunks, each its own sequence, and the rest is padded.
-With the default pretokenizer, words longer than `max_word_length - 2` bytes are split.
+Longer texts are split into `seq_length`-word chunks, each its own sequence, overlapping by one word (a chunk's last
+word predicts nothing, and predicts the next word where it starts the next chunk), and the rest is padded.
+With the default pretokenizer, words longer than `max_word_length - 2` bytes are split; with other pretokenizers,
+they are truncated.
 Within the model, the bytes of all words (and the patches of rendered words) are packed without padding, so the
 encoders and the bytes decoder only compute on real bytes. Resuming from a checkpoint restarts the stream.
 
@@ -101,9 +104,6 @@ Megatron's optimizers, selected by `optimizer.optimizer`: `muon` (default), `ada
 `lion`, `polargrad`, ... Muon (2D weights orthogonalized, the rest with Adam) improved every benchmarked task over
 Adam (see [benchmarks](../benchmarks/README.md#tasks)). Its layer-wise distributed variant (`dist_muon`) fails.
 Their hyperparameters are `OptimizerConfig` fields (e.g. `optimizer.muon_momentum`).
-
-Only UTF-8 bytes are supported; the previous HuggingFace Trainer implementation is at the `huggingface-transformers`
-git tag.
 
 ## Experimenting
 

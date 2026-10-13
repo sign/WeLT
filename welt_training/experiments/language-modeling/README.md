@@ -78,7 +78,9 @@ bound by memory bandwidth.
 ## Earlier results
 
 
-10000 steps each, on one GB10, with the BOS bytes decoder (before the latent took its place), validation bits per byte at the last step (and the best step):
+10000 steps each, on one GB10, with the BOS bytes decoder (before the latent took its place) and the baseline's
+unpadded vocabulary with Megatron's cross entropy (padded and fused, its steps now take half the time), validation bits
+per byte at the last step (and the best step):
 
 | Data | WeLT | Baseline | ms / step (WeLT, baseline) |
 |------|-----:|---------:|---------------------------:|
@@ -86,5 +88,4 @@ bound by memory bandwidth.
 | wikitext-103 | 1.199 | **1.165** | **197**, 226 |
 
 The baseline's sequence lengths match WeLT's text per example: Pythia's tokenizer splits opus-100 (half Hebrew) into
-2.7 tokens per word, but wikitext into 1.1. WeLT wins where subword tokens are short (2.1x faster per step, and
-better), and the baseline where they are nearly whole words.
+2.7 tokens per word, but wikitext into 1.1. WeLT wins where subword tokens are short (better, and then 2.1x faster per step), and the baseline where they are nearly whole words.
