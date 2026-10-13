@@ -6,20 +6,21 @@ pytest.importorskip("flask")
 
 from werkzeug.serving import make_server  # noqa: E402
 
+from welt import ContextTooLongError  # noqa: E402
 from welt.server import MODEL_TAG_HEADER, create_app, generate  # noqa: E402
 
 
 class FakeGenerator:
     def __init__(self):
-        self.release = threading.Event()
+        self.entered, self.release = threading.Event(), threading.Event()
         self.release.set()
-        self.processor = type("Processor", (), {"pretokenize": staticmethod(lambda text: ["\x02", *text.split()])})
 
-    def generate(self, texts, max_generated_words, temperature, seed):
+    def generate_words(self, texts, max_generated_words, temperature, seed):
         if max_generated_words > 100:
-            raise ValueError("Prompt words + max_generated_words exceed the latent's context")
+            raise ContextTooLongError("Prompt words + max_generated_words exceed the latent's context")
+        self.entered.set()
         self.release.wait()
-        return [f"{text}!" * max_generated_words for text in texts]
+        return [[f"{text}!"] * max_generated_words for text in texts]
 
 
 @pytest.fixture
@@ -55,10 +56,8 @@ def test_busy_server_answers_503(client, generator):
     first = threading.Thread(target=client.post, args=("/generate",), kwargs={"json": {"texts": ["a"]}})
     first.start()
     try:
-        for _ in range(100):  # Until the first request holds the generator
-            response = client.post("/generate", json={"texts": ["b"]})
-            if response.status_code == 503:
-                break
+        assert generator.entered.wait(timeout=10)  # The first request holds the generator
+        response = client.post("/generate", json={"texts": ["b"]})
         assert response.status_code == 503
         assert response.headers["Retry-After"] == "1"
     finally:

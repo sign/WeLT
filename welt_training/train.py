@@ -107,11 +107,14 @@ def to_cuda(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return {key: value.cuda(non_blocking=True) for key, value in batch.items()}
 
 
-def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor):
+def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor, score: torch.Tensor | None = None):
     """Per-byte cross entropy, plus bits per byte and byte/word accuracy for logging.
     labels: (words, bytes). Bits per byte count every prediction (including the EOS ending each word) except the
-    EOS ending a document (a word with an empty label), per UTF-8 byte of text, like the causal LM baseline."""
+    EOS ending a document (a word with an empty label), per UTF-8 byte of text, like the causal LM baseline.
+    score: 0 for validation micro batches that only fill an evaluation (build_iterators), which count for nothing."""
     loss_mask = labels != PAD_TOKEN_ID
+    if score is not None:
+        loss_mask &= score.bool()
     eos = labels == EOS_TOKEN_ID
     document_end = torch.zeros_like(eos)
     document_end[:, 0] = eos[:, 0]  # A word whose first label byte is EOS is empty: the end of a document
@@ -129,8 +132,9 @@ def loss_func(losses: torch.Tensor, correct: torch.Tensor, labels: torch.Tensor)
 
 def forward_step(state, data_iterator, model, return_schedule_plan: bool = False):
     batch = to_cuda(next(data_iterator))
+    score = batch.pop("score", None)
     losses, correct, labels = model(**batch)
-    return losses, partial(loss_func, correct=correct, labels=labels)
+    return losses, partial(loss_func, correct=correct, labels=labels, score=score)
 
 
 def main(build, forward_step_func):

@@ -14,7 +14,7 @@ from transformers import AutoConfig
 from utf8_tokenizer.tokenizer import PAD_TOKEN_ID
 
 from welt.processor import collate_fn, next_word_labels
-from welt_training.data_utils import pack_words, train_texts
+from welt_training.data_utils import train_texts
 from welt_training.extendable_yaml import load_yaml
 from welt_training.train import build_dataset_provider
 
@@ -38,14 +38,11 @@ def transformer_flops(config, lengths) -> float:
 def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
     model, data = config["model"], config["data"]
     provider = build_dataset_provider(model, data)
-    processor = provider.processor()
     # The training examples (of a single data parallel rank), as the dataloader makes them
-    texts = train_texts(provider, rank=0, world_size=1)
-    examples = (processor.process_single_example(*packed)
-                for packed in pack_words(map(processor.pretokenize, texts), provider.seq_length))
+    examples = provider.make_examples(train_texts(provider, rank=0, world_size=1))
     train_config = config.get("train") or {}
-    micro_batch = train_config.get("micro_batch_size", 32)
-    global_batch = train_config.get("global_batch_size", micro_batch)
+    micro_batch = train_config.get("micro_batch_size", 32)  # build_config's defaults
+    global_batch = train_config.get("global_batch_size", 32)
     configs = {name: AutoConfig.from_pretrained(model[name], trust_remote_code=model.get("trust_remote_code", False))
                for name in ["bytes_encoder", "image_encoder", "latent_transformer", "bytes_decoder"] if model.get(name)}
 

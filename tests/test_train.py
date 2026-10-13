@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -17,7 +18,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Megatron 
 
 def run(*args):
     # A port of its own: the in-process Megatron test fixture holds MASTER_PORT
-    env = {**os.environ, "PYTHONPATH": os.getcwd(), "MASTER_PORT": str(free_port())}
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1]), "MASTER_PORT": str(free_port())}
     subprocess.run([*args], check=True, env=env)
 
 

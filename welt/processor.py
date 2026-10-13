@@ -1,7 +1,6 @@
 import itertools
 import json
 import os
-import warnings
 
 import torch
 from cachetools import LRUCache
@@ -37,31 +36,41 @@ def next_word_labels(input_ids: torch.Tensor, sequence_ids: torch.Tensor, label_
 
 
 def get_shift_blocks(words: list[str]):
-    """(start, end) of each shift block: a ShiftOut word, up to the next ShiftIn word (inclusive). Warns about
-    unmatched ShiftOut and ShiftIn words, which start or end no block."""
+    """(start, end) of each shift block: a ShiftOut word, up to the next ShiftIn word (inclusive), as the baseline's
+    SHIFT_BLOCK finds them in a whole document (a ShiftOut within a block belongs to it). A sequence cut from a longer
+    document (pack_words) can end within a block, which then runs to its last word (which, continuing in the next
+    sequence, predicts nothing), or begin within one, which then starts at its first word."""
     shift_out = None
     for i, word in enumerate(words):
         if word == ControlTokens.ShiftOut:
-            if shift_out is not None:
-                warnings.warn("ShiftOut after ShiftOut without ShiftIn: nested shift blocks are not allowed",
-                              stacklevel=2)
-            shift_out = i
-        elif word == ControlTokens.ShiftIn:
             if shift_out is None:
-                warnings.warn("ShiftIn without ShiftOut: skipping the shift block", stacklevel=2)
-            else:
-                yield shift_out, i
-                shift_out = None
+                shift_out = i
+        elif word == ControlTokens.ShiftIn:
+            yield (0 if shift_out is None else shift_out), i
+            shift_out = None
     if shift_out is not None:
-        warnings.warn("ShiftOut without ShiftIn at the end of the sequence", stacklevel=2)
+        yield shift_out, len(words) - 1
+
+
+def split_bytes(text: str, max_bytes: int) -> list[str]:
+    """Split a text into pieces of at most max_bytes UTF-8 bytes, between characters."""
+    pieces, piece, size = [], "", 0
+    for char in text:
+        length = len(char.encode())
+        if piece and size + length > max_bytes:
+            pieces.append(piece)
+            piece, size = "", 0
+        piece, size = piece + char, size + length
+    return [*pieces, piece] if piece else pieces
 
 
 class TextImageProcessor:
     """Turns text into word-level byte tensors, rendered word patches, and labels."""
 
     def __init__(self, pretokenizer: PreTrainedTokenizer, renderer: PixelRendererProcessor | None,
-                 max_word_length: int = 32):
+                 max_word_length: int = 32, trust_remote_code: bool = False):
         self.pretokenizer = pretokenizer
+        self.trust_remote_code = trust_remote_code
         self.tokenizer = UTF8Tokenizer()
         self.renderer = renderer
         self.max_word_length = max_word_length
@@ -76,14 +85,15 @@ class TextImageProcessor:
         else:
             pretokenizer = WordsSegmentationTokenizer(max_bytes=max_word_length - 2)  # BOS and EOS
         renderer = PixelRendererProcessor(font=FontConfig(sources=FONTS_NOTO_SANS)) if render_images else None
-        return cls(pretokenizer=pretokenizer, renderer=renderer, max_word_length=max_word_length)
+        return cls(pretokenizer=pretokenizer, renderer=renderer, max_word_length=max_word_length,
+                   trust_remote_code=trust_remote_code)
 
     def save_pretrained(self, save_directory):
         os.makedirs(save_directory, exist_ok=True)
         self.pretokenizer.save_pretrained(os.path.join(save_directory, "pretokenizer"))
         if self.renderer is not None:
             self.renderer.save_pretrained(os.path.join(save_directory, "renderer"))
-        config = {"max_word_length": self.max_word_length}
+        config = {"max_word_length": self.max_word_length, "trust_remote_code": self.trust_remote_code}
         with open(os.path.join(save_directory, PROCESSOR_CONFIG_NAME), "w") as f:
             json.dump(config, f, indent=2, sort_keys=True)
 
@@ -93,8 +103,13 @@ class TextImageProcessor:
             config = json.load(f)
         renderer_dir = os.path.join(path, "renderer")
         renderer = PixelRendererProcessor.from_pretrained(renderer_dir) if os.path.isdir(renderer_dir) else None
-        return cls(pretokenizer=AutoTokenizer.from_pretrained(os.path.join(path, "pretokenizer")), renderer=renderer,
-                   max_word_length=config["max_word_length"])
+        trust_remote_code = config.get("trust_remote_code", False)
+        pretokenizer = AutoTokenizer.from_pretrained(os.path.join(path, "pretokenizer"),
+                                                     trust_remote_code=trust_remote_code)
+        if isinstance(pretokenizer, WordsSegmentationTokenizer):  # Its saved config lacks max_bytes
+            pretokenizer.max_bytes = config["max_word_length"] - 2
+        return cls(pretokenizer=pretokenizer, renderer=renderer, max_word_length=config["max_word_length"],
+                   trust_remote_code=trust_remote_code)
 
     def render_texts(self, texts: list[str]) -> tuple[torch.Tensor, torch.Tensor]:
         """Render words into their 16x16 patches, packed: (total patches, 768) uint8, each word's row-major patches in
@@ -115,10 +130,12 @@ class TextImageProcessor:
         text = self.tokenizer.bos_token + text
         if isinstance(self.pretokenizer, WordsSegmentationTokenizer):
             return self.pretokenizer.tokenize(text)
-        # Other tokenizers' tokens can be encoded (e.g. byte-level BPE "Ġworld"), words are spans of the text instead
+        # Other tokenizers' tokens can be encoded (e.g. byte-level BPE "Ġworld"), words are spans of the text instead,
+        # split (as words-segmentation's words) to fit max_word_length with BOS and EOS, rather than truncated
         offsets = self.pretokenizer(text, add_special_tokens=False, return_offsets_mapping=True).offset_mapping
         starts = sorted({0, *(start for start, _ in offsets)})
-        return [text[start:end] for start, end in zip(starts, [*starts[1:], len(text)], strict=True) if end > start]
+        spans = (text[start:end] for start, end in zip(starts, [*starts[1:], len(text)], strict=True) if end > start)
+        return [piece for span in spans for piece in split_bytes(span, self.max_word_length - 2)]
 
     def tokenize_words(self, words: list[str]):
         return self.tokenizer.torch(

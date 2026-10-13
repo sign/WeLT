@@ -87,9 +87,10 @@ encoders and the bytes decoder only compute on real bytes. Resuming from a check
 
 ### Validation
 
-Each evaluation draws `validation.eval_iters` global batches. The validation examples (split across ranks) are
-repeated to fill them, the same ones at every evaluation; if they do not fit, evaluations see only the first ones, and
-a warning is logged: raise `eval_iters` to cover them.
+Each evaluation draws `validation.eval_iters` global batches, and scores every validation example (split across
+ranks) exactly once, the same ones at every evaluation: the remaining micro batches are copies that count for nothing.
+If the examples do not fit, building the dataset fails: raise `eval_iters` to cover them (two models then score the
+same texts, whatever their batch sizes).
 
 ## Parallelism
 

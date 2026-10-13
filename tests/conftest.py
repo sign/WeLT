@@ -75,10 +75,12 @@ ORACLE_TEXTS = ["<en>\x0eHello world, how are you?\x0f<he> שלום עולם",  
 def oracle_labels(words: list[str], seq_lengths: list[int], continues: list[bool] | None = None) -> list[str | None]:
     """Each word's label, from the words alone: the next word of its sequence, "" after its last word (None if the
     sequence continues in another example), and None for PAD words and for the words of a shift block before its
-    ShiftIn (they see each other)."""
+    ShiftIn (they see each other). A sequence cut from a longer document can begin within a block (a ShiftIn before
+    any ShiftOut)."""
     labels, start = [], 0
     for length, continued in zip(seq_lengths, continues or [False] * len(seq_lengths), strict=True):
-        sequence, inside = words[start:start + length], False
+        sequence = words[start:start + length]
+        inside = SI in sequence and SO not in sequence[:sequence.index(SI)]
         for i, word in enumerate(sequence):
             inside = (inside or word == SO) and word != SI
             last_of_continued = continued and i == length - 1
@@ -89,17 +91,21 @@ def oracle_labels(words: list[str], seq_lengths: list[int], continues: list[bool
 
 def oracle_mask(words: list[str], seq_lengths: list[int]) -> torch.Tensor:
     """(L, L) the words each word sees in the latent transformer, from the words alone: itself and the earlier words
-    of its sequence, and every word of its shift block (ShiftOut to ShiftIn)."""
+    of its sequence, and every word of its shift block (ShiftOut to ShiftIn; a sequence cut from a longer document
+    can begin or end within one)."""
     allowed = torch.zeros(len(words), len(words), dtype=torch.bool)
     start = 0
     for length in seq_lengths:
-        shift_out = None
-        for i in range(start, start + length):
+        shift_out, end = None, start + length
+        for i in range(start, end):
             allowed[i, start:i + 1] = True
-            if words[i] == SO:
+            if words[i] == SO and shift_out is None:
                 shift_out = i
-            elif words[i] == SI and shift_out is not None:
-                allowed[shift_out:i + 1, shift_out:i + 1] = True
+            elif words[i] == SI:
+                block_start = start if shift_out is None else shift_out
+                allowed[block_start:i + 1, block_start:i + 1] = True
                 shift_out = None
+        if shift_out is not None:
+            allowed[shift_out:end, shift_out:end] = True
         start += length
     return allowed

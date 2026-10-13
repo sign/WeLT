@@ -12,8 +12,6 @@ and `data.seq_length` counting tokens. Documents are concatenated (each after an
 Like WeLT, it does not predict (or score) the text of shift blocks (`\x0E...\x0F`, e.g. the source sentence).
 """
 import math
-import re
-from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from functools import partial
 
@@ -25,46 +23,8 @@ from megatron.core import parallel_state
 from transformers import AutoTokenizer
 
 from welt.model import safetensors_checkpoint, transformer_provider
-from welt_training.data_utils import TextDataConfig, build_iterators
+from welt_training.data_utils import TextDataConfig, build_iterators, token_examples
 from welt_training.train import build_config, main, report, to_cuda
-
-SHIFT_BLOCK = re.compile("\x0e[^\x0f]*\x0f")
-
-
-def token_chunks(texts: Iterable[str], tokenizer, length: int) -> Iterator[tuple[list[int], list[int], list[int]]]:
-    """Tokenize texts, concatenate them (each after an EOS), and split into chunks of `length` tokens: (ids, loss
-    mask, UTF-8 bytes of each token's text). Chunks overlap by one token, so that every token is a label exactly once;
-    the last one is padded with EOS. The loss mask is 0 for the padding, and for the tokens within shift blocks
-    (after \x0E, up to \x0F). A token's bytes are the text since the previous token's end (0 for EOS, and for the
-    second part of a character split across tokens)."""
-    ids, mask, nbytes = [], [], []
-    for text in texts:
-        encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
-        blocks = [(match.start(), match.end()) for match in SHIFT_BLOCK.finditer(text)]
-        ids += [tokenizer.eos_token_id, *encoded.input_ids]
-        mask += [1, *(int(not any(start + 1 < end <= block_end for start, block_end in blocks))
-                      for _, end in encoded.offset_mapping)]
-        nbytes.append(0)
-        previous = 0
-        for _, end in encoded.offset_mapping:
-            nbytes.append(len(text[previous:max(end, previous)].encode()))
-            previous = max(end, previous)
-        while len(ids) >= length:
-            yield ids[:length], mask[:length], nbytes[:length]
-            ids, mask, nbytes = ids[length - 1:], mask[length - 1:], nbytes[length - 1:]
-    if len(ids) > 1:
-        padding = length - len(ids)
-        yield ids + [tokenizer.eos_token_id] * padding, mask + [0] * padding, nbytes + [0] * padding
-
-
-def token_examples(texts: Iterable[str], tokenizer, length: int) -> Iterator[dict]:
-    """Token chunks of length + 1 as inputs, labels, their loss mask, the UTF-8 bytes of each scored label, and which
-    labels are scored text (not EOS)."""
-    for ids, loss_mask, nbytes in token_chunks(texts, tokenizer, length + 1):
-        ids, loss_mask = torch.tensor(ids), torch.tensor(loss_mask[1:])
-        yield {"input_ids": ids[:-1], "labels": ids[1:], "loss_mask": loss_mask,
-               "label_bytes": torch.tensor(nbytes[1:]) * loss_mask,
-               "text_mask": loss_mask * (ids[1:] != tokenizer.eos_token_id)}
 
 
 @dataclass(kw_only=True)
@@ -81,8 +41,11 @@ class TokensDatasetProvider(TextDataConfig, DatasetProvider):
         return train, validation, None
 
 
-def loss_func(losses: torch.Tensor, loss_mask: torch.Tensor, label_bytes: torch.Tensor, text_mask: torch.Tensor):
-    """Per-token cross entropy, plus bits per byte over the scored text tokens (not EOS)."""
+def loss_func(losses: torch.Tensor, loss_mask: torch.Tensor, label_bytes: torch.Tensor, text_mask: torch.Tensor,
+              score: torch.Tensor | None = None):
+    """Per-token cross entropy, plus bits per byte over the scored text tokens (not EOS). score: as WeLT's."""
+    if score is not None:
+        loss_mask, label_bytes, text_mask = loss_mask * score, label_bytes * score, text_mask * score
     losses = losses.float()
     loss, num_tokens, metrics = masked_next_token_loss(loss_mask, losses)  # With NaN / Inf checks
     return loss, num_tokens, metrics | {
@@ -92,11 +55,12 @@ def loss_func(losses: torch.Tensor, loss_mask: torch.Tensor, label_bytes: torch.
 
 def forward_step(state, data_iterator, model, return_schedule_plan: bool = False):
     batch = to_cuda(next(data_iterator))
+    score = batch.pop("score", None)
     input_ids = batch["input_ids"]
     position_ids = torch.arange(input_ids.size(1), device=input_ids.device).expand_as(input_ids)
     losses = model(input_ids=input_ids, position_ids=position_ids, attention_mask=None, labels=batch["labels"])
     return losses, partial(loss_func, loss_mask=batch["loss_mask"], label_bytes=batch["label_bytes"],
-                           text_mask=batch["text_mask"])
+                           text_mask=batch["text_mask"], score=score)
 
 
 def build(config: dict):
@@ -115,9 +79,15 @@ def build(config: dict):
     # with Transformer Engine's fused cross entropy: together 2x faster steps with a vocabulary-sized LM head
     model.vocab_size = -(-max(model.vocab_size, len(tokenizer)) // 128) * 128
     model.cross_entropy_fusion_impl = "te"
+    # Other model options are the transformer's (e.g. hidden_dropout), as WeLT's are its latent transformer's
+    for key, value in model_config.items():
+        if key not in ("transformer", "tokenizer", "load_pretrained", "trust_remote_code"):
+            if not hasattr(model, key):
+                raise ValueError(f"Unknown model option {key!r}")
+            setattr(model, key, value)
 
-    dataset = TokensDatasetProvider(tokenizer_name=model_config["tokenizer"], trust_remote_code=trust_remote_code,
-                                    **config["data"])
+    dataset = TokensDatasetProvider(tokenizer_name=model_config["tokenizer"],
+                                    **{"trust_remote_code": trust_remote_code} | config["data"])
     return build_config(config, model, dataset, vocab_size=model.vocab_size), None
 
 
