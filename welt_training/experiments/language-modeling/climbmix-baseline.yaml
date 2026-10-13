@@ -13,7 +13,7 @@ data:
 
 validation:
   eval_interval: 250
-  eval_iters: 1
+  eval_iters: 2
 
 logger:
   wandb_project: welt-language-modeling

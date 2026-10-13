@@ -31,8 +31,9 @@ an image encoder:
 | WeLT, matched params: bytes encoder and decoder each the size of the embedding table it replaces (50,304 × hidden) | `climbmix-welt.yaml` with [`models/bytes-<size>.json`](../models) | 256 words |
 | WeLT, matched FLOPs: bytes encoder and decoder sized so that training FLOPs per step match the baseline's (within 5%) | `climbmix-welt.yaml` with [`models/bytes-flops-<size>.json`](../models) | 256 words |
 
-Examples hold the same text (1.33 Pythia tokens per word). The first 32 documents are held out for validation: few
-enough that each model's validation examples are a single micro batch, so all models score exactly the same bytes.
+Examples hold the same text (1.33 Pythia tokens per word). The first 32 documents are held out for validation, and
+every evaluation scores all of them (`validation.eval_iters: 2` covers each model's 72-80 examples), so all models
+score the same bytes.
 The stream is shuffled within a 10,000 document buffer, and ClimbMix stores documents by topic cluster, so long runs
 drift across topics (alike for all models: comparisons at equal steps are fair).
 
@@ -70,7 +71,8 @@ Validation bits per byte after 10,000 steps (the best per latent transformer in 
 - WeLT over Pythia tokens beats WeLT over words from 25M on (0.010-0.025), also at equal FLOPs.
 - Trained 30,000 steps instead of 10,000, WeLT overtakes the baseline (25M: 1.058 vs. 1.075; 113M: 1.051 vs. 1.060).
 - With the 25M latent transformer, bigger byte models keep helping (1.145 with 1.1M parameters each, 1.043 with 27M,
-  1.034 with 54M), and the decoder carries most of it: a 27M decoder alone gains 0.048, a 27M encoder alone 0.011.
+  1.034 with 54M; `bytes-31m-half.json` is 6.8M, and `bytes-dec-70m.json` a 5.9M decoder for a 1.1M encoder at
+  matched FLOPs), and the decoder carries most of it: a 27M decoder alone gains 0.048, a 27M encoder alone 0.011.
 
 On a GB10, the baseline's steps are faster except with the 403M latent transformer: WeLT's small byte transformers are
 bound by memory bandwidth.

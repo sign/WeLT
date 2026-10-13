@@ -13,13 +13,13 @@ data:
   dataset_tokenizer: gpt2
   dataset_text_template: null
   seq_length: 256
-  # The first documents are held out for validation: few enough that every model's validation examples are one
-  # micro batch, so all models score exactly the same bytes
+  # The first documents are held out for validation, all of them scored at every evaluation (the same bytes for all
+  # models): 80 examples of WeLT (72 of the baseline), within eval_iters global batches
   max_eval_samples: 32
 
 validation:
   eval_interval: 250
-  eval_iters: 1
+  eval_iters: 2
 
 logger:
   wandb_project: welt-language-modeling

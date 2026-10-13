@@ -1,8 +1,11 @@
 import glob
+from pathlib import Path
 
 import pytest
 
 from welt_training.extendable_yaml import load_yaml
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_nested_extends_and_overrides(tmp_path):
@@ -15,23 +18,34 @@ def test_nested_extends_and_overrides(tmp_path):
                       "output_dir": "out", "train": {"train_iters": 5}, "optimizer": {"lr": 1e-4}}
 
 
-CONFIGS = sorted(glob.glob("welt_training/experiments/*/*.yaml") + ["benchmarks/welt-bench.yaml"])
+CONFIGS = sorted([*glob.glob(str(ROOT / "welt_training/experiments/*/*.yaml")),
+                  str(ROOT / "benchmarks/welt-bench.yaml")])
 
 
 @pytest.mark.parametrize("path", CONFIGS)
-def test_experiment_configs_build(path):
+def test_experiment_configs_reference_existing_models(path):
+    """Model configs given as JSON files exist (paths are relative to the repository)."""
+    for value in load_yaml(path)["model"].values():
+        if isinstance(value, str) and value.endswith(".json"):
+            assert (ROOT / value).exists(), value
+
+
+@pytest.mark.parametrize("path", CONFIGS)
+def test_experiment_configs_build(path, monkeypatch):
     """Every shipped config builds a Megatron-Bridge config (unknown options raise)."""
     pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
     from welt_training import baseline, train
 
     config = load_yaml(path)
+    monkeypatch.chdir(ROOT)  # Model JSON paths are relative to the repository
     (baseline if "transformer" in config["model"] else train).build(config)  # baseline: a causal LM
 
 
-def test_null_sections_and_model_overrides():
+def test_null_sections_and_model_overrides(monkeypatch):
     pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
     from welt_training import train
 
+    monkeypatch.chdir(ROOT)
     config = load_yaml("welt_training/experiments/easy-tasks/string-repetition.yaml",
                        ["optimizer=null", "model.hidden_dropout=0.2"])
     cfg, _ = train.build(config)
@@ -40,3 +54,15 @@ def test_null_sections_and_model_overrides():
         train.build(load_yaml("welt_training/experiments/easy-tasks/string-repetition.yaml", ["train.typo=1"]))
     with pytest.raises(ValueError, match="Unknown config sections"):
         train.build(load_yaml("welt_training/experiments/easy-tasks/string-repetition.yaml", ["optimiser.lr=0.1"]))
+
+
+def test_baseline_model_overrides(monkeypatch):
+    pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
+    from welt_training import baseline
+
+    monkeypatch.chdir(ROOT)
+    path = "welt_training/experiments/language-modeling/climbmix-baseline.yaml"
+    cfg, _ = baseline.build(load_yaml(path, ["model.hidden_dropout=0.2"]))
+    assert cfg.model.hidden_dropout == 0.2
+    with pytest.raises(ValueError, match="Unknown model option"):
+        baseline.build(load_yaml(path, ["model.typo=1"]))

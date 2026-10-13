@@ -1,4 +1,3 @@
-import contextlib
 import pickle
 import tempfile
 
@@ -131,6 +130,9 @@ def test_processor_save_and_load_works(processor):
         assert new_processor.renderer is not None
         assert new_processor.max_word_length == processor.max_word_length
         assert new_processor.pretokenize("hello world") == processor.pretokenize("hello world")
+        # Words longer than max_word_length are split alike (words-segmentation does not save max_bytes)
+        long_text = "internationalization " * 3
+        assert new_processor.pretokenize(long_text) == processor.pretokenize(long_text)
 
 
 def test_processor_save_and_load_works_without_renderer(text_processor):
@@ -163,11 +165,11 @@ def test_multiple_shift_blocks():
 
 
 def test_shift_blocks_do_not_span_packed_sequences(processor):
+    """A block cut between two sequences is two: to the end of the first, and from the start of the second."""
     words = ["a", SO, "b", SI, "c"]
-    with pytest.warns(UserWarning, match="ShiftOut without ShiftIn"):
-        result = processor.process_single_example(words, [3, 2])
-    assert result["block_ids"].tolist() == [0, 0, 0, 0, 0]
-    assert result["label_mask"].all()
+    result = processor.process_single_example(words, [3, 2])
+    assert result["block_ids"].tolist() == [0, 1, 1, 2, 0]
+    assert result["label_mask"].tolist() == [True, False, True, True, True]
 
 
 def test_bpe_pretokenizer_words_are_text_spans():
@@ -181,6 +183,16 @@ def test_bpe_pretokenizer_words_are_text_spans():
     assert ControlTokens.ShiftIn in words
 
 
+def test_bpe_pretokenizer_splits_long_tokens():
+    """Tokens longer than max_word_length (with BOS and EOS), e.g. Pythia's runs of spaces, are split, not truncated."""
+    processor = TextImageProcessor.create(max_word_length=8, render_images=False,
+                                          pretokenizer_name="EleutherAI/pythia-14m")
+    text = "a" + " " * 20 + "שלוםשלום"
+    words = processor.pretokenize(text)
+    assert "".join(words) == ControlTokens.StartOfText + text
+    assert all(len(word.encode()) <= 6 for word in words)
+
+
 def test_collate_fn_pads_every_dimension_and_keeps_dtypes():
     batch = [{"mask": torch.tensor([[True, False]]), "ids": torch.tensor([1])},
              {"mask": torch.tensor([[True], [True]]), "ids": torch.tensor([2, 3])}]
@@ -191,7 +203,7 @@ def test_collate_fn_pads_every_dimension_and_keeps_dtypes():
     assert torch.equal(collated["ids"], torch.tensor([[1, 0], [2, 3]]))
 
 
-@pytest.mark.parametrize("seq_length", [16, 40, 128])
+@pytest.mark.parametrize("seq_length", [5, 8, 16, 40, 128])  # Short: documents split across examples
 def test_labels_match_an_oracle_of_the_words(text_processor, seq_length):
     """The labels the model derives (next_word_labels) on packed examples, against labels from the words alone."""
     documents = [text_processor.pretokenize(text) for text in ORACLE_TEXTS * 2]
@@ -201,6 +213,8 @@ def test_labels_match_an_oracle_of_the_words(text_processor, seq_length):
         expected = oracle_labels(words, seq_lengths, continues)
         all_labels += [label for label in expected if label is not None]
         assert example["label_mask"].tolist() == [label is not None for label in expected]
+        if not example["label_mask"].any():  # A chunk within a shift block
+            continue
         labels = labels_of(example)[example["label_mask"]]
         tokenized = text_processor.tokenize_words([label for label in expected if label is not None]).input_ids[:, 1:]
         assert torch.equal(labels[:, :tokenized.size(1)], tokenized)
@@ -210,16 +224,15 @@ def test_labels_match_an_oracle_of_the_words(text_processor, seq_length):
                           if label is not None]
 
 
-@pytest.mark.parametrize(("words", "warning", "blocks"), [
-    (["a", "b", "c"], None, []),
-    (["a", SO, "b", SI, "c"], None, [(1, 3)]),
-    ([SO, SI, "c"], None, [(0, 1)]),
-    (["a", SO, "b", SI, "c", SO, "d", SI], None, [(1, 3), (5, 7)]),
-    (["a", SO, "b"], "ShiftOut without ShiftIn", []),
-    (["a", SI, "b"], "ShiftIn without ShiftOut", []),
-    (["a", SO, "b", SO, "c", SI], "nested shift blocks", [(3, 5)]),
+@pytest.mark.parametrize(("words", "blocks"), [
+    (["a", "b", "c"], []),
+    (["a", SO, "b", SI, "c"], [(1, 3)]),
+    ([SO, SI, "c"], [(0, 1)]),
+    (["a", SO, "b", SI, "c", SO, "d", SI], [(1, 3), (5, 7)]),
+    (["a", SO, "b"], [(1, 2)]),  # Cut at the end of a sequence: to its last word
+    (["a", SI, "b"], [(0, 1)]),  # Cut at its start: from its first word
+    (["a", SO, "b", SO, "c", SI], [(1, 5)]),  # A ShiftOut within a block belongs to it (as the baseline's regex)
 ])
-def test_shift_blocks(words, warning, blocks):
+def test_shift_blocks(words, blocks):
     """Shift blocks span ShiftOut to ShiftIn, inclusive."""
-    with pytest.warns(UserWarning, match=warning) if warning else contextlib.nullcontext():
-        assert list(get_shift_blocks(words)) == blocks
+    assert list(get_shift_blocks(words)) == blocks

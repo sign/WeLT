@@ -26,6 +26,7 @@ from vllm import LLM, PoolingParams, SamplingParams  # noqa: E402
 from vllm.config import PoolerConfig  # noqa: E402
 from words_segmentation.pretokenizer import is_word_complete  # noqa: E402
 
+from welt import ContextTooLongError  # noqa: E402
 from welt.patches import PatchEmbedding  # noqa: E402
 from welt.processor import TextImageProcessor, get_shift_blocks  # noqa: E402
 from welt.utf8 import UTF8LogitsProcessor  # noqa: E402
@@ -131,11 +132,17 @@ class WeLTGenerator:
 
     def generate(self, texts: list[str], max_generated_words: int = 50, temperature: float = 0.0,
                  seed: int | None = None) -> list[str]:
-        """Greedy (or sampled, with temperature) continuation of each text, word by word."""
+        """Greedy (or sampled, with temperature) continuation of each text."""
+        return ["".join(words) for words in self.generate_words(texts, max_generated_words, temperature, seed)]
+
+    def generate_words(self, texts: list[str], max_generated_words: int = 50, temperature: float = 0.0,
+                       seed: int | None = None) -> list[list[str]]:
+        """The words of each text's continuation, generated word by word (a text's own seed, when sampling)."""
         sequences = [self.processor.pretokenize(text) for text in texts]
         max_length = self.latent.llm_engine.model_config.max_model_len
         if any(len(words) + max_generated_words > max_length for words in sequences):
-            raise ValueError(f"Prompt words + max_generated_words exceed the latent's context ({max_length} words)")
+            raise ContextTooLongError(
+                f"Prompt words + max_generated_words exceed the latent's context ({max_length} words)")
         # A prompt ending mid-word continues that word: its bytes become the decoder's prefix
         max_prefix = self.processor.max_word_length - 3  # Words have at most max_word_length - 2 bytes; one is new
         prefixes = [b""] * len(texts)
@@ -149,7 +156,8 @@ class WeLTGenerator:
             if not active:
                 break
             # Words have at most max_word_length - 2 bytes (without BOS and EOS), as in training
-            sampling = [SamplingParams(temperature=temperature, seed=None if seed is None else seed + step,
+            sampling = [SamplingParams(temperature=temperature,
+                                       seed=None if seed is None else seed + step * len(texts) + i,
                                        max_tokens=self.processor.max_word_length - 2 - len(prefixes[i]),
                                        stop_token_ids=[EOS_TOKEN_ID], detokenize=False)
                         for i in active]
@@ -165,4 +173,4 @@ class WeLTGenerator:
                 sequences[i].append(word.decode("utf-8", errors="replace"))
                 still_active.append(i)
             active = still_active
-        return ["".join(words) for words in generated]
+        return generated

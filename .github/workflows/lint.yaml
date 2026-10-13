@@ -17,3 +17,5 @@ jobs:
 
       - name: Lint code
         uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.15.8"  # Pinned: a new ruff release adds rules

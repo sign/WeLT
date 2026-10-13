@@ -21,6 +21,8 @@ import urllib.request
 
 from flask import Flask, jsonify, request
 
+from welt import ContextTooLongError
+
 MODEL_TAG_HEADER = "X-Model-Tag"  # Which model revision served a response, from the MODEL_TAG environment variable
 EXPORT_DIR_ENV = "WELT_EXPORT_DIR"
 
@@ -60,13 +62,13 @@ def create_app(generator=None, model_tag: str | None = None) -> Flask:
         if not busy.acquire(blocking=False):
             return jsonify(message="Busy"), 503, {"Retry-After": "1"}
         try:
-            outputs = generator.generate(texts, **options)
-        except ValueError as error:  # e.g. a context longer than the model's
+            words = generator.generate_words(texts, **options)
+        except ContextTooLongError as error:
             return jsonify(message=str(error)), 400
         finally:
             busy.release()
-        generated_words = sum(len(generator.processor.pretokenize(output)) - 1 for output in outputs)  # Without BOS
-        return jsonify(outputs=outputs, generated_words=generated_words)
+        return jsonify(outputs=["".join(text_words) for text_words in words],
+                       generated_words=sum(len(text_words) for text_words in words))
 
     return app
 
@@ -94,8 +96,9 @@ def generate_main():
     parser.add_argument("--url", default="http://localhost:8080")
     parser.add_argument("--max_generated_words", type=int, default=50)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
-    outputs = generate(args.url, args.prompts, args.max_generated_words, args.temperature)["outputs"]
+    outputs = generate(args.url, args.prompts, args.max_generated_words, args.temperature, args.seed)["outputs"]
     for prompt, output in zip(args.prompts, outputs, strict=True):
         print(repr(prompt), "->", repr(output))
 

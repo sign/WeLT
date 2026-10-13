@@ -2,6 +2,7 @@
 ranks and dataloader workers. Examples are made from the texts on the fly, in the dataloader workers.
 Independent of Megatron."""
 import logging
+import re
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from itertools import count, cycle, islice
@@ -36,8 +37,8 @@ class TextDataConfig:
     eval_micro_batches: int = 1
     micro_batch_size: int = 1
 
-    def examples(self, split: str) -> IterableDataset:
-        """The raw examples of the train or validation split, streamed."""
+    def examples(self, split: str, rank: int = 0, world_size: int = 1) -> IterableDataset:
+        """The raw examples of the train or validation split, streamed; train examples of a data parallel rank."""
         has_validation = "validation" in get_dataset_split_names(self.dataset_name, self.dataset_config_name,
                                                                  data_files=self.data_files)
         dataset = load_dataset(self.dataset_name, self.dataset_config_name, data_files=self.data_files,
@@ -45,44 +46,55 @@ class TextDataConfig:
                                streaming=True)
         if split == "validation":
             return dataset.take(self.max_eval_samples)
+        # Split before skipping the held out validation examples: each is among the first of its rank's stream
+        # (whether ranks get whole files or every world_size-th example)
+        dataset = split_dataset_by_node(dataset, rank=rank, world_size=world_size)
         return dataset if has_validation else dataset.skip(self.max_eval_samples)
 
-    def texts(self, split: str) -> IterableDataset:
-        """The formatted (non-empty) texts of a split, streamed, as {"text": ...} examples."""
+    def text_formatter(self) -> Callable[[dict], str]:
+        """A raw example's text: decoded (dataset_tokenizer), formatted (dataset_text_template), without NULs."""
         template = self.dataset_text_template
         template = "".join(template) if isinstance(template, list) else template
         tokenizer = AutoTokenizer.from_pretrained(self.dataset_tokenizer) if self.dataset_tokenizer else None
 
-        def format_text(example):
+        def format_text(example: dict) -> str:
             if tokenizer is not None:
                 example = {"text": tokenizer.decode(example["tokens"])}
             if template is None and "text" not in example:
                 raise ValueError(f"No 'text' column (columns: {list(example)}), set data.dataset_text_template")
             text = example["text"] if template is None else template.format(**example)
-            return {"text": text.replace("\x00", "")}  # NUL is the PAD byte
+            return text.replace("\x00", "")  # NUL is the PAD byte
 
+        return format_text
+
+    def texts(self, split: str) -> IterableDataset:
+        """The formatted (non-empty) texts of a split, streamed, as {"text": ...} examples."""
+        format_text = self.text_formatter()
         dataset = self.examples(split)
-        return dataset.map(format_text, remove_columns=dataset.column_names).filter(lambda e: len(e["text"]) > 0)
+        return (dataset.map(lambda example: {"text": format_text(example)}, remove_columns=dataset.column_names)
+                .filter(lambda example: len(example["text"]) > 0))
 
 
 def train_texts(config: TextDataConfig, rank: int, world_size: int) -> Iterator[str]:
     """Endless shuffled train texts of this data parallel rank and dataloader worker: each worker reads its rank's
-    stream (shuffled alike) and keeps every num_workers-th text, so all workers make examples however many files
-    the dataset has. Epochs reshuffle."""
+    stream (shuffled alike), keeps every num_workers-th example, and formats only those, so all workers make examples
+    however many files the dataset has. Epochs reshuffle."""
     # ponytail: resuming from a checkpoint restarts the stream; track the texts consumed if exact resumption matters
-    dataset = split_dataset_by_node(config.texts("train").shuffle(seed=config.seed,
-                                                                  buffer_size=config.shuffle_buffer_size),
-                                    rank=rank, world_size=world_size)
+    dataset = config.examples("train", rank, world_size).shuffle(seed=config.seed,
+                                                                 buffer_size=config.shuffle_buffer_size)
+    format_text = config.text_formatter()
     worker = torch.utils.data.get_worker_info()
     worker_id, num_workers = (worker.id, worker.num_workers) if worker is not None else (0, 1)
     for epoch in count():
         dataset.set_epoch(epoch)
         # .iter(), unlike __iter__, does not split the stream across dataloader workers by files
-        texts = (text for batch in dataset.iter(batch_size=1000) for text in batch["text"])
+        examples = (dict(zip(batch, values, strict=True)) for batch in dataset.iter(batch_size=1000)
+                    for values in zip(*batch.values(), strict=True))
         empty = True
-        for text in islice(texts, worker_id, None, num_workers):
-            empty = False
-            yield text
+        for example in islice(examples, worker_id, None, num_workers):
+            if text := format_text(example):
+                empty = False
+                yield text
         if empty:
             raise ValueError(f"No train texts for data parallel rank {rank}, dataloader worker {worker_id}")
 
@@ -101,8 +113,9 @@ class TrainExamples(torch.utils.data.IterableDataset):
 def build_iterators(config, make_examples: Callable[[Iterable[str]], Iterator[dict]], collate_fn,
                     rank: int, world_size: int):
     """Megatron's (external) train and validation iterators of micro batches, for a DatasetProvider with dataloader
-    options (num_workers, pin_memory, persistent_workers). Validation: the examples of the validation texts, split
-    across ranks, repeated to fill config.eval_micro_batches, the same ones at every evaluation."""
+    options (num_workers, pin_memory, persistent_workers). Validation: every example of the validation texts (split
+    across ranks) once, in config.eval_micro_batches micro batches, the same ones at every evaluation. Batches are
+    weighted by a "score": 1, or 0 for the copies that fill the remaining micro batches (and count for nothing)."""
     # The workers fork here, before this process makes (e.g. renders) any example: a fork while another thread holds
     # a lock (e.g. Pango's) deadlocks the children
     train = iter(torch.utils.data.DataLoader(
@@ -116,12 +129,12 @@ def build_iterators(config, make_examples: Callable[[Iterable[str]], Iterator[di
     examples = list(make_examples(texts))[rank::world_size]
     if not examples:
         raise ValueError(f"No validation examples for data parallel rank {rank} (from {len(texts)} texts)")
-    batches = [collate_fn(examples[i:i + config.micro_batch_size])
+    batches = [collate_fn(examples[i:i + config.micro_batch_size]) | {"score": torch.ones(())}
                for i in range(0, len(examples), config.micro_batch_size)]
     if len(batches) > config.eval_micro_batches:
-        logger.warning(f"Evaluations see {config.eval_micro_batches} of {len(batches)} validation micro batches, "
-                       "increase validation.eval_iters to see them all")
-    validation = [batches[i % len(batches)] for i in range(config.eval_micro_batches)]
+        raise ValueError(f"{len(batches)} validation micro batches, but evaluations see {config.eval_micro_batches}: "
+                         "increase validation.eval_iters to see them all")
+    validation = batches + [batches[0] | {"score": torch.zeros(())}] * (config.eval_micro_batches - len(batches))
     return train, cycle(validation)
 
 
@@ -152,3 +165,42 @@ def pack_words(sequences: Iterable[list[str]], seq_length: int) -> Iterator[tupl
             start += seq_length - 1
     if words:
         yield padded()
+
+
+SHIFT_BLOCK = re.compile("\x0e[^\x0f]*\x0f")
+
+
+def token_chunks(texts: Iterable[str], tokenizer, length: int) -> Iterator[tuple[list[int], list[int], list[int]]]:
+    """Tokenize texts, concatenate them (each after an EOS), and split into chunks of `length` tokens: (ids, loss
+    mask, UTF-8 bytes of each token's text). Chunks overlap by one token, so that every token is a label exactly once;
+    the last one is padded with EOS. The loss mask is 0 for the padding, and for the tokens within shift blocks
+    (after \x0E, up to \x0F). A token's bytes are the text since the previous token's end (0 for EOS, and for the
+    second part of a character split across tokens)."""
+    ids, mask, nbytes = [], [], []
+    for text in texts:
+        encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
+        blocks = [(match.start(), match.end()) for match in SHIFT_BLOCK.finditer(text)]
+        ids += [tokenizer.eos_token_id, *encoded.input_ids]
+        mask += [1, *(int(not any(start + 1 < end <= block_end for start, block_end in blocks))
+                      for _, end in encoded.offset_mapping)]
+        nbytes.append(0)
+        previous = 0
+        for _, end in encoded.offset_mapping:
+            nbytes.append(len(text[previous:max(end, previous)].encode()))
+            previous = max(end, previous)
+        while len(ids) >= length:
+            yield ids[:length], mask[:length], nbytes[:length]
+            ids, mask, nbytes = ids[length - 1:], mask[length - 1:], nbytes[length - 1:]
+    if len(ids) > 1:
+        padding = length - len(ids)
+        yield ids + [tokenizer.eos_token_id] * padding, mask + [0] * padding, nbytes + [0] * padding
+
+
+def token_examples(texts: Iterable[str], tokenizer, length: int) -> Iterator[dict]:
+    """Token chunks of length + 1 as inputs, labels, their loss mask, the UTF-8 bytes of each scored label, and which
+    labels are scored text (not EOS)."""
+    for ids, loss_mask, nbytes in token_chunks(texts, tokenizer, length + 1):
+        ids, loss_mask = torch.tensor(ids), torch.tensor(loss_mask[1:])
+        yield {"input_ids": ids[:-1], "labels": ids[1:], "loss_mask": loss_mask,
+               "label_bytes": torch.tensor(nbytes[1:]) * loss_mask,
+               "text_mask": loss_mask * (ids[1:] != tokenizer.eos_token_id)}
