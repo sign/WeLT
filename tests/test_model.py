@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn.functional as F  # noqa: N812
+from utf8_tokenizer.tokenizer import PAD_TOKEN_ID
 
 pytest.importorskip("megatron.bridge", reason="Requires the NeMo container")
 
@@ -37,6 +38,18 @@ def test_forward_is_finite(model, processor):
     losses = word_losses(model, processor, ["hello world, how are you?", "short"])
     assert torch.isfinite(losses).all()
     assert (losses[0, :5] > 0).all()
+
+
+def test_bytes_encoder_ignores_eos(megatron, tiny_config, processor):
+    """The bytes encoder reads BOS and bytes only: a word's embedding does not depend on its EOS."""
+    model = build_model(tiny_config, image_encoder=False)
+    batch = processor(["hello world"])
+    ids = batch["input_ids"].cuda()
+    with torch.no_grad():
+        embeds = model.encode_words(ids)
+        last = (ids != PAD_TOKEN_ID).sum(-1, keepdim=True) - 1  # Each word's EOS
+        other = ids.scatter(-1, last.clamp(min=0), 1) * (ids != PAD_TOKEN_ID)  # A different id in its place
+        assert torch.equal(model.encode_words(other), embeds)
 
 
 def test_attention_no_look_ahead(model, processor):

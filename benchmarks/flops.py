@@ -61,7 +61,7 @@ def step_flops(config: dict, batches: int = 20) -> dict[str, float]:
         for kind, encoded in [("model", words), ("hardware", list(dict.fromkeys(words)))]:
             flops = common
             if "bytes_encoder" in configs:
-                flops += transformer_flops(configs["bytes_encoder"], [n for _, n, _ in encoded])
+                flops += transformer_flops(configs["bytes_encoder"], [n - 1 for _, n, _ in encoded])  # BOS, bytes
             if "image_encoder" in configs:
                 flops += transformer_flops(configs["image_encoder"], [p + 1 for _, _, p in encoded])
             totals[kind] += flops

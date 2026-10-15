@@ -24,7 +24,8 @@ has an embedding, and the latent transformer sees one vector per word.
 
 ## Model Setup
 
-- **Bytes Encoder** - A transformer over the bytes of each word, used bidirectionally. Its first (BOS) output is the word embedding.
+- **Bytes Encoder** - A transformer over BOS and the bytes of each word (not EOS, which the bidirectional encoder
+  does not need), used bidirectionally. Its first (BOS) output is the word embedding.
 - **Image Encoder** - A transformer over the 16x16 patches of each rendered word
   ([NaViT](https://arxiv.org/abs/2307.06304)-style: native size, with learned row and column embeddings, packed
   without padding; used bidirectionally). Its CLS output is the word embedding.
