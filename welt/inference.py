@@ -95,7 +95,7 @@ class WeLTGenerator:
             embeds.append(self._pooled(self.image_encoder, prompts, params))
         if self.bytes_encoder is not None:
             tokenized = self.processor.tokenize_words(words)
-            prompts = [{"prompt_token_ids": ids[mask.bool()].tolist()}
+            prompts = [{"prompt_token_ids": ids[mask.bool()][:-1].tolist()}  # Without EOS, as WeLTModel.encode_words
                        for ids, mask in zip(tokenized.input_ids, tokenized.attention_mask, strict=True)]
             embeds.append(self._pooled(self.bytes_encoder, prompts, params))
         embeds = self._map(torch.cat(embeds, dim=-1).to(self.device), "encoder").cpu()

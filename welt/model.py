@@ -338,7 +338,10 @@ class WeLTModel(MegatronModule):
             patches = input_patches.view(-1, input_patches.size(-1))[index]
             embeds.append(self.image_encoder(patches, shapes[rows]))
         if self.bytes_encoder is not None:
-            embeds.append(self.bytes_encoder(input_ids[rows], words_mask[rows]))
+            # The bytes encoder reads each word's BOS and bytes, not its EOS: the decoder's target, it tells the
+            # (bidirectional) encoder nothing its length does not
+            mask = words_mask[rows]
+            embeds.append(self.bytes_encoder(input_ids[rows], mask & (mask.cumsum(-1) < mask.sum(-1, keepdim=True))))
 
         embeds = torch.cat(embeds, dim=-1)
         word_embeds = embeds.new_zeros(B * L, embeds.size(-1))
